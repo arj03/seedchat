@@ -22,6 +22,7 @@ const relayUrlInput = document.getElementById("relay-url");
 const relayRoomInput = document.getElementById("relay-room");
 const relayConnectBtn = document.getElementById("connect-relay");
 const relayNewRoomBtn = document.getElementById("new-room");
+const relayCopyInviteBtn = document.getElementById("copy-invite");
 const relayStatus = document.getElementById("relay-status");
 const appStatus = document.getElementById("app-status");
 const frame = document.getElementById("app-frame");
@@ -993,11 +994,34 @@ const signaling = {
   close() { if (relayWs) { try { relayWs.close(); } catch {} } },
 };
 
+// The room's contact secret: 32 bytes, or null for an open room — we answer anyone who
+// finds the room name. Set from the invite link's `#` fragment on load, or minted by
+// "Random"; the sharing machinery is further down, under "Room secret".
+//
+// Declared HERE, above the RtcNetwork that reads it, rather than beside that machinery:
+// `let` is not hoisted like `var`, so a declaration below this point would leave the
+// getter reading a temporal-dead-zone binding. Nothing reads it during module evaluation
+// today, which means that would be a latent throw waiting for the first code path that
+// touches a link earlier — not a failure we would see now.
+let roomSecret = null;
+
+//
+// Both hooks read it LAZILY, and that is deliberate: this RtcNetwork is built once at
+// module scope, but the room — and therefore the secret — can change at runtime when the
+// user connects to a different one. A plain `contactSecret: roomSecret` would freeze
+// whatever was known at page load, so the first room you joined would be the only one you
+// could ever be reached in. The getter is read afresh each time a link is set up.
+//
+// The two hooks are the two directions: `contactSecret` is what we demand of peers
+// dialing US, `peerContactFor` is what we present when WE dial. A chat room is
+// symmetric — everyone accepts and dials — so both are the same value.
 const net = new RtcNetwork({
   identity: myKeys,
   sodium,
   signaling,
   rtcConfig: RTC_CONFIG,
+  get contactSecret() { return roomSecret ?? undefined; },
+  peerContactFor: () => roomSecret ?? undefined,
   onPeerUp: (peerId) => {
     shellPrint(`P2P link to ${peerId.slice(0, 8)} open`, "sys");
     deliverSys(`P2P link to ${peerId.slice(0, 8)} open`);
@@ -1280,6 +1304,10 @@ function connectRelay() {
   }
   const url = buildRelayUrl(base, room);
   if (!url) { shellPrint("Relay URL must be ws:// or wss://.", "err"); return; }
+  // Keep the address bar in step with a hand-typed room, so "Copy invite link" (and the
+  // browser's own copy-URL) always describe the room we are actually joining.
+  syncHash();
+  updateRoomGateHint();
   if (relayWs) { try { relayWs.close(); } catch {} }
   const label = room || DEFAULT_ROOM;
   shellPrint(`Connecting to ${url} (room: ${label})...`, "sys");
@@ -1297,6 +1325,11 @@ function connectRelay() {
     // forever.
     sessionStorage.setItem("chat.relayUrl", base);
     sessionStorage.setItem("chat.relayRoom", room);
+    // The secret belongs to the room, so it is saved and cleared with it — a reload must
+    // not rejoin a gated room having forgotten the credential, nor keep a stale secret
+    // after moving to an open one.
+    if (roomSecret) sessionStorage.setItem("chat.roomSecret", bytesToHex(roomSecret));
+    else sessionStorage.removeItem("chat.roomSecret");
     // Flush any signals RtcNetwork queued while the socket was down, then
     // announce ourselves into the room so the WebRTC dance can begin.
     for (const s of signalOutbox) relayWs.send(s);
@@ -1330,16 +1363,88 @@ relayRoomInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); connectRelay(); }
 });
 
-// Generate a short random room name. 64 bits of entropy — plenty to keep
-// a private room private without making the string a pain to share. We
-// stick to lowercase hex so it round-trips through case-insensitive copy
-// paths (URLs, chat clients) without surprises.
+// ── Room secret: the credential that rides in the invite link ────────────────
+//
+// The room NAME is routing — the relay needs it to forward our signaling, so it is
+// necessarily visible to whoever runs the relay. The room SECRET is the credential, and
+// it travels in the URL fragment (`#`), which browsers never put on the wire. So one
+// pasteable link carries both halves while the relay only ever learns the half it needs.
+// That is the whole point: a relay you do not control can carry your signaling without
+// being able to join the conversation.
+//
+// `roomSecret` itself is declared up beside the RtcNetwork that reads it (see there for
+// why). null ⇒ open room: we answer anyone who finds the name. Fine for `global` on a
+// laptop, not for anything else.
+
+/** Read `#room=<name>&s=<64 hex>` from the current URL. Both parts optional. */
+function inviteFromHash() {
+  const raw = location.hash.startsWith("#") ? location.hash.slice(1) : location.hash;
+  if (!raw) return {};
+  const q = new URLSearchParams(raw);
+  const room = q.get("room") ?? undefined;
+  const s = q.get("s") ?? undefined;
+  return {
+    room: room && ROOM_NAME_RE.test(room) ? room : undefined,
+    secret: s && /^[0-9a-f]{64}$/i.test(s) ? hexToBytes(s.toLowerCase()) : undefined,
+  };
+}
+
+/** Mirror the current room + secret into the address bar without adding history
+ *  entries, so a reload or a "copy URL" from the browser chrome keeps working. */
+function syncHash() {
+  const room = relayRoomInput.value.trim();
+  const q = new URLSearchParams();
+  if (room) q.set("room", room);
+  if (roomSecret) q.set("s", bytesToHex(roomSecret));
+  const hash = q.toString();
+  history.replaceState(null, "", hash ? `#${hash}` : location.pathname + location.search);
+}
+
+/** Reflect gated/open in the panel, since a wrong or missing secret has no error path —
+ *  a refused peer is simply one that never appears. Telling the user which mode they are
+ *  in is the only warning we can give. */
+function updateRoomGateHint() {
+  const el = document.getElementById("room-gate-hint");
+  if (!el) return;
+  el.innerHTML = roomSecret
+    ? "This room is <strong>gated</strong> — peers need the secret from your invite link. " +
+      "Share the link, not just the room name."
+    : "This room is <strong>open</strong> — anyone who learns the name can join. " +
+      "Press <strong>Random</strong> for a private room with a secret.";
+}
+
+// "Random": mint a private room AND its secret together. 64 bits of room name is plenty
+// to keep two rooms from colliding; the secret is a full 32 bytes because it is the
+// actual credential and is never guessed at, only pasted. Lowercase hex throughout so
+// both round-trip through case-insensitive copy paths (URLs, chat clients) unchanged.
 relayNewRoomBtn.addEventListener("click", () => {
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
   relayRoomInput.value = bytesToHex(bytes);
+  roomSecret = new Uint8Array(32);
+  crypto.getRandomValues(roomSecret);
+  syncHash();
+  updateRoomGateHint();
+  shellPrint("New private room + secret minted — use \"Copy invite link\" to share both.", "sys");
   relayRoomInput.focus();
   relayRoomInput.select();
+});
+
+// The invite link is page URL + `#room=…&s=…`. Clipboard access can be denied or absent
+// (file://, older browsers), so fall back to printing it into the shell log where it can
+// still be selected by hand — never leave the user with a button that silently does
+// nothing.
+relayCopyInviteBtn.addEventListener("click", async () => {
+  syncHash();
+  const link = location.href;
+  try {
+    await navigator.clipboard.writeText(link);
+    shellPrint(roomSecret
+      ? "Invite link copied — it carries the room AND its secret. Anyone with it can join."
+      : "Invite link copied (open room — no secret; press \"Random\" for a private one).", "sys");
+  } catch {
+    shellPrint(`Copy failed — here is the link: ${link}`, "sys");
+  }
 });
 
 // Default relay URL: same host the page is loaded from (so phones loading
@@ -1357,8 +1462,26 @@ function defaultRelayUrl() {
 // entries for our previous tab.
 const savedRelayUrl = sessionStorage.getItem("chat.relayUrl");
 const savedRelayRoom = sessionStorage.getItem("chat.relayRoom");
+const savedRoomSecret = sessionStorage.getItem("chat.roomSecret");
 relayUrlInput.value = savedRelayUrl || defaultRelayUrl();
 if (savedRelayRoom) relayRoomInput.value = savedRelayRoom;
+if (savedRoomSecret && /^[0-9a-f]{64}$/.test(savedRoomSecret)) roomSecret = hexToBytes(savedRoomSecret);
+
+// An invite link WINS over the saved session: following someone's link is an explicit
+// instruction to join their room, whereas sessionStorage is just where we happened to be
+// last. Taking the room without its secret (or vice versa) would produce a peer that
+// cannot link and cannot be told why, so the two move together — an invite naming a room
+// with no `s` means that room is open, and must clear any secret we were holding.
+const invite = inviteFromHash();
+if (invite.room !== undefined || invite.secret !== undefined) {
+  if (invite.room !== undefined) relayRoomInput.value = invite.room;
+  roomSecret = invite.secret ?? null;
+  shellPrint(invite.secret
+    ? `Invite link: room "${relayRoomInput.value || DEFAULT_ROOM}" (gated).`
+    : `Invite link: room "${relayRoomInput.value || DEFAULT_ROOM}" (open — no secret).`, "sys");
+}
+updateRoomGateHint();
+syncHash();
 if (savedRelayUrl) connectRelay();
 
 // Initial peer / call status. (relay pill is already in its "off" default

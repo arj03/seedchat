@@ -156,11 +156,17 @@
     <div class="row">
       <button id="connect-relay" class="primary" type="button">Connect</button>
       <button id="new-room" type="button">Random</button>
+      <button id="copy-invite" type="button">Copy invite link</button>
       <span id="relay-status" class="sys relay-status">not connected</span>
     </div>
-    <p class="hint">Pick a room name and share it with the peers you want to meet — only clients
+    <p class="hint" id="room-gate-hint">Pick a room name and share it with the peers you want to meet — only clients
       in the same room see each other. Leave empty for the default <code>global</code> room
       (allowed chars: <code>A-Z a-z 0-9 . _ -</code>).</p>
+    <p class="hint"><strong>Random</strong> mints a private room <em>and</em> a contact secret, then
+      <strong>Copy invite link</strong> gives you one URL carrying both. The secret lives in the link's
+      <code>#</code> fragment, which browsers never send to a server — so the relay forwards your
+      signaling without being able to join the room itself. A peer that cannot produce the secret
+      draws no response at all. Without one the room is open: anyone who learns its name can join.</p>
     <p class="hint">Start a relay locally with <code>node scripts/relay.mjs</code>, or point at a
       public one your group trusts.</p>
   </div>
