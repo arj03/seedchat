@@ -6,6 +6,7 @@
 import sodium from "seedkernel-wasm/libsodium";
 import { createShell, KernelHost } from "seedkernel-wasm/shell-core";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
+import { withMlDsa65, loadMlDsa65 } from "seedkernel-wasm/pq";
 import { signManifest, packBundle,
          genesisHash, kernelNameFor, appKeyFor, handlesOf,
          unpackBundle, verifyManifest, FreshnessMarks, MANIFEST_FILE, moduleFile }
@@ -103,6 +104,17 @@ shellPrint("Starting the handler table...", "sys");
 // libsodium instantiates its wasm asynchronously; every crypto call below — identity
 // generation, manifest signing, genesis hashing — needs it ready first.
 await sodium.ready;
+
+// ML-DSA-65 for manifest suite 0x02 (§12.4, §14.1), from the same mldsa65.wasm Node
+// reads and the Go loader embeds — so this shell admits exactly the bundles they
+// admit. It is loaded at boot rather than on first hybrid manifest because
+// verifyManifest is synchronous: the method is either on `sodium` before the first
+// verify or the bundle is refused as an unsupported suite.
+//
+// This shell still SIGNS suite 0x01. Verifying comes first on purpose — every node
+// must be able to check a hybrid manifest before any node starts producing one.
+withMlDsa65(sodium, await loadMlDsa65(
+  await (await fetch(new URL("./vendor/mldsa65.wasm", import.meta.url))).arrayBuffer()));
 
 // The shell (kernel host + admission policy + bundle loader) is assembled once the
 // identity and the RtcNetwork exist — see the boot sequence in the networking section

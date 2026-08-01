@@ -96,6 +96,18 @@ for (const f of ["libsodium-wrappers.mjs", "libsodium-core.mjs", "libsodium.wasm
   cpSync(src, resolve(vendor, f));
 }
 
+// ML-DSA-65 for manifest suite 0x02 (§12.4). The same artifact Node reads and the Go
+// loader embeds, so chat admits exactly the bundles they admit; the shell fetches it
+// by URL rather than importing it, so it does not need to sit beside a JS module.
+{
+  const src = resolve(pkgRoot, "browser/mldsa65.wasm");
+  if (!existsSync(src)) {
+    console.error("missing mldsa65.wasm — in the kernel checkout: cd WASM && npm run build:pq");
+    process.exit(2);
+  }
+  cpSync(src, resolve(vendor, "mldsa65.wasm"));
+}
+
 console.log("vendored seedkernel-wasm -> browser/vendor/");
 console.log("serve it:   npm run serve        (re-vendors + http-server with caching OFF)");
 console.log("  ── DO NOT use a plain `http-server` without -c-1: its default max-age=3600 makes");
