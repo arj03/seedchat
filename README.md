@@ -20,7 +20,9 @@ chat makes into the runtime has to go through a published entry point.
 | `browser/chat-shell.*` | The browser shell: identity, admission policy, WebRTC wiring, the sandboxed iframe. Roughly 2,200 lines. |
 | `scripts/embed-ui.mjs` | Appends a `ui` custom section to a built `.wasm`. |
 | `scripts/embed-meta.mjs` | Appends an `app_meta` JSON custom section (id, name, version). |
-| `scripts/vendor.mjs` | Copies the kernel's built host into `browser/vendor/` for a bundler-free static serve. |
+| `scripts/vendor.mjs` | Copies the kernel's built host into `browser/vendor/` for a bundler-free static serve, refusing a stale (un-minified-since-compile) kernel build. |
+| `scripts/relay.mjs` | The WebSocket signaling rendezvous for the WebRTC mesh. App-neutral — seed store points at this file too. |
+| `scripts/clean.mjs` | Deletes `build/` and `browser/vendor/` when a rebuild isn't taking. |
 
 `ui` and `app_meta` are **chat-shell conventions, not runtime contracts** — the
 kernel never reads either section. They live here because the reader lives here.
@@ -58,8 +60,20 @@ cd ../../seedchat && npm install && npm run build
 # 3. signaling rendezvous for the WebRTC mesh (kill it once channels are open)
 npm run relay
 
-# 4. serve browser/ over HTTPS and open chat-shell.html in two browsers
+# 4. in another terminal: re-vendor + serve browser/ with caching off
+npm run serve        # → http://localhost:3000/chat-shell.html, open it in two browsers
 ```
+
+`serve` passes `-c-1`, which is not optional in practice: a plain `http-server`
+defaults to `max-age=3600`, so after a rebuild the browser keeps serving a stale
+`vendor/host` and the shell fails in ways that look like kernel bugs. If a rebuild
+still doesn't take, `npm run clean && npm run build` starts from nothing. `vendor`
+also refuses to run when the kernel's `build/host-min` is older than its
+`build/host` — the silent divergence where the kernel's own tests stay green
+against fresh code while chat serves the last minified build.
+
+`localhost` is a secure context, so plain HTTP is enough for WebRTC when both tabs
+are on this machine; reaching the shell from another device needs HTTPS.
 
 Load an app by picking `build/chat-app-v1.wasm` (or `v2`) in the shell — it
 builds a signed one-module bundle from the local identity, verifies it, and the
