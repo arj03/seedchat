@@ -1,0 +1,19 @@
+{
+  "name": "seedchat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "vendor": "node scripts/vendor.mjs",
+    "build:chat-app-v1": "asc assembly/chat-app-v1/index.ts --config asconfig.chat-app-v1.json --target release && node scripts/embed-ui.mjs build/chat-app-v1.wasm assembly/chat-app-v1/ui.html build/chat-app-v1.wasm && node scripts/embed-meta.mjs build/chat-app-v1.wasm build/chat-app-v1.wasm \"{\\\"id\\\":\\\"chat\\\",\\\"name\\\":\\\"Chat\\\",\\\"version\\\":\\\"v1\\\",\\\"description\\\":\\\"text only\\\"}\"",
+    "build:chat-app-v2": "asc assembly/chat-app-v2/index.ts --config asconfig.chat-app-v2.json --target release && node scripts/embed-ui.mjs build/chat-app-v2.wasm assembly/chat-app-v2/ui.html build/chat-app-v2.wasm && node scripts/embed-meta.mjs build/chat-app-v2.wasm build/chat-app-v2.wasm \"{\\\"id\\\":\\\"chat\\\",\\\"name\\\":\\\"Chat\\\",\\\"version\\\":\\\"v2\\\",\\\"description\\\":\\\"text + image + nick\\\"}\"",
+    "build": "npm run build:chat-app-v1 && npm run build:chat-app-v2 && npm run vendor",
+    "relay": "node node_modules/seedkernel-wasm/scripts/relay.mjs"
+  },
+  "dependencies": {
+    "seedkernel-wasm": "file:../seedkernel/WASM"
+  },
+  "devDependencies": {
+    "assemblyscript": "0.28.14"
+  }
+}
