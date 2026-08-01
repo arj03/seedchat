@@ -1,5 +1,7 @@
 {
-  "entries": ["assembly/chat-app-v1/index.ts"],
+  "entries": [
+    "assembly/chat-app-v1/index.ts"
+  ],
   "targets": {
     "release": {
       "outFile": "build/chat-app-v1.wasm",
@@ -12,6 +14,7 @@
     }
   },
   "options": {
-    "bindings": "raw"
+    "bindings": "raw",
+    "maximumMemory": 256
   }
 }
