@@ -21,22 +21,22 @@
 import { cpSync, mkdirSync, existsSync, rmSync, readdirSync, statSync, copyFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createRequire } from "node:module";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
-const require = createRequire(import.meta.url);
 
-// Resolve the dependency through Node rather than assuming ../seedkernel — this
-// works the same whether it is a file: link, a git dep, or a published tarball.
-let pkgRoot;
-try {
-  pkgRoot = dirname(require.resolve("seedkernel-wasm/package.json"));
-} catch {
+// The kernel is a sibling checkout by declaration: package.json pins
+// `file:../seedkernel/WASM`, and the kernel is `private: true` and never published.
+// So name that path, the same way seed store's build-browser-demo.mjs does. Resolving
+// it through Node instead would defend against install shapes the dependency spec has
+// already ruled out, and would do it by reaching for `seedkernel-wasm/package.json` —
+// a subpath that resolves only while the kernel's `exports` map carries an entry
+// nothing else needs.
+const pkgRoot = resolve(root, "..", "seedkernel", "WASM");
+if (!existsSync(pkgRoot)) {
   console.error(
-    "cannot resolve seedkernel-wasm.\n" +
-    "  npm install, and make sure the dependency points at a built checkout\n" +
-    "  (in the checkout: cd WASM && npm install && npm run build)"
+    `seedkernel-wasm not found at ${pkgRoot}.\n` +
+    "  check it out beside this repo, then: cd WASM && npm install && npm run build"
   );
   process.exit(2);
 }
