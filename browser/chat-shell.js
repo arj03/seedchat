@@ -6,9 +6,12 @@
 import sodium from "seedkernel-wasm/libsodium";
 import { createShell, KernelHost } from "seedkernel-wasm/shell-core";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
+import { createSafeRealm } from "seedkernel-wasm/safe-js";
+import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
+import { withMlDsa65, loadMlDsa65 } from "seedkernel-wasm/pq";
 import { signManifest, packBundle,
          genesisHash, kernelNameFor, appKeyFor, handlesOf,
-         unpackBundle, verifyManifest, FreshnessMarks, MANIFEST_FILE, moduleFile }
+         unpackBundle, verifyManifest, verifyBundle, FreshnessMarks, MANIFEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
 
 const RTC_CONFIG = { iceServers: [{ urls: [
@@ -104,9 +107,38 @@ shellPrint("Starting the handler table...", "sys");
 // generation, manifest signing, genesis hashing — needs it ready first.
 await sodium.ready;
 
+// ML-DSA-65 for manifest suite 0x02 (§12.4, §14.1), from the same mldsa65.wasm Node
+// reads and the Go loader embeds — so this shell admits exactly the bundles they
+// admit. It is loaded at boot rather than on first hybrid manifest because
+// verifyManifest is synchronous: the method is either on `sodium` before the first
+// verify or the bundle is refused as an unsupported suite.
+//
+// This shell still SIGNS suite 0x01. Verifying comes first on purpose — every node
+// must be able to check a hybrid manifest before any node starts producing one.
+withMlDsa65(sodium, await loadMlDsa65(
+  await (await fetch(new URL("./vendor/mldsa65.wasm", import.meta.url))).arrayBuffer()));
+
+// The transport bundle — the kernel-shipped signed program that IS the network
+// (§12.6): the channel AKE, the record layer, link routing and the request/
+// response layer run as a confined guest (transport/guest.js), signed into a
+// `role: "transport"` bundle and embedded in the host as TRANSPORT_BUNDLE_B64.
+// Admitting it below stands the shell's transport driver up; chat's own app
+// bundles are handler-only and never claim a role.
+const TRANSPORT_BYTES = (() => {
+  const bin = atob(TRANSPORT_BUNDLE_B64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+})();
+// The author id of that exact artifact. The admit gate below pins the transport
+// slot to it — the browser equivalent of an operator's `roles.transport` policy
+// entry (§12.5) — so a bundle a PEER offers can never displace the shipped
+// transport, whatever its manifest claims.
+const transportAuthorHex = bytesToHex(verifyBundle(sodium, TRANSPORT_BYTES).author);
+
 // The shell (kernel host + admission policy + bundle loader) is assembled once the
-// identity and the RtcNetwork exist — see the boot sequence in the networking section
-// below. It is declared here because handlers defined above reach it through `shell`.
+// identity exists — see the boot sequence below. It is declared here because handlers
+// defined above reach it through `shell`.
 //
 // Ongoing-consent admission (§12.4): the user approves each unique bundle before it
 // runs. `pendingApprovals` holds the module hashes the user has consented to; the
@@ -114,6 +146,12 @@ await sodium.ready;
 // open policy, so consent — not a static author allow-list — is this shell's gate.
 const pendingApprovals = new Set();
 let shell;
+// The WebRTC socket seam over the transport driver, and the state that tracks
+// whether the standing driver still matches the room's current secret — see
+// ensureTransport() in the networking section.
+let net = null;
+let transportSecret = null;
+let transportWired = false;
 
 // ─── per-tab Ed25519 identity ──────────────────────────────────────────
 let myKeys;
@@ -137,15 +175,46 @@ const myPkHex = bytesToHex(myKeys.publicKey);
 
 shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 
+// Assemble the shared shell now that the identity exists. The platform is a browser
+// seam: sodium, our identity, a WebAssembly-backed handler table, an in-memory
+// freshness store — and NO network. The transport is no longer a platform member: it
+// is a signed bundle admitted below, which stands the driver (the shell's `net` /
+// `transport`) up. The `contactSecret` getter is read at that install moment, so a
+// room secret minted after boot still gates this node's accepting side (§12.6.3).
+//
+// The QuickJS realm factory (safe-js) is supplied because the transport bundle is a
+// guest program that needs a realm to run in; chat's own apps are handler-only and
+// never pay for one. Admission is deferred to `admit` (user consent), except for the
+// transport bundle itself, which is admitted by author pin.
+shell = createShell({
+  platform: {
+    sodium,
+    identity: myKeys,
+    kernel: new KernelHost(),
+    freshnessStore: new FreshnessMarks(),
+    get contactSecret() { return roomSecret ?? undefined; },
+    createRealm: async (o) => createSafeRealm(o),
+  },
+  admit(v) {
+    if (v.manifest.role === "transport") {
+      return bytesToHex(v.author) === transportAuthorHex;
+    }
+    const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
+    if (!pendingApprovals.has(bytesHashHex)) return false;
+    pendingApprovals.delete(bytesHashHex);
+    return true;
+  },
+});
+
 // ─── channel identity ──────────────────────────────────────────────────
 //
-// Transport identity is the RtcNetwork's job. Each data channel runs PeerLink's
-// in-channel HELLO/AUTH challenge, proving the far end holds the kernel private
-// key for the pubkey it claims — a continuous channel binding that subsumes the
-// old SDP a=fingerprint signing and any per-message signature. Frames the
-// RtcNetwork hands us are already attributed to an authenticated peer, so the
-// sender pubkey (`_from`) is authoritative — we prepend it to the message before
-// running the app transform; there is no envelope signer to verify.
+// Transport identity is the transport bundle's job. Each data channel runs its
+// in-channel HELLO/AUTH challenge (§12.6), proving the far end holds the kernel
+// private key for the pubkey it claims — a continuous channel binding that
+// subsumes the old SDP a=fingerprint signing and any per-message signature.
+// Frames the driver hands us are already attributed to an authenticated peer, so
+// the sender pubkey (`_from`) is authoritative — we prepend it to the message
+// before running the app transform; there is no envelope signer to verify.
 function bytesEqual(a, b) {
   if (!a || !b || a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -173,7 +242,7 @@ function setRelayPill(state, label) {
 }
 
 function updatePeerPill() {
-  const open = net.linkedPeers().length;
+  const open = net ? net.linkedPeers().length : 0;
   peerPillText.textContent = open === 1 ? "1 peer" : `${open} peers`;
   peerPill.classList.toggle("ok", open > 0);
 }
@@ -616,6 +685,7 @@ function dismissOffer(bytesHashHex) {
 }
 
 function broadcastToPeers(proto, payload) {
+  if (!net) return; // no transport yet — nothing to send to
   const protoBytes = new TextEncoder().encode(proto);
   for (const peerId of net.linkedPeers()) {
     shell.transport.send(peerId, protoBytes, payload);
@@ -635,7 +705,7 @@ function renderLocal(rec, payload) {
 function offerApp(key) {
   const rec = installedApps.get(key);
   if (!rec) return;
-  const linked = net.linkedPeers();
+  const linked = net ? net.linkedPeers() : [];
   for (const peerId of linked) {
     shell.transport.send(peerId, new TextEncoder().encode(OFFER_PROTO), rec.bundleBytes);
   }
@@ -964,15 +1034,18 @@ window.addEventListener("message", (ev) => {
 });
 
 // ---------------------------------------------------------------------------
-// Networking — RtcNetwork (host/net-rtc.ts) over a relay signaling channel.
+// Networking — the transport bundle under a WebRTC socket seam (RtcNetwork,
+// host/net-rtc.ts) over a relay signaling channel.
 //
-// The WebRTC mesh — perfect negotiation, the relay rendezvous, per-peer
-// identity, the unauthed-peer cap, ICE-restart recovery — all lives in
-// RtcNetwork now. This shell wires it up and sets Transport.onRequest for
-// protocol-based dispatch (§12.10) — one plane, one dispatch scheme. Channel
-// identity is PeerLink's in-channel HELLO/AUTH (host/net-link.ts), so any frame
-// handed to our sink is already attributed to an authenticated peer — `_from` is
-// that peer's pubkey, which we treat as the message author. No per-message signature.
+// The transport is now a signed bundle (see TRANSPORT_BYTES above): the channel
+// AKE, record layer, link routing and request/response layer run as its confined
+// guest program, driven by the shell's TransportHost. What net-rtc.ts contributes
+// is the WebRTC fabric — perfect negotiation, the relay rendezvous, the unauthed-
+// peer cap, ICE-restart recovery — each data channel handed to the driver's
+// openLink(). Channel identity is the transport's in-channel HELLO/AUTH (§12.6),
+// so any frame the driver hands to our sink is already attributed to an
+// authenticated peer — `_from` is that peer's pubkey, which we treat as the
+// message author. No per-message signature.
 // ---------------------------------------------------------------------------
 
 let lastSentNickBody = null;   // {proto, body} — replayed to peers that join mid-session
@@ -998,104 +1071,88 @@ const signaling = {
 // finds the room name. Set from the invite link's `#` fragment on load, or minted by
 // "Random"; the sharing machinery is further down, under "Room secret".
 //
-// Declared HERE, above the RtcNetwork that reads it, rather than beside that machinery:
-// `let` is not hoisted like `var`, so a declaration below this point would leave the
-// getter reading a temporal-dead-zone binding. Nothing reads it during module evaluation
-// today, which means that would be a latent throw waiting for the first code path that
-// touches a link earlier — not a failure we would see now.
+// Declared HERE, above the code that reads it, rather than beside that machinery:
+// `let` is not hoisted like `var`, so a declaration below this point would leave a
+// getter reading a temporal-dead-zone binding. Nothing reads it during module
+// evaluation today, which means that would be a latent throw waiting for the first
+// code path that touches it earlier — not a failure we would see now.
 let roomSecret = null;
 
-//
-// Both hooks read it LAZILY, and that is deliberate: this RtcNetwork is built once at
-// module scope, but the room — and therefore the secret — can change at runtime when the
-// user connects to a different one. A plain `contactSecret: roomSecret` would freeze
-// whatever was known at page load, so the first room you joined would be the only one you
-// could ever be reached in. The getter is read afresh each time a link is set up.
-//
-// The two hooks are the two directions: `contactSecret` is what we demand of peers
-// dialing US, `peerContactFor` is what we present when WE dial. A chat room is
-// symmetric — everyone accepts and dials — so both are the same value.
-const net = new RtcNetwork({
-  identity: myKeys,
-  sodium,
-  signaling,
-  rtcConfig: RTC_CONFIG,
-  get contactSecret() { return roomSecret ?? undefined; },
-  peerContactFor: () => roomSecret ?? undefined,
-  onPeerUp: (peerId) => {
-    shellPrint(`P2P link to ${peerId.slice(0, 8)} open`, "sys");
-    deliverSys(`P2P link to ${peerId.slice(0, 8)} open`);
-    updatePeerPill();
-    // Replay our last nick so a peer joining mid-session learns our identity
-    // without us re-sending it (chat v2 uses chatType 0x02 for nick).
-    if (lastSentNickBody && shell.bindings.boundApp(lastSentNickBody.proto)) {
-      const body = lastSentNickBody.body;
-      const chatBytes = new Uint8Array(1 + body.length);
-      chatBytes[0] = 0x02;
-      chatBytes.set(body, 1);
-      shell.transport.send(peerId, new TextEncoder().encode(lastSentNickBody.proto), chatBytes);
-    }
-  },
-  onPeerDown: (peerId) => {
-    shellPrint(`P2P link to ${peerId.slice(0, 8)} closed`, "sys");
-    updatePeerPill();
-    removeRemoteTile(peerId);
-    updateCallStatus();
-  },
-  onTrack: (peerId, track) => {
-    // A remote peer is sending media — attach the track to their tile. When it
-    // ends (they hung up, or their pc died) drop it; an empty tile goes away.
-    const tile = getOrCreateRemoteTile(peerId);
-    tile.stream.addTrack(track);
-    track.addEventListener("ended", () => {
-      try { tile.stream.removeTrack(track); } catch {}
-      if (tile.stream.getTracks().length === 0) removeRemoteTile(peerId);
+// Admit the kernel-shipped transport bundle (standing the shell's transport driver
+// up), then put the WebRTC socket seam under it. Runs lazily on the first relay
+// connect — nothing needs a network before that — and re-runs whenever the room
+// secret changed, because the driver's ACCEPTING-side gate reads the secret at
+// install time (§12.6.3): the re-install is the in-place upgrade path the shell
+// supports for a replaced transport bundle. The DIALING side stays fully dynamic —
+// `peerContactFor` is a hook the RtcNetwork reads afresh for every link.
+async function ensureTransport() {
+  const secret = roomSecret ?? undefined;
+  if (net && transportSecret === secret) return;
+  if (net) net = null; // links die with the outgoing driver's close below
+  await shell.loadBundleBlob(TRANSPORT_BYTES);
+  transportSecret = secret;
+  net = new RtcNetwork({
+    driver: shell.net,
+    signaling,
+    rtcConfig: RTC_CONFIG,
+    peerContactFor: () => roomSecret ?? undefined,
+    onPeerUp: (peerId) => {
+      shellPrint(`P2P link to ${peerId.slice(0, 8)} open`, "sys");
+      deliverSys(`P2P link to ${peerId.slice(0, 8)} open`);
+      updatePeerPill();
+      // Replay our last nick so a peer joining mid-session learns our identity
+      // without us re-sending it (chat v2 uses chatType 0x02 for nick).
+      if (lastSentNickBody && shell.bindings.boundApp(lastSentNickBody.proto)) {
+        const body = lastSentNickBody.body;
+        const chatBytes = new Uint8Array(1 + body.length);
+        chatBytes[0] = 0x02;
+        chatBytes.set(body, 1);
+        shell.transport.send(peerId, new TextEncoder().encode(lastSentNickBody.proto), chatBytes);
+      }
+    },
+    onPeerDown: (peerId) => {
+      shellPrint(`P2P link to ${peerId.slice(0, 8)} closed`, "sys");
+      updatePeerPill();
+      removeRemoteTile(peerId);
+      updateCallStatus();
+    },
+    onTrack: (peerId, track) => {
+      // A remote peer is sending media — attach the track to their tile. When it
+      // ends (they hung up, or their pc died) drop it; an empty tile goes away.
+      const tile = getOrCreateRemoteTile(peerId);
+      tile.stream.addTrack(track);
+      track.addEventListener("ended", () => {
+        try { tile.stream.removeTrack(track); } catch {}
+        if (tile.stream.getTracks().length === 0) removeRemoteTile(peerId);
+      });
+    },
+  });
+  if (!transportWired) {
+    transportWired = true;
+    // One plane, one dispatch scheme: the shell owns the shared dispatch (§12.10).
+    // An inbound frame names a protocol id; the shell resolves it through bindings
+    // to the installed app, calls the right handler, and returns the response.
+    // The only special protocol is _offer (bundle transit), which we handle
+    // directly. Wired here, on the standing driver, because the shell's
+    // `transport` face is a throw-until-loaded stub before that.
+    shell.transport.onRequest((from, proto, payload) => {
+      if (proto === OFFER_PROTO) {
+        handleOffer(payload, from).catch(() => {});
+        return null;
+      }
+      const result = shell.dispatch(from, proto, payload);
+      if (result) {
+        const appKey = shell.bindings.boundApp(proto);
+        if (appKey === activeAppKey) deliverRender(new Uint8Array(result));
+      }
+      return result;
     });
-  },
-});
-
-// Assemble the shared shell now that the identity and the RtcNetwork exist. The
-// platform is a browser seam: sodium, our identity, a WebAssembly-backed handler
-// table, an in-memory freshness store, and the RtcNetwork as the Network backend —
-// no fs and no createRealm, because a chat app is handler-only. Omitting the realm
-// factory is what keeps the QuickJS engine out of this page's module graph
-// entirely. Admission is deferred to `admit` (user consent).
-shell = createShell({
-  platform: {
-    sodium,
-    identity: myKeys,
-    kernel: new KernelHost(),
-    freshnessStore: new FreshnessMarks(),
-    network: net,
-  },
-  admit(v) {
-    const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
-    if (!pendingApprovals.has(bytesHashHex)) return false;
-    pendingApprovals.delete(bytesHashHex);
-    return true;
-  },
-});
-
-// One plane, one dispatch scheme: the shell owns the shared dispatch (§12.10).
-// An inbound frame names a protocol id; the shell resolves it through bindings
-// to the installed app, calls the right handler, and returns the response.
-// The only special protocol is _offer (bundle transit), which we handle directly.
-shell.transport.onRequest((from, proto, payload) => {
-  if (proto === OFFER_PROTO) {
-    handleOffer(payload, from).catch(() => {});
-    return null;
   }
-  const result = shell.dispatch(from, proto, payload);
-  if (result) {
-    const appKey = shell.bindings.boundApp(proto);
-    if (appKey === activeAppKey) deliverRender(new Uint8Array(result));
-  }
-  return result;
-});
+}
 
-// Boot the app registry now that the shell and the transport are wired: render the
-// (empty) lists, then pull back anything installed earlier this session so a
-// transitive Offer works the moment peers connect, from the saved signed bytes.
+// Boot the app registry now that the shell exists: render the (empty) lists, then
+// pull back anything installed earlier this session so a transitive Offer works the
+// moment peers connect, from the saved signed bytes.
 renderAppList();
 renderOfferList();
 restoreInstalledApps().catch((err) =>
@@ -1127,7 +1184,7 @@ function updateCallStatus() {
     callStatus.textContent = "idle";
     callBar.classList.add("idle");
   } else {
-    const n = net.linkedPeers().length;
+    const n = net ? net.linkedPeers().length : 0;
     callStatus.textContent = n === 0
       ? "in call (waiting for peers)"
       : `in call · ${n} peer${n === 1 ? "" : "s"}`;
@@ -1224,6 +1281,10 @@ async function startCall() {
   ensureLocalTile();
   // RtcNetwork publishes each track to every connected peer and to any peer
   // that connects later, renegotiating as needed.
+  if (!net) {
+    shellPrint("Connect to a relay first — there is no network yet.", "err");
+    return;
+  }
   for (const track of localStream.getTracks()) net.addLocalTrack(track, localStream);
   updateCallStatus();
   shellPrint("Call started.", "sys");
@@ -1231,7 +1292,7 @@ async function startCall() {
 
 function endCall() {
   if (!localStream) return;
-  net.removeLocalTracks();
+  if (net) net.removeLocalTracks();
   for (const t of localStream.getTracks()) t.stop();
   localStream = null;
   removeLocalTile();
@@ -1263,12 +1324,12 @@ callMuteBtn.addEventListener("click", toggleMute);
 // reachable for recovery to complete.
 window.addEventListener("online", () => {
   shellPrint("Network online — restarting ICE", "sys");
-  net.restartAllIce();
+  if (net) net.restartAllIce();
 });
 if (navigator.connection && typeof navigator.connection.addEventListener === "function") {
   navigator.connection.addEventListener("change", () => {
     shellPrint("Network changed — restarting ICE", "sys");
-    net.restartAllIce();
+    if (net) net.restartAllIce();
   });
 }
 
@@ -1331,10 +1392,17 @@ function connectRelay() {
     if (roomSecret) sessionStorage.setItem("chat.roomSecret", bytesToHex(roomSecret));
     else sessionStorage.removeItem("chat.roomSecret");
     // Flush any signals RtcNetwork queued while the socket was down, then
+    // stand the transport up (first connect, or the room secret changed) and
     // announce ourselves into the room so the WebRTC dance can begin.
     for (const s of signalOutbox) relayWs.send(s);
     signalOutbox.length = 0;
-    net.join();
+    ensureTransport()
+      .then(() => net.join())
+      .catch((err) => {
+        shellPrint(`Transport start failed: ${err.message}`, "err");
+        relayStatus.textContent = "error";
+        setRelayPill("err", "no transport");
+      });
   });
   relayWs.addEventListener("message", (ev) => {
     if (typeof ev.data !== "string") return;
@@ -1372,9 +1440,9 @@ relayRoomInput.addEventListener("keydown", (e) => {
 // That is the whole point: a relay you do not control can carry your signaling without
 // being able to join the conversation.
 //
-// `roomSecret` itself is declared up beside the RtcNetwork that reads it (see there for
-// why). null ⇒ open room: we answer anyone who finds the name. Fine for `global` on a
-// laptop, not for anything else.
+// `roomSecret` itself is declared up with the networking section (see there for
+// why). null ⇒ open room: we answer anyone who finds the name. Fine for `global`
+// on a laptop, not for anything else.
 
 /** Read `#room=<name>&s=<64 hex>` from the current URL. Both parts optional. */
 function inviteFromHash() {

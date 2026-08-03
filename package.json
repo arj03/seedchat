@@ -9,6 +9,7 @@
     "build:chat-app-v2": "asc assembly/chat-app-v2/index.ts --config asconfig.chat-app-v2.json --target release && node scripts/embed-ui.mjs build/chat-app-v2.wasm assembly/chat-app-v2/ui.html build/chat-app-v2.wasm && node scripts/embed-meta.mjs build/chat-app-v2.wasm build/chat-app-v2.wasm \"{\\\"id\\\":\\\"chat\\\",\\\"name\\\":\\\"Chat\\\",\\\"version\\\":\\\"v2\\\",\\\"description\\\":\\\"text + image + nick\\\"}\"",
     "build": "npm run build:chat-app-v1 && npm run build:chat-app-v2 && npm run vendor",
     "relay": "node scripts/relay.mjs",
+    "smoke": "node scripts/smoke.mjs",
     "serve": "npm run vendor && npx --yes http-server browser -p 3000 -c-1",
     "clean": "node scripts/clean.mjs"
   },

@@ -6,9 +6,19 @@
 <meta name="color-scheme" content="dark" />
 <meta name="theme-color" content="#0e0f12" />
 <title>SeedKernel Chat</title>
+<!-- script-src includes 'unsafe-inline' on purpose: the app UIs run in a sandboxed
+     blob: iframe, and a blob: document inherits this page's CSP. The UI is arbitrary
+     app content (any author's signed bundle) — the shell cannot pre-authorize its
+     inline script with a hash or nonce, so without 'unsafe-inline' every app UI is
+     dead on arrival. That is safe here because the iframe is sandboxed without
+     allow-same-origin: it has an opaque origin, no access to this document's DOM,
+     and can reach the shell only via postMessage. The shell's own document has no
+     inline scripts and no untrusted innerHTML, so 'unsafe-inline' opens nothing
+     here; 'wasm-unsafe-eval' covers WebAssembly.instantiate (kernel hosts,
+     libsodium, QuickJS). -->
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'self';
-  script-src 'self' 'wasm-unsafe-eval';
+  script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline';
   style-src 'self' 'unsafe-inline';
   connect-src 'self' ws: wss:;
   frame-src 'self' blob:;
@@ -174,15 +184,33 @@
 </main>
 
 <!-- The kernel surface chat depends on, declared in one place. `npm run vendor`
-     copies seedkernel-wasm's built host into ./vendor/; these four specifiers are
-     the entire contract between this app and the runtime. -->
+     copies seedkernel-wasm's built host (build-min: host/ + core/) into ./vendor/;
+     the seedkernel-wasm/* specifiers below are the entire contract between this
+     app and the runtime. The QuickJS entries are the realm engine the transport
+     bundle runs in (safe-js's graph: quickjs-emscripten + the two quickjs-ng wasm
+     variants, whose .wasm rides in the same dir). Same layout seed store's
+     build-browser-demo.mjs stages. -->
 <script type="importmap">
 {
   "imports": {
-    "seedkernel-wasm/shell-core": "./vendor/host/shell-core.js",
-    "seedkernel-wasm/net-rtc":    "./vendor/host/net-rtc.js",
-    "seedkernel-wasm/bundle":     "./vendor/host/bundle.js",
-    "seedkernel-wasm/libsodium":  "./vendor/libsodium-wrappers.mjs"
+    "seedkernel-wasm/shell-core":    "./vendor/host/shell-core.js",
+    "seedkernel-wasm/net-rtc":       "./vendor/host/net-rtc.js",
+    "seedkernel-wasm/bundle":        "./vendor/host/bundle.js",
+    "seedkernel-wasm/safe-js":       "./vendor/host/safe-js.js",
+    "seedkernel-wasm/transport-bundle": "./vendor/host/transport-bundle.js",
+    "seedkernel-wasm/pq":            "./vendor/core/pq.js",
+    "seedkernel-wasm/libsodium":     "./vendor/libsodium-wrappers.mjs",
+    "quickjs-emscripten":                         "./vendor/quickjs-emscripten/index.mjs",
+    "quickjs-emscripten-core":                    "./vendor/quickjs-emscripten-core/index.mjs",
+    "@jitl/quickjs-ffi-types":                    "./vendor/quickjs-ffi-types/index.mjs",
+    "@jitl/quickjs-ng-wasmfile-release-asyncify":                  "./vendor/qjs-async/index.mjs",
+    "@jitl/quickjs-ng-wasmfile-release-asyncify/emscripten-module": "./vendor/qjs-async/emscripten-module.browser.mjs",
+    "@jitl/quickjs-ng-wasmfile-release-sync":                      "./vendor/qjs-sync/index.mjs",
+    "@jitl/quickjs-ng-wasmfile-release-sync/emscripten-module":    "./vendor/qjs-sync/emscripten-module.browser.mjs",
+    "@jitl/quickjs-wasmfile-release-asyncify": "./vendor/qjs-async/index.mjs",
+    "@jitl/quickjs-wasmfile-debug-asyncify":   "./vendor/qjs-async/index.mjs",
+    "@jitl/quickjs-wasmfile-release-sync":     "./vendor/qjs-sync/index.mjs",
+    "@jitl/quickjs-wasmfile-debug-sync":       "./vendor/qjs-sync/index.mjs"
   }
 }
 </script>

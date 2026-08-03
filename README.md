@@ -17,10 +17,11 @@ chat makes into the runtime has to go through a published entry point.
 | --- | --- |
 | `assembly/chat-app-v1/` | v1 handler — text only. `index.ts` is the pure transform, `ui.html` is the iframe UI embedded into the module as a custom section. |
 | `assembly/chat-app-v2/` | v2 handler — text + image + nick. Same shape; upgrading v1→v2 is a re-admit at the same name under the same key. |
-| `browser/chat-shell.*` | The browser shell: identity, admission policy, WebRTC wiring, the sandboxed iframe. Roughly 2,200 lines. |
+| `browser/chat-shell.*` | The browser shell: identity, admission policy, the transport-bundle network under a WebRTC mesh, the sandboxed iframe. Roughly 1,600 lines. The inline import map in `chat-shell.html` names the kernel surface. |
 | `scripts/embed-ui.mjs` | Appends a `ui` custom section to a built `.wasm`. |
 | `scripts/embed-meta.mjs` | Appends an `app_meta` JSON custom section (id, name, version). |
-| `scripts/vendor.mjs` | Copies the kernel's built host into `browser/vendor/` for a bundler-free static serve, refusing a stale (un-minified-since-compile) kernel build. |
+| `scripts/vendor.mjs` | Copies the kernel's built host (`build-min`: `host/` + `core/`) into `browser/vendor/`, plus the browser libsodium, `mldsa65.wasm`, and the QuickJS realm engine (safe-js's graph), for a bundler-free static serve. Refuses a stale (un-minified-since-compile) kernel build. |
+| `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam and round-trips a message through a real chat-app-v1.wasm. Run it after a kernel update. |
 | `scripts/relay.mjs` | The WebSocket signaling rendezvous for the WebRTC mesh. App-neutral — seed store points at this file too. |
 | `scripts/clean.mjs` | Deletes `build/` and `browser/vendor/` when a rebuild isn't taking. |
 
@@ -29,13 +30,15 @@ kernel never reads either section. They live here because the reader lives here.
 
 ## The kernel surface chat uses
 
-The entire dependency is four published entry points of `seedkernel-wasm`:
+The entire dependency is six published entry points of `seedkernel-wasm`:
 
 | Import | Used for |
 | --- | --- |
 | `seedkernel-wasm/shell-core` | `createShell`, `KernelHost` |
-| `seedkernel-wasm/bundle` | `signManifest`, `packBundle`, `unpackBundle`, `verifyManifest`, `genesisHash`, `kernelNameFor`, `appKeyFor`, `handlesOf`, `FreshnessMarks`, `MANIFEST_FILE`, `moduleFile` |
+| `seedkernel-wasm/bundle` | `signManifest`, `packBundle`, `unpackBundle`, `verifyManifest`, `verifyBundle`, `genesisHash`, `kernelNameFor`, `appKeyFor`, `handlesOf`, `FreshnessMarks`, `MANIFEST_FILE`, `moduleFile` |
 | `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC mesh |
+| `seedkernel-wasm/safe-js` | `createSafeRealm` — the QuickJS realm the transport bundle runs in |
+| `seedkernel-wasm/pq` | `withMlDsa65`, `loadMlDsa65` |
 | `seedkernel-wasm/libsodium` | the browser libsodium build |
 
 Plus one on the guest side: the app modules import `PK_LEN` and `PRIV_USER_OFF`
@@ -43,19 +46,41 @@ from `seedkernel-wasm/assembly/seedkernel/handler` — the AssemblyScript half o
 the handler ABI (§4). It is imported, never vendored: an ABI that apps fork is an
 ABI that drifts.
 
-The four JS entry points are declared in exactly two places: the imports at the top of
-`chat-shell.js`, and the import map in `chat-shell.html`. Nothing else in this
-repo reaches into `node_modules`. If a kernel change breaks chat, it broke a
-public export — which is the point of chat living out here.
+**The network is a bundle, not a platform member.** Since the kernel split the
+network from the core, `ShellPlatform` no longer takes a `network` — the channel
+AKE, record layer and request/response layer ship as a *signed transport bundle*
+(`role: "transport"`), embedded in the host as `TRANSPORT_BUNDLE_B64`. The shell
+stands the transport driver up when that bundle is admitted, and the browser
+consumes it from `seedkernel-wasm/transport-bundle` (the vendored
+`host/transport-bundle.js`). Chat admits it at first relay connect under an
+**author pin** — only the exact artifact this host ships may claim the slot, the
+browser equivalent of an operator's `roles.transport` policy entry — and rebuilds
+the `RtcNetwork` under it whenever the room secret changes, because the driver's
+accepting-side gate reads the secret at install time.
+
+The JS entry points are declared in exactly two places: the imports at the top of
+`chat-shell.js`, and the inline import map in `chat-shell.html` (which also names
+every bare specifier in safe-js's vendored QuickJS graph). The CSP allows inline
+scripts (`'unsafe-inline'`) because app UIs run in a sandboxed `blob:` iframe that
+inherits this page's policy, and the UI is arbitrary app content the shell cannot
+pre-authorize with a hash or nonce — the iframe sandbox (no `allow-same-origin`)
+is the actual boundary. Nothing else in this repo reaches into `node_modules`. If
+a kernel change breaks chat, it broke a public export — which is the point of chat
+living out here.
 
 ## Build and run
 
 ```sh
-# 1. build the kernel checkout it depends on
-cd ../seedkernel/WASM && npm install && npm run build && npm run build:browser-sodium
+# 1. build the kernel checkout it depends on (transport bundle + host + minified,
+#    browser libsodium, PQ wasm; needs clang for the PQ C → wasm step)
+cd ../seedkernel/WASM && npm install && npm run build:browser
 
 # 2. build chat and vendor the runtime
 cd ../../seedchat && npm install && npm run build
+
+# 2b. (optional) headless check that chat still works against this kernel:
+#     two shells, a real chat app, a full message round-trip
+npm run smoke
 
 # 3. signaling rendezvous for the WebRTC mesh (kill it once channels are open)
 npm run relay
@@ -68,9 +93,9 @@ npm run serve        # → http://localhost:3000/chat-shell.html, open it in two
 defaults to `max-age=3600`, so after a rebuild the browser keeps serving a stale
 `vendor/host` and the shell fails in ways that look like kernel bugs. If a rebuild
 still doesn't take, `npm run clean && npm run build` starts from nothing. `vendor`
-also refuses to run when the kernel's `build/host-min` is older than its
-`build/host` — the silent divergence where the kernel's own tests stay green
-against fresh code while chat serves the last minified build.
+also refuses to run when the kernel's `build-min` is older than its `build` — the
+silent divergence where the kernel's own tests stay green against fresh code while
+chat serves the last minified build.
 
 `localhost` is a secure context, so plain HTTP is enough for WebRTC when both tabs
 are on this machine; reaching the shell from another device needs HTTPS.
@@ -85,8 +110,8 @@ against whoever wrote it.
 The relay is partitioned into **rooms** (`ws://host:8080/<room>`, default
 `global`), set on the shell's **Network** tab. A room is *not* an authenticated
 channel — knowing the name is the only credential — but identity is bound
-in-channel by PeerLink's HELLO/AUTH, so a relay can observe SDP metadata and
-refuse to forward, and can never impersonate a peer.
+in-channel by the transport bundle's HELLO/AUTH handshake, so a relay can observe
+SDP metadata and refuse to forward, and can never impersonate a peer.
 
 ## Protocol interop
 
