@@ -9,7 +9,7 @@ import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { createSafeRealm } from "seedkernel-wasm/safe-js";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import { withMlDsa65, loadMlDsa65 } from "seedkernel-wasm/pq";
-import { signManifest, packBundle,
+import { signManifestHybrid, hybridAuthorId, packBundle,
          genesisHash, kernelNameFor, appKeyFor, handlesOf,
          unpackBundle, verifyManifest, verifyBundle, FreshnessMarks, MANIFEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
@@ -113,8 +113,11 @@ await sodium.ready;
 // verifyManifest is synchronous: the method is either on `sodium` before the first
 // verify or the bundle is refused as an unsupported suite.
 //
-// This shell still SIGNS suite 0x01. Verifying comes first on purpose — every node
-// must be able to check a hybrid manifest before any node starts producing one.
+// This shell SIGNS suite 0x02, the hybrid Ed25519 + ML-DSA-65 envelope (§12.4,
+// §14.1). Verifying led on purpose — every node had to be able to check a hybrid
+// manifest before any node started producing one — and that gate is long closed,
+// so the demo signs PQ by default like every other author, and its author id is
+// the key-set hash rather than the Ed25519 key.
 withMlDsa65(sodium, await loadMlDsa65(
   await (await fetch(new URL("./vendor/mldsa65.wasm", import.meta.url))).arrayBuffer()));
 
@@ -172,6 +175,12 @@ if (stored) {
   }));
 }
 const myPkHex = bytesToHex(myKeys.publicKey);
+// The PQ half of this author's key set (§12.4): the ML-DSA-65 key, derived from the
+// SAME seed as the Ed25519 half, so the one stored identity is the whole key set.
+const myPqKeys = sodium.ml_dsa65_keypair_from_seed(sodium.crypto_generichash(
+  32, new Uint8Array([...myKeys.privateKey.slice(0, 32), ...new TextEncoder().encode("seedkernel-author-mldsa-v1")])));
+// The hybrid author id: what this tab signs app bundles under, and what peers pin.
+const myAuthorId = hybridAuthorId(sodium, myKeys.publicKey, myPqKeys.publicKey);
 
 shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 
@@ -393,7 +402,10 @@ async function buildAppBundle(wasmBytes) {
       hash: bytesToHex(genesisHash(sodium, wasmBytes)),
     }],
   };
-  const manifestEnv = signManifest(sodium, myKeys.privateKey, myKeys.publicKey, manifest);
+  const manifestEnv = signManifestHybrid(sodium, {
+    ed: { publicKey: myKeys.publicKey, privateKey: myKeys.privateKey },
+    mlDsa: { publicKey: myPqKeys.publicKey, privateKey: myPqKeys.privateKey },
+  }, manifest);
   return packBundle({
     [MANIFEST_FILE]: manifestEnv,
     [moduleFile(meta.id)]: wasmBytes,
@@ -693,9 +705,9 @@ function broadcastToPeers(proto, payload) {
 }
 
 function renderLocal(rec, payload) {
-  const input = new Uint8Array(myKeys.publicKey.length + payload.length);
-  input.set(myKeys.publicKey, 0);
-  input.set(payload, myKeys.publicKey.length);
+  const input = new Uint8Array(myAuthorId.length + payload.length);
+  input.set(myAuthorId, 0);
+  input.set(payload, myAuthorId.length);
   const render = shell.host.callHandler(rec.handlerName, input);
   if (render) deliverRender(new Uint8Array(render));
 }
@@ -761,7 +773,7 @@ function buildAppRow(rec) {
   const meta = document.createElement("div");
   meta.className = "app-row-meta";
   const authorHex = bytesToHex(rec.authorPk);
-  const isMine = bytesEqual(rec.authorPk, myKeys.publicKey);
+  const isMine = bytesEqual(rec.authorPk, myAuthorId);
   {
     const bId = document.createElement("b");
     bId.textContent = "id";
