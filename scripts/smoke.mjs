@@ -65,15 +65,18 @@ function chatPlatform(identity, contactSecret) {
 function wirePair() {
   const mk = (name, remoteAddr) => ({
     name, remoteAddr, sent: [], dead: false, inFlight: 0, msg: null, cls: null, peer: null,
+    // FRAMING.PLATFORM (socket-seam.ts): one send is one delivery, so the transport
+    // bundle frames nothing — the same thing an RTCDataChannel says, which is what the
+    // browser shell puts under the driver.
+    framing: 0,
     send(bytes) {
       if (this.dead) return;
       this.sent.push(Buffer.from(bytes).toString("hex"));
       const seq = ++this.inFlight;
       queueMicrotask(() => { if (!this.peer.dead) this.peer.msg?.(bytes); });
     },
-    onMessage(cb) { this.msg = cb; },
+    onData(cb) { this.msg = cb; },
     onClose(cb) { this.cls = cb; },
-    allowLargeFrames() {},
     close() { if (this.dead) return; this.dead = true; queueMicrotask(() => this.peer.cls?.()); },
   });
   const a = mk("A", "10.0.0.1"), b = mk("B", "10.0.0.2");
