@@ -10,7 +10,7 @@ import { createSafeRealm } from "seedkernel-wasm/safe-js";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import { withMlDsa65, loadMlDsa65 } from "seedkernel-wasm/pq";
 import { signManifestHybrid, hybridAuthorId, packBundle,
-         genesisHash, kernelNameFor, appKeyFor, handlesOf,
+         genesisHash, appKeyFor, handlesOf,
          unpackBundle, verifyManifest, verifyBundle, FreshnessMarks, MANIFEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
 
@@ -272,12 +272,13 @@ function updatePeerPill() {
 // The module's WASM carries two embedded custom sections the runtime ignores but
 // this shell reads: "app_meta" (JSON — id, name, version) and "ui" (HTML rendered
 // in the sandboxed iframe). The signed manifest's `app` is the id, and the loader
-// binds the module at `kernelNameFor(app, moduleName)` — `"<id>:<module>"` (§5.1).
-// The manifest declares no bind name, so there is nothing in it a forged manifest
-// could point at an unexpected handler; the shell calls the same derivation the
-// loader does rather than keeping its own.
+// binds the module inside its app's map, under `appKeyFor(author, app)` at the
+// module's logical name (§5.1). The manifest declares no bind name, so there is
+// nothing in it a forged manifest could point at an unexpected handler; the shell
+// calls the same `appKeyFor` the loader does rather than keeping a derivation of
+// its own.
 //
-// The name is node-local. Two peers need not agree on it: a CHAT frame carries a
+// The key is node-local. Two peers need not agree on it: a CHAT frame carries a
 // *protocol id*, and each side resolves that through its own `bindings` to whichever
 // app it holds — so two peers running different authors' chat apps interoperate as
 // long as both speak the protocol.
@@ -285,7 +286,7 @@ function updatePeerPill() {
 // An app's handler is a PURE TRANSFORM: the shell hands it `senderPk ‖ chatType ‖
 // body` and it returns the render bytes for the iframe. The shell — not the WASM
 // and not the kernel — does all the I/O: it authenticates the sender via the AKE
-// channel, calls the transform with `host.callHandler`, and posts the result to
+// channel, calls the transform with `host.callModule`, and posts the result to
 // the iframe. (In a headless deployment a zero-authority guest plays this
 // orchestrator role instead; here the browser shell is the natural orchestrator.)
 //
@@ -453,7 +454,6 @@ async function applyAppBundle(bundleBytes) {
 
   const loaded = await shell.loadBundleBlob(bundleBytes);
   const author = loaded.author;
-  const handlerName = kernelNameFor(author, peeked.app, peeked.moduleName);
   const key = appKeyFor(author, peeked.app);
   const handles = handlesOf(loaded.manifest);
 
@@ -466,7 +466,7 @@ async function applyAppBundle(bundleBytes) {
     authorPk: author.slice(),
     bytesHash: genesisHash(sodium, peeked.wasm),
     bundleBytes: bundleBytes.slice(),
-    handlerName,
+    moduleName: peeked.moduleName,
     handles,
     uiHtml,
   };
@@ -708,7 +708,7 @@ function renderLocal(rec, payload) {
   const input = new Uint8Array(myAuthorId.length + payload.length);
   input.set(myAuthorId, 0);
   input.set(payload, myAuthorId.length);
-  const render = shell.host.callHandler(rec.handlerName, input);
+  const render = shell.host.callModule(rec.key, rec.moduleName, input);
   if (render) deliverRender(new Uint8Array(render));
 }
 

@@ -23,7 +23,7 @@ const { loadSodium } = await import("seedkernel-wasm");
 const sodium = await loadSodium();
 const { createShell, KernelHost } = await import("seedkernel-wasm/shell-core");
 const {
-  FreshnessMarks, signManifest, packBundle, verifyBundle, kernelNameFor, genesisHash,
+  FreshnessMarks, signManifest, packBundle, verifyBundle, genesisHash,
   MANIFEST_FILE, moduleFile, appKeyFor,
 } = await import("seedkernel-wasm/bundle");
 const { createSafeRealm } = await import("seedkernel-wasm/safe-js");
@@ -134,7 +134,7 @@ try {
 
 // 3. build + install a real chat app bundle (chat-shell's buildAppBundle)
 const chatWasm = new Uint8Array(readFileSync(resolve(here, "../build/chat-app-v1.wasm")));
-let handlerName = "";
+let chatKey = "";
 try {
   const manifest = {
     app: "chat",
@@ -146,12 +146,12 @@ try {
   const moduleHash = toHex(genesisHash(sodium, chatWasm));
   pendingApprovals.add(moduleHash);            // auto-approve like addAppFromWasm
   const loaded = await A.loadBundleBlob(chatBundle);
-  handlerName = kernelNameFor(loaded.author, "chat", "chat");
-  assert(A.host.isBound(handlerName), `handler bound at ${handlerName}`);
+  chatKey = appKeyFor(loaded.author, "chat");
+  assert(A.host.isBound(chatKey, "chat"), `handler bound under ${chatKey}`);
   // The receiving peer installs its own app (each peer's binding is its own, §12.10).
   pendingApprovals.add(moduleHash);
   await B.loadBundleBlob(chatBundle);
-  ok(`chat app installed on both shells at ${handlerName.slice(0, 24)}…`);
+  ok(`chat app installed on both shells under ${chatKey.slice(0, 24)}…`);
 } catch (err) { fail("chat app install", err); }
 
 // 4. link A and B over the transport (the WebRTC seam's openLink shape)
