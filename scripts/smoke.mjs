@@ -27,6 +27,7 @@ const {
   MANIFEST_FILE, moduleFile, appKeyFor,
 } = await import("seedkernel-wasm/bundle");
 const { createSafeRealm } = await import("seedkernel-wasm/safe-js");
+const { GUEST_ABI_VERSION } = await import("seedkernel-wasm/cap-bridge");
 
 // The built transport bundle blob — the exact bytes host/transport-bundle.js
 // embeds as B64 (both are written by the same kernel build step). Read from the
@@ -120,7 +121,7 @@ try {
 try {
   const forgedManifest = {
     app: "evil", version: 1, role: "transport", modules: [],
-    guest: { hash: "00".repeat(32), abi: 1, caps: ["rawnet", "transport", "crypto"], primitives: [] },
+    guest: { hash: "00".repeat(32), abi: GUEST_ABI_VERSION, caps: ["link", "transport", "node"], primitives: [] },
   };
   const env = signManifest(sodium, identityA.privateKey, identityA.publicKey, forgedManifest);
   const blob = packBundle({ [MANIFEST_FILE]: env, [moduleFile("x")]: new Uint8Array(8) });
