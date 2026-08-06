@@ -16,11 +16,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 
-// sodium + the host resolve through seedkernel-wasm; loadSodium (the Node entry's
+// sodium + the host resolve through seedkernel-wasm; loadCrypto (the Node entry's
 // one crypto seam) readies libsodium AND mixes in ML-DSA-65, exactly what the
 // browser shell's withMlDsa65 does.
-const { loadSodium } = await import("seedkernel-wasm");
-const sodium = await loadSodium();
+const { loadCrypto } = await import("seedkernel-wasm");
+const sodium = await loadCrypto();
 const { createShell, ModuleTable } = await import("seedkernel-wasm/shell-core");
 const {
   FreshnessMarks, signManifest, packBundle, verifyBundle, genesisHash,
