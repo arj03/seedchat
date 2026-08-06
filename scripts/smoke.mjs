@@ -21,7 +21,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 // browser shell's withMlDsa65 does.
 const { loadSodium } = await import("seedkernel-wasm");
 const sodium = await loadSodium();
-const { createShell, KernelHost } = await import("seedkernel-wasm/shell-core");
+const { createShell, ModuleTable } = await import("seedkernel-wasm/shell-core");
 const {
   FreshnessMarks, signManifest, packBundle, verifyBundle, genesisHash,
   MANIFEST_FILE, GUEST_FILE, moduleFile, appKeyFor,
@@ -55,7 +55,7 @@ function chatPlatform(identity, contactSecret) {
   return {
     sodium,
     identity,
-    kernel: new KernelHost(),
+    table: new ModuleTable(),
     freshnessStore: new FreshnessMarks(),
     // The getter is how chat-shell feeds the current room secret to the
     // transport driver at install time (§12.6.3).

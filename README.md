@@ -38,7 +38,7 @@ The entire dependency is seven published entry points of `seedkernel-wasm`:
 
 | Import | Used for |
 | --- | --- |
-| `seedkernel-wasm/shell-core` | `createShell`, `KernelHost` |
+| `seedkernel-wasm/shell-core` | `createShell`, `ModuleTable` |
 | `seedkernel-wasm/bundle` | `signManifest`, `packBundle`, `unpackBundle`, `verifyManifest`, `verifyBundle`, `genesisHash`, `kernelNameFor`, `appKeyFor`, `handlesOf`, `FreshnessMarks`, `MANIFEST_FILE`, `GUEST_FILE`, `moduleFile` |
 | `seedkernel-wasm/cap-bridge` | `GUEST_ABI_VERSION` — the guest seam version the chat bundle's guest declares |
 | `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC mesh |

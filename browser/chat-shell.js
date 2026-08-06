@@ -4,7 +4,7 @@
 // import map in chat-shell.html resolves them to the vendored build. If a future
 // kernel change breaks chat, it broke a public export, which is the point.
 import sodium from "seedkernel-wasm/libsodium";
-import { createShell, KernelHost } from "seedkernel-wasm/shell-core";
+import { createShell, ModuleTable } from "seedkernel-wasm/shell-core";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { createSafeRealm } from "seedkernel-wasm/safe-js";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
@@ -204,7 +204,7 @@ shell = createShell({
   platform: {
     sodium,
     identity: myKeys,
-    kernel: new KernelHost(),
+    table: new ModuleTable(),
     freshnessStore: new FreshnessMarks(),
     get contactSecret() { return roomSecret ?? undefined; },
     createRealm: async (o) => createSafeRealm(o),
