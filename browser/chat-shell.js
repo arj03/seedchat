@@ -11,8 +11,10 @@ import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import { withMlDsa65, loadMlDsa65 } from "seedkernel-wasm/pq";
 import { signManifestHybrid, hybridAuthorId, packBundle,
          genesisHash, appKeyFor, handlesOf,
-         unpackBundle, verifyManifest, verifyBundle, FreshnessMarks, MANIFEST_FILE, moduleFile }
+         unpackBundle, verifyManifest, verifyBundle, FreshnessMarks, MANIFEST_FILE, GUEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
+import { GUEST_ABI_VERSION } from "seedkernel-wasm/cap-bridge";
+import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_CAPS } from "./chat-app.js";
 
 const RTC_CONFIG = { iceServers: [{ urls: [
   "stun:stun.l.google.com:19302",
@@ -125,8 +127,8 @@ withMlDsa65(sodium, await loadMlDsa65(
 // (§12.6): the channel AKE, the record layer, link routing and the request/
 // response layer run as a confined guest (transport/guest.js), signed into a
 // `role: "transport"` bundle and embedded in the host as TRANSPORT_BUNDLE_B64.
-// Admitting it below stands the shell's transport driver up; chat's own app
-// bundles are handler-only and never claim a role.
+// Admitting it below stands the shell's transport driver up; chat's own apps are
+// ordinary guest bundles and never claim a role.
 const TRANSPORT_BYTES = (() => {
   const bin = atob(TRANSPORT_BUNDLE_B64);
   const out = new Uint8Array(bin.length);
@@ -191,9 +193,12 @@ shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 // `transport`) up. The `contactSecret` getter is read at that install moment, so a
 // room secret minted after boot still gates this node's accepting side (§12.6.3).
 //
-// The QuickJS realm factory (safe-js) is supplied because the transport bundle is a
-// guest program that needs a realm to run in; chat's own apps are handler-only and
-// never pay for one. Admission is deferred to `admit` (user consent), except for the
+// The QuickJS realm factory (safe-js) is supplied because every app is a guest:
+// the transport bundle needs a realm to run in, and so does each chat app — its
+// guest forwards to its module under the shell's execution budget (§12.3). That
+// is the honest cost of one app shape: this shell now pays the lazy QuickJS
+// engine for chat apps where it once paid only for the transport. Admission is
+// deferred to `admit` (user consent), except for the
 // transport bundle itself, which is admitted by author pin.
 shell = createShell({
   platform: {
@@ -259,15 +264,15 @@ function updatePeerPill() {
 // ─── app registry ──────────────────────────────────────────────────────
 //
 // An "app" is an ordinary signed bundle (§12.4): a signed `manifest.bundle`
-// envelope plus the app's WASM module in one blob. That blob IS the bundle format —
-// the same bytes seedstore's flagship deployment loads from disk, so a chat app is
-// just a handler-only bundle (one module, no guest realm) and needs no chat-specific
-// install format, domain, or peek/unwrap code. `verifyBundle` (the shared loader)
-// authenticates the author's signature over the manifest, which commits to the
-// module's genesisHash, so the blob survives any number of transitive relays and
-// still authenticates against its original author — exactly the store-and-forward
-// property an Offer needs. The local "add app" flow and the peer-to-peer Offer below
-// carry the identical bundle.
+// envelope plus the app's WASM module and its guest program in one blob. That blob
+// IS the bundle format — the same bytes seedstore's flagship deployment loads from
+// disk, so a chat app is just a guest that calls its one module and needs no
+// chat-specific install format, domain, or peek/unwrap code. `verifyBundle` (the
+// shared loader) authenticates the author's signature over the manifest, which
+// commits to the guest's and module's genesisHash, so the blob survives any number
+// of transitive relays and still authenticates against its original author —
+// exactly the store-and-forward property an Offer needs. The local "add app" flow
+// and the peer-to-peer Offer below carry the identical bundle.
 //
 // The module's WASM carries two embedded custom sections the runtime ignores but
 // this shell reads: "app_meta" (JSON — id, name, version) and "ui" (HTML rendered
@@ -283,12 +288,13 @@ function updatePeerPill() {
 // app it holds — so two peers running different authors' chat apps interoperate as
 // long as both speak the protocol.
 //
-// An app's handler is a PURE TRANSFORM: the shell hands it `senderPk ‖ chatType ‖
-// body` and it returns the render bytes for the iframe. The shell — not the WASM
-// and not the kernel — does all the I/O: it authenticates the sender via the AKE
-// channel, calls the transform with `host.callModule`, and posts the result to
-// the iframe. (In a headless deployment a zero-authority guest plays this
-// orchestrator role instead; here the browser shell is the natural orchestrator.)
+// An app's module is a PURE TRANSFORM: the guest hands it `senderPk ‖ chatType ‖
+// body` and it returns the render bytes for the iframe. The guest — not the WASM
+// and not the kernel — does all the I/O: the shell authenticates the sender via the
+// AKE channel, invokes the app's guest `handle` entrypoint (the same seam an
+// initiator's runGuest takes), and the guest drives its module through
+// `module/call` (§12.2). Inbound delivery and local echo both cross the guest, so
+// chat's whole app logic is the ~5-line forwarding guest it ships in the bundle.
 //
 // `installedApps` keeps the per-app state we need to re-mount the UI, send
 // updates, and re-broadcast the packed bundle transitively (`bundleBytes` is the
@@ -381,20 +387,27 @@ function promptMeta(defaultId) {
 
 // ── build an app bundle (local-authored) ────────────────────────────────
 //
-// Turn a WASM module into a signed one-module bundle: read its app_meta for the
-// id, build a manifest declaring the module under that id, sign the manifest under
+// Turn a WASM module into a signed bundle: read its app_meta for the
+// id, build a manifest declaring the module under that id plus the ~5-line guest
+// that forwards to it, sign the manifest under
 // the local key (the real §12.4 manifest signature), and pack the manifest envelope
-// + module into one blob. The manifest names no kernel name — the loader derives it
-// from the signed `(app, name)` pair. `version` is a nominal 1 — the interactive
+// + module + guest into one blob. The manifest names no kernel name — the loader derives
+// it from the signed `(app, name)` pair. `version` is a nominal 1 — the interactive
 // shell gates installs on user consent (the approve callback), not on a monotonic
 // freshness mark, so a chat bundle carries no meaningful version counter.
 //
-// A chat app is a HANDLER-ONLY bundle: it declares no `guest`, and since caps live
-// inside `guest` (§12.4) that is the same statement as "this app holds no authority".
-// There is no empty caps list to write — the shape says it.
+// A chat app is an ordinary guest bundle: the guest's `handle` forwards its input to
+// the app's own module by name through `module/call` and returns the render bytes —
+// the whole app is that forwarding guest (chat-app.js). It declares the `module` cap
+// and nothing else (§12.2): it reaches its own module map, and no other backend.
 async function buildAppBundle(wasmBytes) {
   const { meta } = await readWasmSections(wasmBytes);
   if (!meta || !meta.id) throw new Error("cannot build a bundle: wasm has no app_meta id");
+  // The id is attacker-chosen text from a custom section, and it is about to be
+  // interpolated into JS this key signs — so it is checked against the §12.4 name
+  // grammar HERE, before the template, not by the manifest parser afterwards.
+  assertAppId(meta.id);
+  const guestBytes = new TextEncoder().encode(chatGuestSource(meta.id));
   const manifest = {
     app: meta.id,
     version: 1,
@@ -402,6 +415,11 @@ async function buildAppBundle(wasmBytes) {
       name: meta.id,
       hash: bytesToHex(genesisHash(sodium, wasmBytes)),
     }],
+    guest: {
+      hash: bytesToHex(genesisHash(sodium, guestBytes)),
+      abi: GUEST_ABI_VERSION,
+      caps: CHAT_APP_CAPS,
+    },
   };
   const manifestEnv = signManifestHybrid(sodium, {
     ed: { publicKey: myKeys.publicKey, privateKey: myKeys.privateKey },
@@ -410,6 +428,7 @@ async function buildAppBundle(wasmBytes) {
   return packBundle({
     [MANIFEST_FILE]: manifestEnv,
     [moduleFile(meta.id)]: wasmBytes,
+    [GUEST_FILE]: guestBytes,
   });
 }
 
@@ -421,7 +440,7 @@ async function buildAppBundle(wasmBytes) {
 // the author key. So this shell never hand-parses envelope offsets — the layout stays
 // private to bundle.ts, where the suite-first parse lives. (Module-byte integrity is
 // still loadBundleBlob's job at install; this only needs the manifest.) Returns null on
-// anything malformed, unauthentic, or not a single-module handler-only app.
+// anything malformed, unauthentic, or not the demo's one-module app shape.
 function peekMeta(bundleBytes) {
   let files;
   try { files = unpackBundle(bundleBytes); }
@@ -433,9 +452,11 @@ function peekMeta(bundleBytes) {
   catch { return null; }
   if (!vm) return null;                        // bad signature ⇒ decline quietly
   const { author, manifest } = vm;
-  // A chat app is a one-module handler-only bundle: a `guest` would mean authority
-  // this shell has no realm to confine.
-  if (manifest.modules.length !== 1 || manifest.guest) return null;
+  // One module, and a guest holding `module` and nothing else (chat-app.js). The
+  // caps half is what keeps an Offer from installing authority behind a consent row
+  // that only shows a name: `guest.caps` is where a bundle's reach is written down,
+  // and this is the one place on the install path that reads it.
+  if (!isChatApp(manifest)) return null;
   const mod = manifest.modules[0];
   const wasm = files[moduleFile(mod.name)];
   if (!wasm || wasm.length === 0) return null;
@@ -704,11 +725,17 @@ function broadcastToPeers(proto, payload) {
   }
 }
 
-function renderLocal(rec, payload) {
+async function renderLocal(rec, payload) {
   const input = new Uint8Array(myAuthorId.length + payload.length);
   input.set(myAuthorId, 0);
   input.set(payload, myAuthorId.length);
-  const render = shell.host.callModule(rec.key, rec.moduleName, input);
+  // The local echo runs through the app's guest like an inbound frame does — the
+  // guest `handle` forwards to the module through `module/call` (§12.2), under the
+  // same seam a peer's request would take. Which means it can fail the same way,
+  // so it reports rather than rejecting into a caller that has nowhere to put it.
+  let render;
+  try { render = await shell.runGuest("handle", input, rec.key); }
+  catch (err) { shellPrint(`local echo failed: ${err.message}`, "err"); return; }
   if (render) deliverRender(new Uint8Array(render));
 }
 
@@ -1002,7 +1029,7 @@ dropzone.addEventListener("drop", async (e) => {
 openAppsBtn.addEventListener("click", () => showTab("apps"));
 
 // ─── iframe protocol: handshake + outgoing messages ────────────────────
-window.addEventListener("message", (ev) => {
+window.addEventListener("message", async (ev) => {
   if (!frame.contentWindow || ev.source !== frame.contentWindow) return;
   const msg = ev.data;
   if (!msg) return;
@@ -1032,7 +1059,10 @@ window.addEventListener("message", (ev) => {
     chatBytes.set(body, 1);
     // Fire-and-forget to every linked peer over Transport — one plane.
     broadcastToPeers(proto, chatBytes);
-    // Local echo: run the handler directly, render if active.
+    // Local echo: run through the app's guest, render if active. Not awaited —
+    // the echo is a view concern, and the send has already gone out; letting it
+    // gate the lines below would make a guest failure also drop the presence
+    // cache. `renderLocal` reports its own failure.
     renderLocal(active, chatBytes);
     if (msg.chatType === 0x02) {
       // Sticky "presence" replay: nick announcements are cached and
@@ -1143,7 +1173,8 @@ async function ensureTransport() {
     transportWired = true;
     // One plane, one dispatch scheme: the shell owns the shared dispatch (§12.10).
     // An inbound frame names a protocol id; the shell resolves it through bindings
-    // to the installed app, calls the right handler, and returns the response.
+    // to the installed app and invokes that app's guest `handle` entrypoint — the
+    // answer is a Promise, which the driver awaits and we render when it settles.
     // The only special protocol is _offer (bundle transit), which we handle
     // directly. Wired here, on the standing driver, because the shell's
     // `transport` face is a throw-until-loaded stub before that.
@@ -1155,7 +1186,15 @@ async function ensureTransport() {
       const result = shell.dispatch(from, proto, payload);
       if (result) {
         const appKey = shell.bindings.boundApp(proto);
-        if (appKey === activeAppKey) deliverRender(new Uint8Array(result));
+        if (appKey === activeAppKey) {
+          // A second consumer of the same promise, purely for the local view — the
+          // driver owns the answer that goes back on the wire. It needs its own
+          // catch: a guest that throws (or blows its execution budget, §12.3) would
+          // otherwise surface as an unhandled rejection with no route to the user.
+          result.then(
+            (bytes) => { if (bytes) deliverRender(new Uint8Array(bytes)); },
+            (err) => shellPrint(`app "${proto}" failed to render an inbound message: ${err.message}`, "err"));
+        }
       }
       return result;
     });

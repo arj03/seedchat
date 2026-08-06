@@ -1,10 +1,13 @@
 # seedchat — the chat app layer for [seedkernel](https://github.com/arj03/seedkernel)
 
-Chat is the simplest possible app on the kernel: a single **pure-transform** WASM
-handler bound at an app name. The handler does no I/O and no crypto — the shell
-hands it `senderPk ‖ chatType ‖ body` and it returns render bytes for the UI.
-Everything around it — authenticating the sender, moving frames, driving the
-iframe — is the runtime's job, because a pure transform has no reach of its own.
+Chat is the smallest possible app on the runtime: a confined JS **guest** over a
+single **pure-transform** WASM module. The guest is a handful of lines — its
+`handle` entrypoint forwards its input to the module by name through
+`module/call` and returns the render bytes — and the module does no I/O and no
+crypto: it reads `senderPk ‖ chatType ‖ body` and returns render bytes for the
+UI. Everything around it — authenticating the sender, moving frames, driving the
+iframe — is the runtime's job, because a pure transform has no reach of its own
+and a guest reaches the world only through `host.call`.
 
 This lives outside the kernel repo for the same reason
 [seed store](https://github.com/arj03/seedstore) does: an app is a *consumer* of
@@ -18,6 +21,7 @@ chat makes into the runtime has to go through a published entry point.
 | `assembly/chat-app-v1/` | v1 handler — text only. `index.ts` is the pure transform, `ui.html` is the iframe UI embedded into the module as a custom section. |
 | `assembly/chat-app-v2/` | v2 handler — text + image + nick. Same shape; upgrading v1→v2 is a re-admit at the same name under the same key. |
 | `browser/chat-shell.*` | The browser shell: identity, admission policy, the transport-bundle network under a WebRTC mesh, the sandboxed iframe. Roughly 1,600 lines. The inline import map in `chat-shell.html` names the kernel surface. |
+| `browser/chat-app.js` | The chat app *shape*, in one place: the forwarding guest's source, the id grammar it may be built from, and the `module`-and-nothing-else authority a chat app holds. The shell authors bundles from it and gates received Offers against it; `scripts/smoke.mjs` imports the same file, so the guest source that gets signed is written once. |
 | `scripts/embed-ui.mjs` | Appends a `ui` custom section to a built `.wasm`. |
 | `scripts/embed-meta.mjs` | Appends an `app_meta` JSON custom section (id, name, version). |
 | `scripts/vendor.mjs` | Copies the kernel's built host (`build-min`: `host/` + `core/`) into `browser/vendor/`, plus the browser libsodium, `mldsa65.wasm`, and the QuickJS realm engine (safe-js's graph), for a bundler-free static serve. Refuses a stale (un-minified-since-compile) kernel build. |
@@ -30,14 +34,15 @@ kernel never reads either section. They live here because the reader lives here.
 
 ## The kernel surface chat uses
 
-The entire dependency is six published entry points of `seedkernel-wasm`:
+The entire dependency is seven published entry points of `seedkernel-wasm`:
 
 | Import | Used for |
 | --- | --- |
 | `seedkernel-wasm/shell-core` | `createShell`, `KernelHost` |
-| `seedkernel-wasm/bundle` | `signManifest`, `packBundle`, `unpackBundle`, `verifyManifest`, `verifyBundle`, `genesisHash`, `kernelNameFor`, `appKeyFor`, `handlesOf`, `FreshnessMarks`, `MANIFEST_FILE`, `moduleFile` |
+| `seedkernel-wasm/bundle` | `signManifest`, `packBundle`, `unpackBundle`, `verifyManifest`, `verifyBundle`, `genesisHash`, `kernelNameFor`, `appKeyFor`, `handlesOf`, `FreshnessMarks`, `MANIFEST_FILE`, `GUEST_FILE`, `moduleFile` |
+| `seedkernel-wasm/cap-bridge` | `GUEST_ABI_VERSION` — the guest seam version the chat bundle's guest declares |
 | `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC mesh |
-| `seedkernel-wasm/safe-js` | `createSafeRealm` — the QuickJS realm the transport bundle runs in |
+| `seedkernel-wasm/safe-js` | `createSafeRealm` — the QuickJS realm every app's guest runs in (the transport bundle's and each chat app's) |
 | `seedkernel-wasm/pq` | `withMlDsa65`, `loadMlDsa65` |
 | `seedkernel-wasm/libsodium` | the browser libsodium build |
 
@@ -105,7 +110,11 @@ builds a signed one-module bundle from the local identity, verifies it, and the
 loader admits it under the shell's policy. Peers hand each other the same bundles
 in an `OFFER` frame; the recipient re-verifies the original author's manifest
 signature, so a bundle survives any number of relays and still authenticates
-against whoever wrote it.
+against whoever wrote it. An Offer is installed on one click, so the recipient
+also checks its *shape* before showing that click: one module, and a guest holding
+`module` and nothing else (`browser/chat-app.js`). A signature says who wrote a
+bundle, not what it may reach — `guest.caps` is where that is written down, and
+this shell will not install an app claiming reach it did not ask for.
 
 The relay is partitioned into **rooms** (`ws://host:8080/<room>`, default
 `global`), set on the shell's **Network** tab. A room is *not* an authenticated

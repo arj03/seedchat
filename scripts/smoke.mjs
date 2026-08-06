@@ -24,10 +24,12 @@ const sodium = await loadSodium();
 const { createShell, KernelHost } = await import("seedkernel-wasm/shell-core");
 const {
   FreshnessMarks, signManifest, packBundle, verifyBundle, genesisHash,
-  MANIFEST_FILE, moduleFile, appKeyFor,
+  MANIFEST_FILE, GUEST_FILE, moduleFile, appKeyFor,
 } = await import("seedkernel-wasm/bundle");
 const { createSafeRealm } = await import("seedkernel-wasm/safe-js");
 const { GUEST_ABI_VERSION } = await import("seedkernel-wasm/cap-bridge");
+// The chat app shape the browser shell authors from — same guest source, same caps.
+const { chatGuestSource, isChatApp, CHAT_APP_CAPS } = await import("../browser/chat-app.js");
 
 // The built transport bundle blob — the exact bytes host/transport-bundle.js
 // embeds as B64 (both are written by the same kernel build step). Read from the
@@ -124,7 +126,7 @@ try {
     guest: { hash: "00".repeat(32), abi: GUEST_ABI_VERSION, caps: ["link", "transport", "node"], primitives: [] },
   };
   const env = signManifest(sodium, identityA.privateKey, identityA.publicKey, forgedManifest);
-  const blob = packBundle({ [MANIFEST_FILE]: env, [moduleFile("x")]: new Uint8Array(8) });
+  const blob = packBundle({ [MANIFEST_FILE]: env, [GUEST_FILE]: new Uint8Array(0) });
   await A.loadBundleBlob(blob);
   throw new Error("forged transport bundle was admitted!");
 } catch (err) {
@@ -136,13 +138,22 @@ try {
 const chatWasm = new Uint8Array(readFileSync(resolve(here, "../build/chat-app-v1.wasm")));
 let chatKey = "";
 try {
+  // The ~5-line guest every chat app ships, from the same module the browser shell
+  // authors from (browser/chat-app.js) — signed source is written once, so this test
+  // exercises the bytes the shell would actually sign rather than a copy of them.
+  const guestBytes = new TextEncoder().encode(chatGuestSource("chat"));
   const manifest = {
     app: "chat",
     version: 1,
     modules: [{ name: "chat", hash: toHex(genesisHash(sodium, chatWasm)) }],
+    guest: {
+      hash: toHex(genesisHash(sodium, guestBytes)),
+      abi: GUEST_ABI_VERSION,
+      caps: CHAT_APP_CAPS,
+    },
   };
   const manifestEnv = signManifest(sodium, identityA.privateKey, identityA.publicKey, manifest);
-  const chatBundle = packBundle({ [MANIFEST_FILE]: manifestEnv, [moduleFile("chat")]: chatWasm });
+  const chatBundle = packBundle({ [MANIFEST_FILE]: manifestEnv, [moduleFile("chat")]: chatWasm, [GUEST_FILE]: guestBytes });
   const moduleHash = toHex(genesisHash(sodium, chatWasm));
   pendingApprovals.add(moduleHash);            // auto-approve like addAppFromWasm
   const loaded = await A.loadBundleBlob(chatBundle);
@@ -172,13 +183,19 @@ try {
   ok("two transport ends authenticated over the channel seam");
 } catch (err) { fail("transport handshake", err); }
 
-// 5. dispatch: A sends a chat message, B renders it via the bound handler
+// 5. dispatch: A sends a chat message, B renders it via its bound app's guest
 try {
   let delivered = null;
+  let dispatchErr = null;
   B.transport.onRequest((from, proto, payload) => {
     if (proto === "_offer") return null;
     const result = B.dispatch(from, proto, payload);
-    if (result) delivered = new Uint8Array(result);
+    // The shell's dispatch always returns the guest's answer — a Promise the driver
+    // awaits; the smoke test settles it to inspect the render bytes. Both arms, so a
+    // failing guest fails this test by name instead of timing out on `delivered`.
+    if (result) result.then(
+      (bytes) => { delivered = bytes && new Uint8Array(bytes); },
+      (err) => { dispatchErr = err; });
     return result;
   });
   const body = new TextEncoder().encode("hi there");
@@ -186,13 +203,14 @@ try {
   chatBytes[0] = 0x00;
   chatBytes.set(body, 1);
   A.transport.send(B.net.peerId, new TextEncoder().encode("chat"), chatBytes);
-  await until(() => delivered !== null, 4000, "rendered message");
+  await until(() => delivered !== null || dispatchErr !== null, 4000, "rendered message");
+  if (dispatchErr) throw dispatchErr;
   // chat v1 render: [type 1][pk_len 1][pk 32][body]
   assert(delivered[0] === 0x00, "render type");
   assert(delivered[1] === 32, "render pk_len");
   assert(toHex(delivered.slice(2, 34)) === toHex(identityA.publicKey), "render sender pk = A's key");
   assert(new TextDecoder().decode(delivered.slice(34)) === "hi there", "render body");
-  ok(`dispatch round-trip: A → transport → B's chat handler → ${delivered.length} render bytes`);
+  ok(`dispatch round-trip: A → transport → B's chat app's guest → ${delivered.length} render bytes`);
 } catch (err) { fail("chat dispatch round-trip", err); }
 
 // 6. the appKey derivation chat uses for its registry
@@ -201,6 +219,23 @@ try {
   assert(key.startsWith(toHex(identityA.publicKey).slice(0, 8)), "appKeyFor shape");
   ok("appKeyFor shape");
 } catch (err) { fail("appKeyFor", err); }
+
+// 7. the shape gate an Offer passes through (peekMeta → isChatApp). A peer's bundle
+// is installed on one click of a row showing a name and an author, so the caps it
+// declares are the whole of what that click grants — and a chat app grants `module`.
+try {
+  const chatManifest = (caps, modules) => ({
+    app: "chat", version: 1,
+    modules: modules ?? [{ name: "chat", hash: "aa" }],
+    guest: { hash: "bb", abi: GUEST_ABI_VERSION, caps },
+  });
+  assert(isChatApp(chatManifest(CHAT_APP_CAPS)), "the shell's own app shape is accepted");
+  assert(!isChatApp(chatManifest(["module", "net"])), "an offered app claiming net is refused");
+  assert(!isChatApp(chatManifest(["fs"])), "an offered app claiming fs is refused");
+  assert(!isChatApp(chatManifest([])), "an app that cannot reach its own module is refused");
+  assert(!isChatApp(chatManifest(CHAT_APP_CAPS, [])), "a no-module app is refused");
+  ok("the offer shape gate holds authority to `module`");
+} catch (err) { fail("offer shape gate", err); }
 
 try { B.close(); } catch {}
 try { A.close(); } catch {}
