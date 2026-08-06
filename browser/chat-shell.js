@@ -398,8 +398,8 @@ function promptMeta(defaultId) {
 //
 // A chat app is an ordinary guest bundle: the guest's `handle` forwards its input to
 // the app's own module by name through `module/call` and returns the render bytes —
-// the whole app is that forwarding guest (chat-app.js). It declares the `module` cap
-// and nothing else (§12.2): it reaches its own module map, and no other backend.
+// the whole app is that forwarding guest (chat-app.js). It declares no cap at all
+// (§12.2): its own module map is a primitive, not a grant (seedkernel §12.1).
 async function buildAppBundle(wasmBytes) {
   const { meta } = await readWasmSections(wasmBytes);
   if (!meta || !meta.id) throw new Error("cannot build a bundle: wasm has no app_meta id");
@@ -452,7 +452,7 @@ function peekMeta(bundleBytes) {
   catch { return null; }
   if (!vm) return null;                        // bad signature ⇒ decline quietly
   const { author, manifest } = vm;
-  // One module, and a guest holding `module` and nothing else (chat-app.js). The
+  // One module, and a guest holding no capability at all (chat-app.js). The
   // caps half is what keeps an Offer from installing authority behind a consent row
   // that only shows a name: `guest.caps` is where a bundle's reach is written down,
   // and this is the one place on the install path that reads it.

@@ -222,7 +222,8 @@ try {
 
 // 7. the shape gate an Offer passes through (peekMeta → isChatApp). A peer's bundle
 // is installed on one click of a row showing a name and an author, so the caps it
-// declares are the whole of what that click grants — and a chat app grants `module`.
+// declares are the whole of what that click grants — and a chat app grants nothing
+// at all: its own module map is a primitive, not a domain (seedkernel §12.1).
 try {
   const chatManifest = (caps, modules) => ({
     app: "chat", version: 1,
@@ -232,9 +233,9 @@ try {
   assert(isChatApp(chatManifest(CHAT_APP_CAPS)), "the shell's own app shape is accepted");
   assert(!isChatApp(chatManifest(["module", "net"])), "an offered app claiming net is refused");
   assert(!isChatApp(chatManifest(["fs"])), "an offered app claiming fs is refused");
-  assert(!isChatApp(chatManifest([])), "an app that cannot reach its own module is refused");
+  assert(!isChatApp(chatManifest(["module"])), "a legacy app still claiming the retired module domain is refused");
   assert(!isChatApp(chatManifest(CHAT_APP_CAPS, [])), "a no-module app is refused");
-  ok("the offer shape gate holds authority to `module`");
+  ok("the offer shape gate admits only zero-authority chat apps");
 } catch (err) { fail("offer shape gate", err); }
 
 try { B.close(); } catch {}

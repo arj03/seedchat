@@ -23,10 +23,12 @@ export function assertAppId(id) {
         throw new Error(`invalid app id ${JSON.stringify(id)}: expected 1-64 chars of [A-Za-z0-9_-] (§12.4)`);
 }
 
-/** The whole authority a chat app holds (§12.2): its own module map, and no other
- *  backend. Authored into every bundle this shell builds, and required of every
- *  bundle it accepts — see `peekMeta`. */
-export const CHAT_APP_CAPS = ["module"];
+/** The whole authority a chat app holds (§12.2): none. Its own module map is not a
+ *  grant — `module/call` is a primitive, the bundle's own code, ungated like
+ *  `crypto` (seedkernel §12.1) — so the manifest declares an empty cap set.
+ *  Authored into every bundle this shell builds, and required of every bundle it
+ *  accepts — see `peekMeta`. */
+export const CHAT_APP_CAPS = [];
 
 /** The ~5-line guest every chat app ships. Its `handle` entrypoint forwards its
  *  input to the app's own module by name through `module/call` (§12.2) and returns
@@ -45,7 +47,7 @@ export function chatGuestSource(appId) {
 
 /** Does a verified manifest describe a chat app this shell will run? The demo's
  *  apps are one module driven by the forwarding guest, and — the load-bearing half
- *  — they hold `module` and nothing else.
+ *  — they hold no capability at all.
  *
  *  The caps check is not decoration. An Offer arrives from a peer and is installed
  *  on one click of a row showing a name, a version and an author; the manifest's
