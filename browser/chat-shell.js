@@ -198,8 +198,9 @@ shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 // guest forwards to its module under the shell's execution budget (§12.3). That
 // is the honest cost of one app shape: this shell now pays the lazy QuickJS
 // engine for chat apps where it once paid only for the transport. Admission is
-// deferred to `admit` (user consent), except for the
-// transport bundle itself, which is admitted by author pin.
+// split into the kernel's two classes (§12.5): `admit` answers app bundles
+// (user consent), `admitTransport` answers the transport bundle, which is
+// admitted by author pin.
 shell = createShell({
   platform: {
     sodium,
@@ -210,13 +211,13 @@ shell = createShell({
     createRealm: async (o) => createSafeRealm(o),
   },
   admit(v) {
-    if (v.manifest.role === "transport") {
-      return bytesToHex(v.author) === transportAuthorHex;
-    }
     const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
     if (!pendingApprovals.has(bytesHashHex)) return false;
     pendingApprovals.delete(bytesHashHex);
     return true;
+  },
+  admitTransport(v) {
+    return bytesToHex(v.author) === transportAuthorHex;
   },
 });
 

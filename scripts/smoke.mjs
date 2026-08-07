@@ -41,14 +41,18 @@ const transportAuthorHex = Buffer.from(verifyBundle(sodium, TRANSPORT_BYTES).aut
 
 const toHex = (b) => Buffer.from(b).toString("hex");
 
-// ── the chat-shell admit gate, in shape ───────────────────────────────────────
+// ── the chat-shell admit gates, in shape ──────────────────────────────────────
+// The two admission classes (§12.5): `admit` answers app bundles (the consent
+// gate), `admitTransport` answers the transport bundle, by author pin.
 const pendingApprovals = new Set();
 function admit(v) {
-  if (v.manifest.role === "transport") return toHex(v.author) === transportAuthorHex;
   const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
   if (!pendingApprovals.has(bytesHashHex)) return false;
   pendingApprovals.delete(bytesHashHex);
   return true;
+}
+function admitTransport(v) {
+  return toHex(v.author) === transportAuthorHex;
 }
 
 function chatPlatform(identity, contactSecret) {
@@ -107,8 +111,8 @@ const kpB = sodium.crypto_sign_keypair();
 const identityB = { publicKey: kpB.publicKey, privateKey: kpB.privateKey };
 const CONTACT = new Uint8Array(32).fill(7); // a "room secret" both ends share
 
-const A = createShell({ platform: chatPlatform(identityA, CONTACT), admit });
-const B = createShell({ platform: chatPlatform(identityB, CONTACT), admit });
+const A = createShell({ platform: chatPlatform(identityA, CONTACT), admit, admitTransport });
+const B = createShell({ platform: chatPlatform(identityB, CONTACT), admit, admitTransport });
 
 // 1. transport bundle admitted by author pin; shell.net/transport live
 try {
