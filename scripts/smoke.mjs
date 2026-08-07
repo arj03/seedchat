@@ -165,9 +165,12 @@ try {
   const loaded = await A.loadBundleBlob(chatBundle);
   chatKey = appKeyFor(loaded.author, "chat");
   assert(A.host.isBound(chatKey, "chat"), `handler bound under ${chatKey}`);
-  // The receiving peer installs its own app (each peer's binding is its own, §12.10).
+  // The receiving peer installs its own app and points the protocol at it — each
+  // peer's binding is its own (§12.10), and install is inert, so this bind is the
+  // only thing that gives inbound "chat" frames a destination on B.
   pendingApprovals.add(moduleHash);
-  await B.loadBundleBlob(chatBundle);
+  const loadedB = await B.loadBundleBlob(chatBundle);
+  B.bind("chat", appKeyFor(loadedB.author, loadedB.manifest.app));
   ok(`chat app installed on both shells under ${chatKey.slice(0, 24)}…`);
 } catch (err) { fail("chat app install", err); }
 

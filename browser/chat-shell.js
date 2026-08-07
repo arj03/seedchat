@@ -10,7 +10,7 @@ import { createSafeRealm } from "seedkernel-wasm/safe-js";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import { withMlDsa65, loadMlDsa65 } from "seedkernel-wasm/pq";
 import { signManifestHybrid, hybridAuthorId, packBundle,
-         genesisHash, appKeyFor, handlesOf,
+         genesisHash, appKeyFor,
          unpackBundle, verifyManifest, verifyBundle, FreshnessMarks, MANIFEST_FILE, GUEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
 import { GUEST_ABI_VERSION } from "seedkernel-wasm/cap-bridge";
@@ -311,7 +311,9 @@ let activeAppKey = null;
 
 // Protocol bindings (§12.10) — these are now handled by the shared Bindings module
 // (shell-core.js re-exports Bindings from bindings.ts). The hand-rolled code that used
-// to live here is gone; every target shares one implementation of the three binding rules.
+// to live here is gone; every target shares one implementation. Install is INERT: a
+// bundle lands serving nothing, and `shell.bindings.bind(proto, appKey)` — the user's
+// own click in the Apps panel — is the only way a protocol gains a destination.
 // After the shell is assembled below, `shell.bindings` is the binding table.
 
 const STORE = "apps.v2";
@@ -477,7 +479,6 @@ async function applyAppBundle(bundleBytes) {
   const loaded = await shell.loadBundleBlob(bundleBytes);
   const author = loaded.author;
   const key = appKeyFor(author, peeked.app);
-  const handles = handlesOf(loaded.manifest);
 
   const record = {
     id: peeked.app,
@@ -489,7 +490,6 @@ async function applyAppBundle(bundleBytes) {
     bytesHash: genesisHash(sodium, peeked.wasm),
     bundleBytes: bundleBytes.slice(),
     moduleName: peeked.moduleName,
-    handles,
     uiHtml,
   };
   installedApps.set(key, record);
@@ -581,7 +581,9 @@ async function restoreInstalledApps() {
   try { arr = JSON.parse(sessionStorage.getItem(STORE + ".bundles") || "[]"); }
   catch { return; }
   if (!Array.isArray(arr)) return;
-  // Bindings BEFORE apps: `autoBind` only fills vacancies.
+  // Bindings are ordinary user preference (§12.10) and live independent of install, so
+  // they are restored first; a saved binding whose app failed to restore is dropped
+  // below. There is no auto-bind to apply — install never writes this table.
   try {
     const saved = JSON.parse(sessionStorage.getItem(STORE + ".bindings") || "[]");
     if (Array.isArray(saved)) {
@@ -605,7 +607,6 @@ async function restoreInstalledApps() {
     }
   }
   for (const [proto, key] of shell.bindings.entries()) if (!installedApps.has(key)) shell.bindings.unbind(proto);
-  for (const rec of installedApps.values()) shell.bindings.autoBind(rec.key, rec.handles);
   const saved = sessionStorage.getItem(STORE + ".active");
   if (saved && installedApps.has(saved)) setActiveApp(saved);
 }
@@ -822,33 +823,56 @@ function buildAppRow(rec) {
   }
   li.appendChild(meta);
 
-  // Protocol bindings (§12.10). One row per protocol this app offers to serve, each a
-  // plain toggle: binding is a preference, so switching is one click and reversible.
-  // "Handles" is what the author declared; the checkbox is what the user decided.
+  // Protocol bindings (§12.10). The table is the only source of truth: install is
+  // inert, so this app serves exactly the protocols the user bound to it — one row
+  // each, a plain toggle (binding is a preference, so switching is one click and
+  // reversible). The input + Bind button is the user's one act for a protocol the
+  // app does not serve yet; typing a protocol that already points at another app
+  // moves it here — rebinding is the operator's move, never an install's.
   const protos = document.createElement("div");
   protos.className = "app-row-meta";
-  for (const proto of rec.handles) {
-    const boundKey = shell.bindings.boundApp(proto);
-    const mine = boundKey === rec.key;
+  const bound = shell.bindings.boundProtocols(rec.key);
+  if (bound.length === 0) {
+    const none = document.createElement("span");
+    none.textContent = " serves nothing — bind a protocol below";
+    protos.appendChild(none);
+  }
+  for (const proto of bound) {
     const label = document.createElement("label");
     label.className = "app-row-proto";
     const cb = document.createElement("input");
     cb.type = "checkbox";
-    cb.checked = mine;
+    cb.checked = true;
     cb.addEventListener("change", () => {
-      if (cb.checked) { shell.bindings.bind(proto, rec.key); persistInstalledApps(); renderAppList(); }
-      else { shell.bindings.unbind(proto); persistInstalledApps(); renderAppList(); }
+      if (!cb.checked) { shell.bindings.unbind(proto); persistInstalledApps(); renderAppList(); }
     });
     label.appendChild(cb);
     const txt = document.createElement("span");
-    // Name the app currently holding a contested protocol, so "why am I not getting
-    // messages" has a visible answer rather than being silent.
-    const other = boundKey && !mine ? installedApps.get(boundKey) : null;
-    txt.textContent = ` handles “${proto}”` +
-      (mine ? "" : other ? ` — bound to ${other.name}` : " — unbound");
+    txt.textContent = ` protocol “${proto}”`;
     label.appendChild(txt);
     protos.appendChild(label);
   }
+  const addProto = document.createElement("label");
+  addProto.className = "app-row-proto";
+  const protoInput = document.createElement("input");
+  protoInput.type = "text";
+  protoInput.placeholder = "protocol to serve";
+  protoInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") bindBtn.click();
+  });
+  const bindBtn = document.createElement("button");
+  bindBtn.textContent = "Bind";
+  bindBtn.addEventListener("click", () => {
+    const proto = protoInput.value.trim();
+    if (!proto) return;
+    shell.bindings.bind(proto, rec.key);
+    protoInput.value = "";
+    persistInstalledApps();
+    renderAppList();
+  });
+  addProto.appendChild(protoInput);
+  addProto.appendChild(bindBtn);
+  protos.appendChild(addProto);
   li.appendChild(protos);
 
   const btns = document.createElement("div");
@@ -1051,7 +1075,9 @@ window.addEventListener("message", async (ev) => {
     if (!active) return;
     // Send under a protocol the active app is actually BOUND to, so our own echo
     // (and a peer that binds the same protocol to a different implementation) routes
-    // to the right place. An app the user has unbound sends nothing.
+    // to the right place. Install is inert (§12.10): a freshly installed app serves
+    // nothing until the user binds a protocol to it in the Apps panel — an app with
+    // no binding sends nothing.
     const proto = shell.bindings.boundProtocols(active.key)[0];
     if (!proto) return;
     const body = msg.body instanceof Uint8Array ? msg.body : new Uint8Array(msg.body);
