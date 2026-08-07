@@ -25,10 +25,10 @@ export function assertAppId(id) {
 
 /** The whole authority a chat app holds (§12.2): none. Its own module map is not a
  *  grant — `module/call` is a primitive, the bundle's own code, ungated like
- *  `crypto` (seedkernel §12.1) — so the manifest declares an empty cap set.
+ *  `crypto` (seedkernel §12.1) — so the manifest declares an empty `requires` set.
  *  Authored into every bundle this shell builds, and required of every bundle it
  *  accepts — see `peekMeta`. */
-export const CHAT_APP_CAPS = [];
+export const CHAT_APP_REQUIRES = [];
 
 /** The ~5-line guest every chat app ships. Its `handle` entrypoint forwards its
  *  input to the app's own module by name through `module/call` (§12.2) and returns
@@ -49,15 +49,16 @@ export function chatGuestSource(appId) {
  *  apps are one module driven by the forwarding guest, and — the load-bearing half
  *  — they hold no capability at all.
  *
- *  The caps check is not decoration. An Offer arrives from a peer and is installed
- *  on one click of a row showing a name, a version and an author; the manifest's
- *  `guest.caps` are the only place the bundle's authority is written down, and
- *  nothing else on this path reads them. Without this, a peer could offer an app
- *  whose guest holds `net`, `node` or `fs` and the consent prompt would look
- *  exactly the same. */
+ *  The requires check is not decoration. An Offer arrives from a peer and is
+ *  installed on one click of a row showing a name, a version and an author; the
+ *  manifest's `guest.requires` are the only place the bundle's authority is
+ *  written down, and nothing else on this path reads them. Without this, a peer
+ *  could offer an app whose guest holds `net/send`, `node/sign` or `fs/*` and the
+ *  consent prompt would look exactly the same. */
 export function isChatApp(manifest) {
     if (manifest.modules.length !== 1)
         return false;
-    const caps = manifest.guest.caps;
-    return caps.length === CHAT_APP_CAPS.length && caps.every((c) => CHAT_APP_CAPS.includes(c));
+    const requires = manifest.guest.requires;
+    return requires.length === CHAT_APP_REQUIRES.length
+        && requires.every((r) => CHAT_APP_REQUIRES.includes(r));
 }

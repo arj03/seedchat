@@ -14,7 +14,7 @@ import { signManifestHybrid, hybridAuthorId, packBundle,
          unpackBundle, verifyManifest, verifyBundle, FreshnessMarks, MANIFEST_FILE, GUEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
 import { GUEST_ABI_VERSION } from "seedkernel-wasm/cap-bridge";
-import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_CAPS } from "./chat-app.js";
+import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_REQUIRES } from "./chat-app.js";
 
 const RTC_CONFIG = { iceServers: [{ urls: [
   "stun:stun.l.google.com:19302",
@@ -399,8 +399,8 @@ function promptMeta(defaultId) {
 //
 // A chat app is an ordinary guest bundle: the guest's `handle` forwards its input to
 // the app's own module by name through `module/call` and returns the render bytes —
-// the whole app is that forwarding guest (chat-app.js). It declares no cap at all
-// (§12.2): its own module map is a primitive, not a grant (seedkernel §12.1).
+// the whole app is that forwarding guest (chat-app.js). It declares no authority at
+// all (§12.2): its own module map is a primitive, not a grant (seedkernel §12.1).
 async function buildAppBundle(wasmBytes) {
   const { meta } = await readWasmSections(wasmBytes);
   if (!meta || !meta.id) throw new Error("cannot build a bundle: wasm has no app_meta id");
@@ -419,7 +419,7 @@ async function buildAppBundle(wasmBytes) {
     guest: {
       hash: bytesToHex(genesisHash(sodium, guestBytes)),
       abi: GUEST_ABI_VERSION,
-      caps: CHAT_APP_CAPS,
+      requires: CHAT_APP_REQUIRES,
     },
   };
   const manifestEnv = signManifestHybrid(sodium, {
@@ -453,10 +453,10 @@ function peekMeta(bundleBytes) {
   catch { return null; }
   if (!vm) return null;                        // bad signature ⇒ decline quietly
   const { author, manifest } = vm;
-  // One module, and a guest holding no capability at all (chat-app.js). The
-  // caps half is what keeps an Offer from installing authority behind a consent row
-  // that only shows a name: `guest.caps` is where a bundle's reach is written down,
-  // and this is the one place on the install path that reads it.
+  // One module, and a guest holding no authority at all (chat-app.js). The
+  // requires half is what keeps an Offer from installing authority behind a consent
+  // row that only shows a name: `guest.requires` is where a bundle's reach is
+  // written down, and this is the one place on the install path that reads it.
   if (!isChatApp(manifest)) return null;
   const mod = manifest.modules[0];
   const wasm = files[moduleFile(mod.name)];

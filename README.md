@@ -112,8 +112,8 @@ in an `OFFER` frame; the recipient re-verifies the original author's manifest
 signature, so a bundle survives any number of relays and still authenticates
 against whoever wrote it. An Offer is installed on one click, so the recipient
 also checks its *shape* before showing that click: one module, and a guest holding
-no capability at all (`browser/chat-app.js`). A signature says who wrote a
-bundle, not what it may reach — `guest.caps` is where that is written down, and
+no authority at all (`browser/chat-app.js`). A signature says who wrote a
+bundle, not what it may reach — `guest.requires` is where that is written down, and
 this shell will not install an app claiming reach it did not ask for.
 
 The relay is partitioned into **rooms** (`ws://host:8080/<room>`, default

@@ -28,8 +28,8 @@ const {
 } = await import("seedkernel-wasm/bundle");
 const { createSafeRealm } = await import("seedkernel-wasm/safe-js");
 const { GUEST_ABI_VERSION } = await import("seedkernel-wasm/cap-bridge");
-// The chat app shape the browser shell authors from — same guest source, same caps.
-const { chatGuestSource, isChatApp, CHAT_APP_CAPS } = await import("../browser/chat-app.js");
+// The chat app shape the browser shell authors from — same guest source, same authority set.
+const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES } = await import("../browser/chat-app.js");
 
 // The built transport bundle blob — the exact bytes host/transport-bundle.js
 // embeds as B64 (both are written by the same kernel build step). Read from the
@@ -127,7 +127,9 @@ try {
 try {
   const forgedManifest = {
     app: "evil", version: 1, role: "transport", modules: [],
-    guest: { hash: "00".repeat(32), abi: GUEST_ABI_VERSION, caps: ["link", "transport", "node"], primitives: [] },
+    // Claims both mount halves (§12.5) — the requires that make a bundle a transport
+    // — signed by an author the transport slot does not pin.
+    guest: { hash: "00".repeat(32), abi: GUEST_ABI_VERSION, requires: ["link/open", "link/send", "link/close", "link/stat", "transport/deliver", "transport/settle", "transport/link-auth", "transport/peer-edge", "transport/ready", "transport/link-down", "node/sign", "node/random", "timer/arm", "timer/clear"] },
   };
   const env = signManifest(sodium, identityA.privateKey, identityA.publicKey, forgedManifest);
   const blob = packBundle({ [MANIFEST_FILE]: env, [GUEST_FILE]: new Uint8Array(0) });
@@ -153,7 +155,7 @@ try {
     guest: {
       hash: toHex(genesisHash(sodium, guestBytes)),
       abi: GUEST_ABI_VERSION,
-      caps: CHAT_APP_CAPS,
+      requires: CHAT_APP_REQUIRES,
     },
   };
   const manifestEnv = signManifest(sodium, identityA.privateKey, identityA.publicKey, manifest);
@@ -225,20 +227,20 @@ try {
 } catch (err) { fail("appKeyFor", err); }
 
 // 7. the shape gate an Offer passes through (peekMeta → isChatApp). A peer's bundle
-// is installed on one click of a row showing a name and an author, so the caps it
-// declares are the whole of what that click grants — and a chat app grants nothing
-// at all: its own module map is a primitive, not a domain (seedkernel §12.1).
+// is installed on one click of a row showing a name and an author, so the requires
+// it declares are the whole of what that click grants — and a chat app grants nothing
+// at all: its own module map is a primitive, not an authority (seedkernel §12.1).
 try {
-  const chatManifest = (caps, modules) => ({
+  const chatManifest = (requires, modules) => ({
     app: "chat", version: 1,
     modules: modules ?? [{ name: "chat", hash: "aa" }],
-    guest: { hash: "bb", abi: GUEST_ABI_VERSION, caps },
+    guest: { hash: "bb", abi: GUEST_ABI_VERSION, requires },
   });
-  assert(isChatApp(chatManifest(CHAT_APP_CAPS)), "the shell's own app shape is accepted");
-  assert(!isChatApp(chatManifest(["module", "net"])), "an offered app claiming net is refused");
-  assert(!isChatApp(chatManifest(["fs"])), "an offered app claiming fs is refused");
-  assert(!isChatApp(chatManifest(["module"])), "a legacy app still claiming the retired module domain is refused");
-  assert(!isChatApp(chatManifest(CHAT_APP_CAPS, [])), "a no-module app is refused");
+  assert(isChatApp(chatManifest(CHAT_APP_REQUIRES)), "the shell's own app shape is accepted");
+  assert(!isChatApp(chatManifest(["net/send"])), "an offered app claiming net is refused");
+  assert(!isChatApp(chatManifest(["fs/get"])), "an offered app claiming fs is refused");
+  assert(!isChatApp(chatManifest(["node/sign"])), "an offered app claiming node is refused");
+  assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, [])), "a no-module app is refused");
   ok("the offer shape gate admits only zero-authority chat apps");
 } catch (err) { fail("offer shape gate", err); }
 
