@@ -21,7 +21,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 // browser shell's withMlDsa65 does.
 const { loadCrypto } = await import("seedkernel-wasm");
 const sodium = await loadCrypto();
-const { createShell, ModuleTable, byRole } = await import("seedkernel-wasm/shell-core");
+const { createShell, ModuleTable, byPrivilege } = await import("seedkernel-wasm/shell-core");
 const {
   FreshnessMarks, signManifest, packBundle, verifyBundle, genesisHash,
   MANIFEST_FILE, GUEST_FILE, moduleFile, appKeyFor,
@@ -42,8 +42,9 @@ const transportAuthorHex = Buffer.from(verifyBundle(sodium, TRANSPORT_BYTES).aut
 const toHex = (b) => Buffer.from(b).toString("hex");
 
 // ── the chat-shell admit gates, in shape ──────────────────────────────────────
-// ONE admission predicate (§12.5) over the two classes, said with `byRole`: the
-// `app` branch is the consent gate, the `mount` branch pins the transport author.
+// ONE admission predicate (§12.5) keyed on the privileges the manifest's
+// `requires` reach, said with `byPrivilege`: the `base` branch is the consent
+// gate, the `mount` grant pins the transport author.
 const pendingApprovals = new Set();
 function admit(v) {
   const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
@@ -54,7 +55,7 @@ function admit(v) {
 function admitMount(v) {
   return toHex(v.author) === transportAuthorHex;
 }
-const admitPolicy = byRole({ app: admit, mount: admitMount });
+const admitPolicy = byPrivilege({ base: admit, grants: { mount: admitMount } });
 
 function chatPlatform(identity, contactSecret) {
   return {
