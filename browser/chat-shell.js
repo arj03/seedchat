@@ -4,7 +4,7 @@
 // import map in chat-shell.html resolves them to the vendored build. If a future
 // kernel change breaks chat, it broke a public export, which is the point.
 import sodium from "seedkernel-wasm/libsodium";
-import { createShell, ModuleTable } from "seedkernel-wasm/shell-core";
+import { createShell, ModuleTable, byRole } from "seedkernel-wasm/shell-core";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { createSafeRealm } from "seedkernel-wasm/safe-js";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
@@ -13,7 +13,7 @@ import { signManifestHybrid, hybridAuthorId, packBundle,
          genesisHash, appKeyFor,
          unpackBundle, verifyManifest, verifyBundle, FreshnessMarks, MANIFEST_FILE, GUEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
-import { GUEST_ABI_VERSION } from "seedkernel-wasm/cap-bridge";
+import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
 import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO } from "./chat-app.js";
 
 const RTC_CONFIG = { iceServers: [{ urls: [
@@ -198,9 +198,9 @@ shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 // guest forwards to its module under the shell's execution budget (§12.3). That
 // is the honest cost of one app shape: this shell now pays the lazy QuickJS
 // engine for chat apps where it once paid only for the transport. Admission is
-// split into the kernel's two classes (§12.5): `admit` answers app bundles
-// (user consent), `admitTransport` answers the transport bundle, which is
-// admitted by author pin.
+// ONE predicate (§12.5) over the kernel's two classes, said with `byRole`: the
+// `app` branch is the user-consent gate, the `mount` branch admits the transport
+// bundle by author pin.
 shell = createShell({
   platform: {
     sodium,
@@ -210,15 +210,17 @@ shell = createShell({
     get contactSecret() { return roomSecret ?? undefined; },
     createRealm: async (o) => createSafeRealm(o),
   },
-  admit(v) {
-    const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
-    if (!pendingApprovals.has(bytesHashHex)) return false;
-    pendingApprovals.delete(bytesHashHex);
-    return true;
-  },
-  admitTransport(v) {
-    return bytesToHex(v.author) === transportAuthorHex;
-  },
+  admit: byRole({
+    app(v) {
+      const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
+      if (!pendingApprovals.has(bytesHashHex)) return false;
+      pendingApprovals.delete(bytesHashHex);
+      return true;
+    },
+    mount(v) {
+      return bytesToHex(v.author) === transportAuthorHex;
+    },
+  }),
 });
 
 // ─── channel identity ──────────────────────────────────────────────────

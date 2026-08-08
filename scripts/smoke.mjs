@@ -21,13 +21,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 // browser shell's withMlDsa65 does.
 const { loadCrypto } = await import("seedkernel-wasm");
 const sodium = await loadCrypto();
-const { createShell, ModuleTable } = await import("seedkernel-wasm/shell-core");
+const { createShell, ModuleTable, byRole } = await import("seedkernel-wasm/shell-core");
 const {
   FreshnessMarks, signManifest, packBundle, verifyBundle, genesisHash,
   MANIFEST_FILE, GUEST_FILE, moduleFile, appKeyFor,
 } = await import("seedkernel-wasm/bundle");
 const { createSafeRealm } = await import("seedkernel-wasm/safe-js");
-const { GUEST_ABI_VERSION } = await import("seedkernel-wasm/cap-bridge");
+const { GUEST_ABI_VERSION } = await import("seedkernel-wasm/guest-seam");
 // The chat app shape the browser shell authors from — same guest source, same authority set.
 const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO } = await import("../browser/chat-app.js");
 
@@ -42,8 +42,8 @@ const transportAuthorHex = Buffer.from(verifyBundle(sodium, TRANSPORT_BYTES).aut
 const toHex = (b) => Buffer.from(b).toString("hex");
 
 // ── the chat-shell admit gates, in shape ──────────────────────────────────────
-// The two admission classes (§12.5): `admit` answers app bundles (the consent
-// gate), `admitTransport` answers the transport bundle, by author pin.
+// ONE admission predicate (§12.5) over the two classes, said with `byRole`: the
+// `app` branch is the consent gate, the `mount` branch pins the transport author.
 const pendingApprovals = new Set();
 function admit(v) {
   const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
@@ -51,9 +51,10 @@ function admit(v) {
   pendingApprovals.delete(bytesHashHex);
   return true;
 }
-function admitTransport(v) {
+function admitMount(v) {
   return toHex(v.author) === transportAuthorHex;
 }
+const admitPolicy = byRole({ app: admit, mount: admitMount });
 
 function chatPlatform(identity, contactSecret) {
   return {
@@ -111,8 +112,8 @@ const kpB = sodium.crypto_sign_keypair();
 const identityB = { publicKey: kpB.publicKey, privateKey: kpB.privateKey };
 const CONTACT = new Uint8Array(32).fill(7); // a "room secret" both ends share
 
-const A = createShell({ platform: chatPlatform(identityA, CONTACT), admit, admitTransport });
-const B = createShell({ platform: chatPlatform(identityB, CONTACT), admit, admitTransport });
+const A = createShell({ platform: chatPlatform(identityA, CONTACT), admit: admitPolicy });
+const B = createShell({ platform: chatPlatform(identityB, CONTACT), admit: admitPolicy });
 
 // 1. transport bundle admitted by author pin; shell.net/transport live
 try {
