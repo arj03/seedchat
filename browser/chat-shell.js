@@ -293,9 +293,9 @@ function updatePeerPill() {
 // body` and it returns the render bytes for the iframe. The guest — not the WASM
 // and not the kernel — does all the I/O: the shell authenticates the sender via the
 // AKE channel, invokes the app's guest `handle` entrypoint (the same seam an
-// initiator's runGuest takes), and the guest drives its module through
-// `module/call` (§12.2). Inbound delivery and local echo both cross the guest, so
-// chat's whole app logic is the ~5-line forwarding guest it ships in the bundle.
+// initiator's runGuest takes), and the guest drives its module by naming it on the
+// same seam (§12.2). Inbound delivery and local echo both cross the guest, so
+// chat's whole app logic is the one-line forwarding guest it ships in the bundle.
 //
 // `installedApps` keeps the per-app state we need to re-mount the UI, send
 // updates, and re-broadcast the packed bundle transitively (`bundleBytes` is the
@@ -399,7 +399,7 @@ function promptMeta(defaultId) {
 // freshness mark, so a chat bundle carries no meaningful version counter.
 //
 // A chat app is an ordinary guest bundle: the guest's `handle` forwards its input to
-// the app's own module by name through `module/call` and returns the render bytes —
+// the app's own module by name on the same `host.call` seam and returns the render bytes —
 // the whole app is that forwarding guest (chat-app.js). It declares no authority at
 // all (§12.2): its own module map is a primitive, not a grant (seedkernel §12.1).
 async function buildAppBundle(wasmBytes) {
@@ -750,7 +750,7 @@ async function renderLocal(rec, payload) {
   input.set(myAuthorId, 0);
   input.set(payload, myAuthorId.length);
   // The local echo runs through the app's guest like an inbound frame does — the
-  // guest `handle` forwards to the module through `module/call` (§12.2), under the
+  // guest `handle` forwards to the module by name (§12.2), under the
   // same seam a peer's request would take. Which means it can fail the same way,
   // so it reports rather than rejecting into a caller that has nowhere to put it.
   let render;

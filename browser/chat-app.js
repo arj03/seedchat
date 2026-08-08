@@ -24,8 +24,8 @@ export function assertAppId(id) {
 }
 
 /** The whole authority a chat app holds (§12.2): none. Its own module map is not a
- *  grant — `module/call` is a primitive, the bundle's own code, ungated like
- *  `crypto` (seedkernel §12.1) — so the manifest declares an empty `requires` set.
+ *  grant — a bare `host.call` name is a primitive, the bundle's own code, ungated
+ *  like `crypto` (seedkernel §12.1) — so the manifest declares an empty `requires` set.
  *  Authored into every bundle this shell builds, and required of every bundle it
  *  accepts — see `peekMeta`. */
 export const CHAT_APP_REQUIRES = [];
@@ -45,19 +45,16 @@ export const CHAT_APP_REQUIRES = [];
  *  claim off the manifest instead of offering a bind button. */
 export const CHAT_PROTO = "chat";
 
-/** The ~5-line guest every chat app ships. Its `handle` entrypoint forwards its
- *  input to the app's own module by name through `module/call` (§12.2) and returns
- *  the render bytes — the whole app is this forwarding guest.
+/** The one-line guest every chat app ships. Its `handle` entrypoint forwards its
+ *  input to the app's own module — named directly on the same `host.call` seam every
+ *  other capability uses (§12.2) — and returns the render bytes. That is the whole app.
  *
- *  charCodeAt rather than TextEncoder: a zero-authority realm has none (§12.3),
- *  and an id that passed `assertAppId` is pure ASCII, so the spread frames
- *  module/call's `[name_len u8][name][input..]` directly. */
+ *  Interpolating the id into a string literal is safe because `assertAppId` already
+ *  held it to `[A-Za-z0-9_-]`: nothing to escape, no quote to break out of, and no
+ *  `/`, which is what keeps it a module name rather than a host name. */
 export function chatGuestSource(appId) {
     assertAppId(appId);
-    return `register("handle", (input) => {
-  const name = Array.from("${appId}", (c) => c.charCodeAt(0));
-  return host.call("module/call", new Uint8Array([name.length, ...name, ...input]));
-});`;
+    return `register("handle", (input) => host.call("${appId}", input));`;
 }
 
 /** Does a verified manifest describe a chat app this shell will run? The demo's

@@ -1,9 +1,9 @@
 # seedchat — the chat app layer for [seedkernel](https://github.com/arj03/seedkernel)
 
 Chat is the smallest possible app on the runtime: a confined JS **guest** over a
-single **pure-transform** WASM module. The guest is a handful of lines — its
-`handle` entrypoint forwards its input to the module by name through
-`module/call` and returns the render bytes — and the module does no I/O and no
+single **pure-transform** WASM module. The guest is one line — its
+`handle` entrypoint forwards its input to the module by name on the same
+`host.call` seam and returns the render bytes — and the module does no I/O and no
 crypto: it reads `senderPk ‖ chatType ‖ body` and returns render bytes for the
 UI. Everything around it — authenticating the sender, moving frames, driving the
 iframe — is the runtime's job, because a pure transform has no reach of its own
