@@ -30,6 +30,21 @@ export function assertAppId(id) {
  *  accepts — see `peekMeta`. */
 export const CHAT_APP_REQUIRES = [];
 
+/** The wire protocol every chat app speaks (§12.10) — one id, claimed by every
+ *  bundle this shell authors and required of every bundle it accepts.
+ *
+ *  It is deliberately NOT the app id. The id names the app (and its module); this
+ *  names the conversation, and the whole point is that it is the same string for
+ *  everyone: two peers running different authors' chat apps interoperate because
+ *  both claim `chat`, and a frame says only which protocol it is. An app that
+ *  claimed its own id would be a chat app nobody else could talk to.
+ *
+ *  Claiming it is what routes it: the load that admits a chat bundle makes it this
+ *  node's `chat` app, and installing another one takes the id over (§12.10) — which
+ *  is exactly the swap this demo exists to show, and is why the Apps panel reads the
+ *  claim off the manifest instead of offering a bind button. */
+export const CHAT_PROTO = "chat";
+
 /** The ~5-line guest every chat app ships. Its `handle` entrypoint forwards its
  *  input to the app's own module by name through `module/call` (§12.2) and returns
  *  the render bytes — the whole app is this forwarding guest.
@@ -57,6 +72,13 @@ export function chatGuestSource(appId) {
  *  consent prompt would look exactly the same. */
 export function isChatApp(manifest) {
     if (manifest.modules.length !== 1)
+        return false;
+    // What it will SERVE, checked beside what it may do. A bundle's claim is now the
+    // routing (§12.10) — installing it points `chat` at it — so the claim is part of
+    // what the consent prompt is agreeing to, and an offered bundle claiming ids this
+    // shell knows nothing about would take those over on one click.
+    const protocols = manifest.protocols ?? [];
+    if (protocols.length !== 1 || protocols[0] !== CHAT_PROTO)
         return false;
     const requires = manifest.guest.requires;
     return requires.length === CHAT_APP_REQUIRES.length

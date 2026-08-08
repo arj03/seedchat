@@ -14,7 +14,7 @@ import { signManifestHybrid, hybridAuthorId, packBundle,
          unpackBundle, verifyManifest, verifyBundle, FreshnessMarks, MANIFEST_FILE, GUEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
 import { GUEST_ABI_VERSION } from "seedkernel-wasm/cap-bridge";
-import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_REQUIRES } from "./chat-app.js";
+import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO } from "./chat-app.js";
 
 const RTC_CONFIG = { iceServers: [{ urls: [
   "stun:stun.l.google.com:19302",
@@ -285,9 +285,9 @@ function updatePeerPill() {
 // its own.
 //
 // The key is node-local. Two peers need not agree on it: a CHAT frame carries a
-// *protocol id*, and each side resolves that through its own `bindings` to whichever
-// app it holds — so two peers running different authors' chat apps interoperate as
-// long as both speak the protocol.
+// *protocol id*, and each side resolves that to whichever app it installed that claims
+// it — so two peers running different authors' chat apps interoperate as long as both
+// speak the protocol.
 //
 // An app's module is a PURE TRANSFORM: the guest hands it `senderPk ‖ chatType ‖
 // body` and it returns the render bytes for the iframe. The guest — not the WASM
@@ -309,12 +309,11 @@ function updatePeerPill() {
 const installedApps = new Map();   // appKey → AppRecord
 let activeAppKey = null;
 
-// Protocol bindings (§12.10) — these are now handled by the shared Bindings module
-// (shell-core.js re-exports Bindings from bindings.ts). The hand-rolled code that used
-// to live here is gone; every target shares one implementation. Install is INERT: a
-// bundle lands serving nothing, and `shell.bindings.bind(proto, appKey)` — the user's
-// own click in the Apps panel — is the only way a protocol gains a destination.
-// After the shell is assembled below, `shell.bindings` is the binding table.
+// Protocol routing (§12.10) — there is no table here and no bind button. Every chat
+// bundle's manifest CLAIMS the chat protocol (CHAT_PROTO, chat-app.js), and the load
+// that admits it is what routes the id to it: installing an app is what makes it the
+// one this node chats with, and installing another takes the id over. `shell.resolve`
+// answers who holds it; the Apps panel below reads that rather than storing anything.
 
 const STORE = "apps.v2";
 
@@ -323,9 +322,9 @@ const OFFER_PROTO = "_offer";
 // ── shell frame wire format ─────────────────────────────────────────────
 //
 // Messages now ride the Transport request plane: a chat message is a req with a
-// protocol id in the frame, and the receiving shell resolves the protocol through
-// bindings to the bound app's handler. The custom FRAME_CHAT / FRAME_OFFER framing
-// that used to live here is gone — one plane, one dispatch scheme (§12.10).
+// protocol id in the frame, and the receiving shell resolves that to the app claiming
+// it. The custom FRAME_CHAT / FRAME_OFFER framing that used to live here is gone —
+// one plane, one dispatch scheme (§12.10).
 
 // ── iframe bridge ──────────────────────────────────────────────────────
 //
@@ -414,6 +413,11 @@ async function buildAppBundle(wasmBytes) {
   const manifest = {
     app: meta.id,
     version: 1,
+    // What this app serves (§12.10), signed with the rest of the manifest. Every chat
+    // app claims the one chat protocol — that is what lets two peers running different
+    // apps talk — and claiming it is what routes it: installing this bundle makes it
+    // this node's `chat` app, taking the id over from whatever held it.
+    protocols: [CHAT_PROTO],
     modules: [{
       name: meta.id,
       hash: bytesToHex(genesisHash(sodium, wasmBytes)),
@@ -463,7 +467,13 @@ function peekMeta(bundleBytes) {
   const mod = manifest.modules[0];
   const wasm = files[moduleFile(mod.name)];
   if (!wasm || wasm.length === 0) return null;
-  return { app: manifest.app, moduleName: mod.name, moduleHash: mod.hash, wasm, authorPk: author };
+  // `protocols` rides along because it is what the bundle will SERVE once admitted
+  // (§12.10) — the same manifest read that gates the install answers "and what does it
+  // take over", so the UI never re-parses the envelope to find out.
+  return {
+    app: manifest.app, moduleName: mod.name, moduleHash: mod.hash, wasm, authorPk: author,
+    protocols: manifest.protocols ?? [],
+  };
 }
 
 // Admit a bundle the user has already consented to. Calls the shared
@@ -476,13 +486,32 @@ async function applyAppBundle(bundleBytes) {
   const { meta, uiHtml } = await readWasmSections(peeked.wasm);
   if (!meta) throw new Error("bundle module has no app_meta");
 
+  // The protocols this app was serving before the load, so the takeover this install
+  // may have just performed can be named in the log line below. Read here rather than
+  // remembered anywhere: the routing is the shell's projection, and the only thing worth
+  // saying about it is what changed.
+  const heldBefore = new Map(peeked.protocols.map((p) => [p, shell.resolve(p)]));
+
   const loaded = await shell.loadBundleBlob(bundleBytes);
   const author = loaded.author;
   const key = appKeyFor(author, peeked.app);
+  // Installing IS the routing (§12.10): this bundle's claim now points at it. Say so
+  // when it took an id off another installed app — the displaced app is still here and
+  // still intact, just idle, and removing this one hands the protocol straight back.
+  for (const [proto, before] of heldBefore) {
+    if (shell.resolve(proto) === key && before && before !== key) {
+      const prev = installedApps.get(before);
+      shellPrint(`“${proto}” is now served by ${meta.name || peeked.app} ${meta.version || ""}`
+        + (prev ? ` — ${prev.name} ${prev.version} stays installed, idle.` : "."), "sys");
+    }
+  }
 
   const record = {
     id: peeked.app,
     key,
+    /** The manifest's signed claim (§12.10) — what this app serves when nothing
+     *  later has taken the id over. The app row reads it against `shell.resolve`. */
+    protocols: peeked.protocols,
     name: meta.name || peeked.app,
     version: meta.version || "",
     description: meta.description || "",
@@ -567,10 +596,9 @@ function persistInstalledApps() {
       arr.push(Array.from(rec.bundleBytes));
     }
     sessionStorage.setItem(STORE + ".bundles", JSON.stringify(arr));
-    // Bindings are ordinary user preference (§12.10) — they persist beside the apps and
-    // carry no security property, so a hand-edited store can misroute a message and
-    // nothing more.
-    sessionStorage.setItem(STORE + ".bindings", JSON.stringify(shell.bindings.entries()));
+    // Nothing else to keep. The routing is a projection of the installed manifests
+    // (§12.10), so the bundles above ARE it: restoring them restores what this node
+    // serves, in the order it served them, with no second store to fall out of step.
     if (activeAppKey) sessionStorage.setItem(STORE + ".active", activeAppKey);
     else sessionStorage.removeItem(STORE + ".active");
   } catch {}
@@ -581,19 +609,10 @@ async function restoreInstalledApps() {
   try { arr = JSON.parse(sessionStorage.getItem(STORE + ".bundles") || "[]"); }
   catch { return; }
   if (!Array.isArray(arr)) return;
-  // Bindings are ordinary user preference (§12.10) and live independent of install, so
-  // they are restored first; a saved binding whose app failed to restore is dropped
-  // below. There is no auto-bind to apply — install never writes this table.
-  try {
-    const saved = JSON.parse(sessionStorage.getItem(STORE + ".bindings") || "[]");
-    if (Array.isArray(saved)) {
-      for (const pair of saved) {
-        if (Array.isArray(pair) && typeof pair[0] === "string" && typeof pair[1] === "string") {
-          shell.bindings.bind(pair[0], pair[1]);
-        }
-      }
-    }
-  } catch {}
+  // Load order is restore order, and that decides who ends up serving `chat` when two
+  // installed apps claim it (§12.10) — the last one wins, here as at install time. So
+  // replaying the bundles in the order they were stored reproduces the routing exactly,
+  // and there is nothing else to restore.
   for (const raw of arr) {
     try {
       const bundleBytes = new Uint8Array(raw);
@@ -606,7 +625,6 @@ async function restoreInstalledApps() {
       shellPrint(`Could not restore an app: ${err.message}`, "err");
     }
   }
-  for (const [proto, key] of shell.bindings.entries()) if (!installedApps.has(key)) shell.bindings.unbind(proto);
   const saved = sessionStorage.getItem(STORE + ".active");
   if (saved && installedApps.has(saved)) setActiveApp(saved);
 }
@@ -823,56 +841,32 @@ function buildAppRow(rec) {
   }
   li.appendChild(meta);
 
-  // Protocol bindings (§12.10). The table is the only source of truth: install is
-  // inert, so this app serves exactly the protocols the user bound to it — one row
-  // each, a plain toggle (binding is a preference, so switching is one click and
-  // reversible). The input + Bind button is the user's one act for a protocol the
-  // app does not serve yet; typing a protocol that already points at another app
-  // moves it here — rebinding is the operator's move, never an install's.
+  // What this app SERVES (§12.10) — read, never set. The protocols are the manifest's
+  // signed claim and the routing is the projection of every installed manifest, so this
+  // row has nothing to offer the user but the truth: which ids this bundle claimed, and
+  // for each, whether this app is the one holding it. A claim it does not hold means a
+  // later-installed app took the id over — the app stays installed and intact, and gets
+  // it back the moment that one is removed, which is the whole of "rebinding" now.
   const protos = document.createElement("div");
   protos.className = "app-row-meta";
-  const bound = shell.bindings.boundProtocols(rec.key);
-  if (bound.length === 0) {
+  const claimed = rec.protocols;
+  if (claimed.length === 0) {
     const none = document.createElement("span");
-    none.textContent = " serves nothing — bind a protocol below";
+    none.textContent = " claims no protocol — receives nothing";
     protos.appendChild(none);
   }
-  for (const proto of bound) {
-    const label = document.createElement("label");
-    label.className = "app-row-proto";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = true;
-    cb.addEventListener("change", () => {
-      if (!cb.checked) { shell.bindings.unbind(proto); persistInstalledApps(); renderAppList(); }
-    });
-    label.appendChild(cb);
-    const txt = document.createElement("span");
-    txt.textContent = ` protocol “${proto}”`;
-    label.appendChild(txt);
-    protos.appendChild(label);
+  for (const proto of claimed) {
+    const serving = shell.resolve(proto) === rec.key;
+    const span = document.createElement("span");
+    span.className = "app-row-proto";
+    const b = document.createElement("b");
+    b.textContent = serving ? "serves" : "claims";
+    span.appendChild(b);
+    const holder = serving ? null : installedApps.get(shell.resolve(proto));
+    span.appendChild(document.createTextNode(
+      ` “${proto}”` + (serving ? "" : ` — taken over by ${holder ? `${holder.name} ${holder.version}` : "another app"}`)));
+    protos.appendChild(span);
   }
-  const addProto = document.createElement("label");
-  addProto.className = "app-row-proto";
-  const protoInput = document.createElement("input");
-  protoInput.type = "text";
-  protoInput.placeholder = "protocol to serve";
-  protoInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") bindBtn.click();
-  });
-  const bindBtn = document.createElement("button");
-  bindBtn.textContent = "Bind";
-  bindBtn.addEventListener("click", () => {
-    const proto = protoInput.value.trim();
-    if (!proto) return;
-    shell.bindings.bind(proto, rec.key);
-    protoInput.value = "";
-    persistInstalledApps();
-    renderAppList();
-  });
-  addProto.appendChild(protoInput);
-  addProto.appendChild(bindBtn);
-  protos.appendChild(addProto);
   li.appendChild(protos);
 
   const btns = document.createElement("div");
@@ -927,7 +921,7 @@ function removeApp(key) {
   if (!rec) return;
   if (!confirm(`Remove ${rec.name} ${rec.version}? The kernel handler will be uninstalled.`)) return;
   // Revocation (§12.5): uninstall removes every kernel handler derived from the app key,
-  // drops all protocol bindings, and disposes the guest realm if this was the loaded app.
+  // drops the protocols it claimed, and disposes the guest realm if this was the loaded app.
   shell.uninstall(key);
   installedApps.delete(key);
   if (activeAppKey === key) unmountActiveApp();
@@ -1073,12 +1067,11 @@ window.addEventListener("message", async (ev) => {
   if (msg.type === "send" && typeof msg.chatType === "number" && msg.body) {
     const active = activeAppKey ? installedApps.get(activeAppKey) : null;
     if (!active) return;
-    // Send under a protocol the active app is actually BOUND to, so our own echo
-    // (and a peer that binds the same protocol to a different implementation) routes
-    // to the right place. Install is inert (§12.10): a freshly installed app serves
-    // nothing until the user binds a protocol to it in the Apps panel — an app with
-    // no binding sends nothing.
-    const proto = shell.bindings.boundProtocols(active.key)[0];
+    // Send under the protocol the active app CLAIMS (§12.10) — the same id its manifest
+    // signed, so a peer routes the frame to whatever app it installed that claims the
+    // same one, which may be a different author's implementation entirely. That is what
+    // the id is for: it names the conversation, not the code.
+    const proto = active.protocols[0];
     if (!proto) return;
     const body = msg.body instanceof Uint8Array ? msg.body : new Uint8Array(msg.body);
     const chatBytes = new Uint8Array(1 + body.length);   // [chatType][body]
@@ -1171,7 +1164,7 @@ async function ensureTransport() {
       updatePeerPill();
       // Replay our last nick so a peer joining mid-session learns our identity
       // without us re-sending it (chat v2 uses chatType 0x02 for nick).
-      if (lastSentNickBody && shell.bindings.boundApp(lastSentNickBody.proto)) {
+      if (lastSentNickBody && shell.resolve(lastSentNickBody.proto)) {
         const body = lastSentNickBody.body;
         const chatBytes = new Uint8Array(1 + body.length);
         chatBytes[0] = 0x02;
@@ -1199,9 +1192,9 @@ async function ensureTransport() {
   if (!transportWired) {
     transportWired = true;
     // One plane, one dispatch scheme: the shell owns the shared dispatch (§12.10).
-    // An inbound frame names a protocol id; the shell resolves it through bindings
-    // to the installed app and invokes that app's guest `handle` entrypoint — the
-    // answer is a Promise, which the driver awaits and we render when it settles.
+    // An inbound frame names a protocol id; the shell resolves it to the app claiming
+    // it and invokes that app's guest `handle` entrypoint — the answer is a Promise,
+    // which the driver awaits and we render when it settles.
     // The only special protocol is _offer (bundle transit), which we handle
     // directly. Wired here, on the standing driver, because the shell's
     // `transport` face is a throw-until-loaded stub before that.
@@ -1212,7 +1205,7 @@ async function ensureTransport() {
       }
       const result = shell.dispatch(from, proto, payload);
       if (result) {
-        const appKey = shell.bindings.boundApp(proto);
+        const appKey = shell.resolve(proto);
         if (appKey === activeAppKey) {
           // A second consumer of the same promise, purely for the local view — the
           // driver owns the answer that goes back on the wire. It needs its own

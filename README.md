@@ -124,7 +124,14 @@ SDP metadata and refuse to forward, and can never impersonate a peer.
 
 ## Protocol interop
 
-A chat frame carries a *protocol id*, not an app name. Which chat app renders a
-received message is the receiving user's own binding, so two peers running
-different authors' chat apps interoperate as long as both speak the protocol.
-See §11 and §12.10 in the kernel's `docs/RUNTIME.md`.
+A chat frame carries a *protocol id*, not an app name. Every chat app's signed
+manifest claims the one id `chat` (`CHAT_PROTO`, `browser/chat-app.js`), and
+installing an app is what routes it — so two peers running different authors'
+chat apps interoperate as long as both speak the protocol, and neither had to
+point anything at anything.
+
+Installing a second chat app therefore **takes `chat` over**: accept a peer's
+Offer and their app becomes the one this node chats with. The displaced app stays
+installed and intact — the Apps panel shows it as *claims “chat” — taken over by
+…* — and gets the protocol back the moment the newcomer is removed. That is the
+whole of rebinding. See §11 and §12.10 in the kernel's `docs/RUNTIME.md`.

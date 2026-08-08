@@ -29,7 +29,7 @@ const {
 const { createSafeRealm } = await import("seedkernel-wasm/safe-js");
 const { GUEST_ABI_VERSION } = await import("seedkernel-wasm/cap-bridge");
 // The chat app shape the browser shell authors from — same guest source, same authority set.
-const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES } = await import("../browser/chat-app.js");
+const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO } = await import("../browser/chat-app.js");
 
 // The built transport bundle blob — the exact bytes host/transport-bundle.js
 // embeds as B64 (both are written by the same kernel build step). Read from the
@@ -151,6 +151,9 @@ try {
   const manifest = {
     app: "chat",
     version: 1,
+    // The claim (§12.10) — every chat app declares the one chat protocol, and the load
+    // is what routes it. Same constant the browser shell signs into its bundles.
+    protocols: [CHAT_PROTO],
     modules: [{ name: "chat", hash: toHex(genesisHash(sodium, chatWasm)) }],
     guest: {
       hash: toHex(genesisHash(sodium, guestBytes)),
@@ -165,12 +168,13 @@ try {
   const loaded = await A.loadBundleBlob(chatBundle);
   chatKey = appKeyFor(loaded.author, "chat");
   assert(A.host.isBound(chatKey, "chat"), `handler bound under ${chatKey}`);
-  // The receiving peer installs its own app and points the protocol at it — each
-  // peer's binding is its own (§12.10), and install is inert, so this bind is the
-  // only thing that gives inbound "chat" frames a destination on B.
+  // The receiving peer installs its own app, and that is the whole of it: the manifest
+  // claims "chat" and B's load routes it there (§12.10). Each peer's routing is its own
+  // — B would answer the same frames with a different author's chat app, as long as it
+  // claimed the same protocol.
   pendingApprovals.add(moduleHash);
-  const loadedB = await B.loadBundleBlob(chatBundle);
-  B.bind("chat", appKeyFor(loadedB.author, loadedB.manifest.app));
+  await B.loadBundleBlob(chatBundle);
+  assert(B.resolve(CHAT_PROTO) === chatKey, `B routes "${CHAT_PROTO}" to the app it installed`);
   ok(`chat app installed on both shells under ${chatKey.slice(0, 24)}…`);
 } catch (err) { fail("chat app install", err); }
 
@@ -234,8 +238,9 @@ try {
 // it declares are the whole of what that click grants — and a chat app grants nothing
 // at all: its own module map is a primitive, not an authority (seedkernel §12.1).
 try {
-  const chatManifest = (requires, modules) => ({
+  const chatManifest = (requires, modules, protocols) => ({
     app: "chat", version: 1,
+    protocols: protocols ?? [CHAT_PROTO],
     modules: modules ?? [{ name: "chat", hash: "aa" }],
     guest: { hash: "bb", abi: GUEST_ABI_VERSION, requires },
   });
@@ -244,7 +249,13 @@ try {
   assert(!isChatApp(chatManifest(["fs/get"])), "an offered app claiming fs is refused");
   assert(!isChatApp(chatManifest(["node/sign"])), "an offered app claiming node is refused");
   assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, [])), "a no-module app is refused");
-  ok("the offer shape gate admits only zero-authority chat apps");
+  // The claim is part of what one click grants now (§12.10): installing an offered
+  // bundle routes every id it claims to it, so a bundle claiming something other than
+  // the chat protocol — or nothing, or extra ids beside it — is not a chat app.
+  assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined, [])), "an app claiming no protocol is refused");
+  assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined, ["seedstore"])), "an app claiming another protocol is refused");
+  assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined, [CHAT_PROTO, "seedstore"])), "an app claiming an extra protocol is refused");
+  ok("the offer shape gate admits only zero-authority chat apps claiming the chat protocol");
 } catch (err) { fail("offer shape gate", err); }
 
 try { B.close(); } catch {}
