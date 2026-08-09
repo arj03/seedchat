@@ -116,13 +116,13 @@ const CONTACT = new Uint8Array(32).fill(7); // a "room secret" both ends share
 const A = createShell({ platform: chatPlatform(identityA, CONTACT), admit: admitPolicy });
 const B = createShell({ platform: chatPlatform(identityB, CONTACT), admit: admitPolicy });
 
-// 1. transport bundle admitted by author pin; shell.net/transport live
+// 1. transport bundle admitted by author pin; shell.transport live
 try {
   await A.loadBundleBlob(TRANSPORT_BYTES);
   await B.loadBundleBlob(TRANSPORT_BYTES);
-  assert(typeof A.net.linkedPeers === "function", "shell.net should be the transport driver");
+  assert(typeof A.transport.linkedPeers === "function", "shell.transport should be the transport driver");
   assert(typeof A.transport.send === "function", "shell.transport should be live");
-  ok("transport bundle admitted by author pin; shell.net/transport live");
+  ok("transport bundle admitted by author pin; shell.transport live");
 } catch (err) { fail("transport bundle admission", err); }
 
 // 2. a FORGED bundle claiming the transport role must be refused
@@ -184,12 +184,12 @@ try {
 const st = { a: { authed: false }, b: { authed: false } };
 try {
   const [chA, chB] = wirePair();
-  const aLink = A.net.openLink({
-    channel: chA, weDialed: true, expectPeerId: B.net.peerId,
+  const aLink = A.transport.openLink({
+    channel: chA, weDialed: true, expectPeerId: B.transport.peerId,
     contactSecret: CONTACT, source: chA.remoteAddr,
     onAuth: () => { st.a.authed = true; },
   });
-  const bLink = B.net.openLink({
+  const bLink = B.transport.openLink({
     channel: chB, weDialed: false, source: chB.remoteAddr,
     onAuth: () => { st.b.authed = true; },
   });
@@ -217,7 +217,7 @@ try {
   const chatBytes = new Uint8Array(1 + body.length);
   chatBytes[0] = 0x00;
   chatBytes.set(body, 1);
-  A.transport.send(B.net.peerId, new TextEncoder().encode("chat"), chatBytes);
+  A.transport.send(B.transport.peerId, new TextEncoder().encode("chat"), chatBytes);
   await until(() => delivered !== null || dispatchErr !== null, 4000, "rendered message");
   if (dispatchErr) throw dispatchErr;
   // chat v1 render: [type 1][pk_len 1][pk 32][body]

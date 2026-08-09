@@ -1159,7 +1159,7 @@ async function ensureTransport() {
   await shell.loadBundleBlob(TRANSPORT_BYTES);
   transportSecret = secret;
   net = new RtcNetwork({
-    driver: shell.net,
+    driver: shell.transport,
     signaling,
     rtcConfig: RTC_CONFIG,
     peerContactFor: () => roomSecret ?? undefined,
