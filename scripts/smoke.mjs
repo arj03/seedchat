@@ -23,7 +23,7 @@ const { loadCrypto } = await import("seedkernel-wasm");
 const sodium = await loadCrypto();
 const { createShell, ModuleTable, byPrivilege } = await import("seedkernel-wasm/shell-core");
 const {
-  FreshnessMarks, signManifest, packBundle, verifyBundle, genesisHash,
+  FreshnessMarks, signManifest, hybridAuthorId, hybridAuthorKeysFromSeed, packBundle, verifyBundle, genesisHash,
   MANIFEST_FILE, GUEST_FILE, moduleFile, appKeyFor,
 } = await import("seedkernel-wasm/bundle");
 const { createSafeRealm } = await import("seedkernel-wasm/safe-js");
@@ -111,6 +111,11 @@ const kpA = sodium.crypto_sign_keypair();
 const identityA = { publicKey: kpA.publicKey, privateKey: kpA.privateKey };
 const kpB = sodium.crypto_sign_keypair();
 const identityB = { publicKey: kpB.publicKey, privateKey: kpB.privateKey };
+// A's AUTHOR key set, which is not its node identity: a manifest is signed by both an
+// Ed25519 and an ML-DSA-65 key (seedkernel §12.4), and the author id is the hash over
+// the pair. Through the kernel's own seed→key-set derivation, the same call the browser
+// shell makes, so this test signs with the key set the shell would.
+const authorA = hybridAuthorKeysFromSeed(sodium, identityA.privateKey.slice(0, 32));
 const CONTACT = new Uint8Array(32).fill(7); // a "room secret" both ends share
 
 const A = createShell({ platform: chatPlatform(identityA, CONTACT), admit: admitPolicy });
@@ -133,7 +138,7 @@ try {
     // — signed by an author the transport slot does not pin.
     guest: { hash: "00".repeat(32), abi: GUEST_ABI_VERSION, requires: ["link/open", "link/send", "link/close", "link/stat", "transport/deliver", "transport/settle", "transport/link-auth", "transport/peer-edge", "transport/ready", "transport/link-down", "node/sign", "node/random", "timer/arm", "timer/clear"] },
   };
-  const env = signManifest(sodium, identityA.privateKey, identityA.publicKey, forgedManifest);
+  const env = signManifest(sodium, authorA, forgedManifest);
   const blob = packBundle({ [MANIFEST_FILE]: env, [GUEST_FILE]: new Uint8Array(0) });
   await A.loadBundleBlob(blob);
   throw new Error("forged transport bundle was admitted!");
@@ -163,7 +168,7 @@ try {
       requires: CHAT_APP_REQUIRES,
     },
   };
-  const manifestEnv = signManifest(sodium, identityA.privateKey, identityA.publicKey, manifest);
+  const manifestEnv = signManifest(sodium, authorA, manifest);
   const chatBundle = packBundle({ [MANIFEST_FILE]: manifestEnv, [moduleFile("chat")]: chatWasm, [GUEST_FILE]: guestBytes });
   const moduleHash = toHex(genesisHash(sodium, chatWasm));
   pendingApprovals.add(moduleHash);            // auto-approve like addAppFromWasm
@@ -228,10 +233,14 @@ try {
   ok(`dispatch round-trip: A → transport → B's chat app's guest → ${delivered.length} render bytes`);
 } catch (err) { fail("chat dispatch round-trip", err); }
 
-// 6. the appKey derivation chat uses for its registry
+// 6. the appKey derivation chat uses for its registry. It leads with the AUTHOR ID —
+// the hash over the signing key set, not A's node key — which is what the app actually
+// landed under above.
 try {
-  const key = appKeyFor(identityA.publicKey, "chat");
-  assert(key.startsWith(toHex(identityA.publicKey).slice(0, 8)), "appKeyFor shape");
+  const authorId = hybridAuthorId(sodium, authorA.ed.publicKey, authorA.mlDsa.publicKey);
+  const key = appKeyFor(authorId, "chat");
+  assert(key === chatKey, "appKeyFor derives the key the load bound under");
+  assert(key.startsWith(toHex(authorId).slice(0, 8)), "appKeyFor shape");
   ok("appKeyFor shape");
 } catch (err) { fail("appKeyFor", err); }
 

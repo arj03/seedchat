@@ -9,7 +9,7 @@ import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { createSafeRealm } from "seedkernel-wasm/safe-js";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import { withMlDsa65, loadMlDsa65 } from "seedkernel-wasm/pq";
-import { signManifestHybrid, hybridAuthorId, packBundle,
+import { signManifest, hybridAuthorId, hybridAuthorKeysFromSeed, packBundle,
          genesisHash, appKeyFor,
          unpackBundle, verifyManifest, verifyBundle, FreshnessMarks, MANIFEST_FILE, GUEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
@@ -177,10 +177,12 @@ if (stored) {
   }));
 }
 const myPkHex = bytesToHex(myKeys.publicKey);
-// The PQ half of this author's key set (§12.4): the ML-DSA-65 key, derived from the
-// SAME seed as the Ed25519 half, so the one stored identity is the whole key set.
-const myPqKeys = sodium.ml_dsa65_keypair_from_seed(sodium.crypto_generichash(
-  32, new Uint8Array([...myKeys.privateKey.slice(0, 32), ...new TextEncoder().encode("seedkernel-author-mldsa-v1")])));
+// This author's whole key set (§12.4): the Ed25519 half plus the ML-DSA-65 half derived
+// from the SAME seed, so the one stored identity is the whole key set. The kernel's own
+// derivation, not a copy of it — the id below is a hash over both keys, so a local
+// imitation that drifted would silently re-identify this tab's author.
+const myAuthorKeys = hybridAuthorKeysFromSeed(sodium, myKeys.privateKey.slice(0, 32));
+const myPqKeys = myAuthorKeys.mlDsa;
 // The hybrid author id: what this tab signs app bundles under, and what peers pin.
 const myAuthorId = hybridAuthorId(sodium, myKeys.publicKey, myPqKeys.publicKey);
 
@@ -433,10 +435,7 @@ async function buildAppBundle(wasmBytes) {
       requires: CHAT_APP_REQUIRES,
     },
   };
-  const manifestEnv = signManifestHybrid(sodium, {
-    ed: { publicKey: myKeys.publicKey, privateKey: myKeys.privateKey },
-    mlDsa: { publicKey: myPqKeys.publicKey, privateKey: myPqKeys.privateKey },
-  }, manifest);
+  const manifestEnv = signManifest(sodium, myAuthorKeys, manifest);
   return packBundle({
     [MANIFEST_FILE]: manifestEnv,
     [moduleFile(meta.id)]: wasmBytes,
