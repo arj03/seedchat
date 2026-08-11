@@ -1,9 +1,10 @@
 # seedchat — the chat app layer for [seedkernel](https://github.com/arj03/seedkernel)
 
 Chat is the smallest possible app on the runtime: a confined JS **guest** over a
-single **pure-transform** WASM module. The guest is one line — its
-`handle` entrypoint forwards its input to the module by name on the same
-`host.call` seam and returns the render bytes — and the module does no I/O and no
+single **pure-transform** WASM module. The guest is a few lines — its `handle`
+entrypoint forwards its input to the module by name on the same `host.call` seam and
+returns the render bytes, and its `send` entrypoint puts a frame on the wire by
+calling the id the transport claims — and the module does no I/O and no
 crypto: it reads `senderPk ‖ chatType ‖ body` and returns render bytes for the
 UI. Everything around it — authenticating the sender, moving frames, driving the
 iframe — is the runtime's job, because a pure transform has no reach of its own
@@ -21,7 +22,7 @@ chat makes into the runtime has to go through a published entry point.
 | `assembly/chat-app-v1/` | v1 handler — text only. `index.ts` is the pure transform, `ui.html` is the iframe UI embedded into the module as a custom section. |
 | `assembly/chat-app-v2/` | v2 handler — text + image + nick. Same shape; upgrading v1→v2 is a re-admit at the same name under the same key. |
 | `browser/chat-shell.*` | The browser shell: identity, admission policy, the transport-bundle network under a WebRTC mesh, the sandboxed iframe. Roughly 1,600 lines. The inline import map in `chat-shell.html` names the kernel surface. |
-| `browser/chat-app.js` | The chat app *shape*, in one place: the forwarding guest's source, the id grammar it may be built from, and the `module`-and-nothing-else authority a chat app holds. The shell authors bundles from it and gates received Offers against it; `scripts/smoke.mjs` imports the same file, so the guest source that gets signed is written once. |
+| `browser/chat-app.js` | The chat app *shape*, in one place: the guest's source (both directions), the id grammar it may be built from, and the network-and-nothing-else authority a chat app holds. The shell authors bundles from it and gates received Offers against it; `scripts/smoke.mjs` imports the same file, so the guest source that gets signed is written once. |
 | `scripts/embed-ui.mjs` | Appends a `ui` custom section to a built `.wasm`. |
 | `scripts/embed-meta.mjs` | Appends an `app_meta` JSON custom section (id, name, version). |
 | `scripts/vendor.mjs` | Copies the kernel's built host (`build-min`: `host/` + `core/`) into `browser/vendor/`, plus the browser libsodium, `mldsa65.wasm`, and the QuickJS realm engine (safe-js's graph), for a bundler-free static serve. Refuses a stale (un-minified-since-compile) kernel build. |
@@ -40,7 +41,7 @@ The entire dependency is seven published entry points of `seedkernel-wasm`:
 | --- | --- |
 | `seedkernel-wasm/shell-core` | `createShell`, `ModuleTable` |
 | `seedkernel-wasm/bundle` | `signManifest`, `packBundle`, `unpackBundle`, `verifyManifest`, `verifyBundle`, `genesisHash`, `kernelNameFor`, `appKeyFor`, `handlesOf`, `FreshnessMarks`, `MANIFEST_FILE`, `GUEST_FILE`, `moduleFile` |
-| `seedkernel-wasm/cap-bridge` | `GUEST_ABI_VERSION` — the guest seam version the chat bundle's guest declares |
+| `seedkernel-wasm/guest-seam` | `GUEST_ABI_VERSION` — the guest seam version the chat bundle's guest declares |
 | `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC mesh |
 | `seedkernel-wasm/safe-js` | `createSafeRealm` — the QuickJS realm every app's guest runs in (the transport bundle's and each chat app's) |
 | `seedkernel-wasm/pq` | `withMlDsa65`, `loadMlDsa65` |
@@ -51,17 +52,25 @@ from `seedkernel-wasm/assembly/seedkernel/handler` — the AssemblyScript half o
 the handler ABI (§4). It is imported, never vendored: an ABI that apps fork is an
 ABI that drifts.
 
-**The network is a bundle, not a platform member.** Since the kernel split the
-network from the core, `ShellPlatform` no longer takes a `network` — the channel
-AKE, record layer and request/response layer ship as a *signed transport bundle*
-(`role: "transport"`), embedded in the host as `TRANSPORT_BUNDLE_B64`. The shell
-stands the transport driver up when that bundle is admitted, and the browser
-consumes it from `seedkernel-wasm/transport-bundle` (the vendored
-`host/transport-bundle.js`). Chat admits it at first relay connect under an
-**author pin** — only the exact artifact this host ships may claim the slot, the
-browser equivalent of an operator's `roles.transport` policy entry — and rebuilds
-the `RtcNetwork` under it whenever the room secret changes, because the driver's
-accepting-side gate reads the secret at install time.
+**The network is a bundle, not a platform member.** `ShellPlatform` takes no
+`network` — the channel AKE, record layer and request/response layer ship as a
+*signed transport bundle* that claims the reserved protocol id `_net`, embedded in
+the host as `TRANSPORT_BUNDLE_B64` and consumed in the browser from
+`seedkernel-wasm/transport-bundle`. Admitting it stands the socket driver up. Chat
+admits it at first relay connect under an **author pin** — only the exact artifact
+this host ships may reach the `link` privilege, the browser equivalent of an
+operator's `grants: { link: [...] }` policy entry — and rebuilds the `RtcNetwork`
+under it whenever the room secret changes, because the driver's accepting-side gate
+reads the secret at install time.
+
+**Both directions cross an app's guest.** The host has no send and no receive: an
+inbound frame reaches the shell as the transport's `_host` op and is routed to the app
+claiming the protocol, and an outbound frame leaves by an app *calling* `_net` — so
+a chat app's manifest declares exactly that one grant, and its guest has a `send`
+entrypoint beside `handle` (`browser/chat-app.js`). The shell drives it with
+`runGuest("send", …)`, once per linked peer. The one thing chat still answers for
+itself is `_offer`, the bundle-in-transit id, through `createShell({ answer })`:
+the app that would handle it is the thing being offered.
 
 The JS entry points are declared in exactly two places: the imports at the top of
 `chat-shell.js`, and the inline import map in `chat-shell.html` (which also names
@@ -111,8 +120,8 @@ loader admits it under the shell's policy. Peers hand each other the same bundle
 in an `OFFER` frame; the recipient re-verifies the original author's manifest
 signature, so a bundle survives any number of relays and still authenticates
 against whoever wrote it. An Offer is installed on one click, so the recipient
-also checks its *shape* before showing that click: one module, and a guest holding
-no authority at all (`browser/chat-app.js`). A signature says who wrote a
+also checks its *shape* before showing that click: one module, and a guest whose
+reach is exactly `_net` and nothing else (`browser/chat-app.js`). A signature says who wrote a
 bundle, not what it may reach — `guest.requires` is where that is written down, and
 this shell will not install an app claiming reach it did not ask for.
 
