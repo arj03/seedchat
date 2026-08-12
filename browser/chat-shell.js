@@ -14,7 +14,7 @@ import { signManifest, hybridAuthorId, hybridAuthorKeysFromSeed, packBundle,
          unpackBundle, verifyManifest, verifyBundle, FreshnessMarks, MANIFEST_FILE, GUEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
 import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
-import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO } from "./chat-app.js";
+import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, CHAT_OP_RENDER } from "./chat-app.js";
 
 const RTC_CONFIG = { iceServers: [{ urls: [
   "stun:stun.l.google.com:19302",
@@ -126,19 +126,21 @@ withMlDsa65(sodium, await loadMlDsa65(
 // The transport bundle — the kernel-shipped signed program that IS the network
 // (§12.6): the channel AKE, the record layer, link routing and the request/
 // response layer run as a confined guest (transport/guest.js), signed into a
-// `role: "transport"` bundle and embedded in the host as TRANSPORT_BUNDLE_B64.
-// Admitting it below stands the shell's transport driver up; chat's own apps are
-// ordinary guest bundles and never claim a role.
+// bundle that claims the reserved `_net` id and embedded in the host as
+// TRANSPORT_BUNDLE_B64. Admitting it below stands the shell's transport driver
+// up; chat's own apps are ordinary guest bundles that claim only `chat`.
 const TRANSPORT_BYTES = (() => {
   const bin = atob(TRANSPORT_BUNDLE_B64);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
 })();
-// The author id of that exact artifact. The admit gate below pins the transport
-// slot to it — the browser equivalent of an operator's `roles.transport` policy
-// entry (§12.5) — so a bundle a PEER offers can never displace the shipped
-// transport, whatever its manifest claims.
+// The author id of that exact artifact. The admit gate below pins the `link`
+// privilege to it — the browser equivalent of an operator's `grants: { link: [...] }`
+// policy entry (§12.5) — so a bundle a PEER offers can never become this node's
+// network, whatever its manifest claims. That matters more than it used to: a transport
+// is an ordinary app that claims `_net`, and a later load wins a contested id (§12.10), so
+// the pin is the only thing standing between an offered bundle and the wire.
 const transportAuthorHex = bytesToHex(verifyBundle(sodium, TRANSPORT_BYTES).author);
 
 // The shell (kernel host + admission policy + bundle loader) is assembled once the
@@ -156,7 +158,6 @@ let shell;
 // ensureTransport() in the networking section.
 let net = null;
 let transportSecret = null;
-let transportWired = false;
 
 // ─── per-tab Ed25519 identity ──────────────────────────────────────────
 let myKeys;
@@ -202,7 +203,7 @@ shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 // engine for chat apps where it once paid only for the transport. Admission is
 // ONE predicate (§12.5) keyed on the privileges the manifest's `requires` reach,
 // said with `byPrivilege`: the `base` branch is the user-consent gate for an
-// app that reaches no privilege, the `mount` grant admits the transport bundle
+// app that reaches no privilege, the `link` grant admits the transport bundle
 // by author pin.
 shell = createShell({
   platform: {
@@ -213,6 +214,36 @@ shell = createShell({
     get contactSecret() { return roomSecret ?? undefined; },
     createRealm: async (o) => createSafeRealm(o),
   },
+  // The shell's own inbound seam (§12.10), consulted on every arriving frame before the
+  // routing table. Two things happen here, and both are the shell speaking for itself.
+  //
+  // `_offer` is the shell's protocol: it carries a signed bundle from one browser to
+  // another, and the app that would handle it is the thing being offered — so there is
+  // nobody to route it to and the shell answers. It is a RESERVED id (`_`-led), which is
+  // what makes that safe rather than a second routing table: no ordinary bundle can spell
+  // one, so a chat app and this id can never contend.
+  //
+  // Everything else is an app's, and the shell's only interest is the local view: it
+  // dispatches exactly as the routing would and hands the same promise back, taking a
+  // second read of the answer to draw it in the iframe. The driver still owns what goes
+  // back on the wire; this is a tap, not an interception, which is why the wire answer
+  // and the rendered one are the same bytes by construction.
+  answer: (from, proto, payload) => {
+    if (proto === OFFER_PROTO) {
+      handleOffer(payload, from).catch(() => {});
+      return null;
+    }
+    const result = shell.dispatch(from, proto, payload);
+    if (result && shell.resolve(proto) === activeAppKey) {
+      // A second consumer of the same promise, purely for the local view. It needs its
+      // own catch: a guest that throws (or blows its execution budget, §12.3) would
+      // otherwise surface as an unhandled rejection with no route to the user.
+      result.then(
+        (bytes) => { if (bytes) deliverRender(new Uint8Array(bytes)); },
+        (err) => shellPrint(`app "${proto}" failed to render an inbound message: ${err.message}`, "err"));
+    }
+    return result;
+  },
   admit: byPrivilege({
     base(v) {
       const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
@@ -221,7 +252,7 @@ shell = createShell({
       return true;
     },
     grants: {
-      mount(v) {
+      link(v) {
         return bytesToHex(v.author) === transportAuthorHex;
       },
     },
@@ -263,8 +294,18 @@ function setRelayPill(state, label) {
   relayPillText.textContent = label;
 }
 
-function updatePeerPill() {
-  const open = net ? net.linkedPeers().length : 0;
+// The linked set is the TRANSPORT's answer now, not a field on the driver: links are the
+// transport guest's, so asking costs a round trip through its realm and this is async.
+// A node with no transport standing has nothing to ask — read that as no peers rather
+// than letting a rejection escape into a status-bar update.
+async function linkedPeers() {
+  if (!net) return [];
+  try { return await net.linkedPeers(); }
+  catch { return []; }
+}
+
+async function updatePeerPill() {
+  const open = (await linkedPeers()).length;
   peerPillText.textContent = open === 1 ? "1 peer" : `${open} peers`;
   peerPill.classList.toggle("ok", open > 0);
 }
@@ -299,8 +340,8 @@ function updatePeerPill() {
 // An app's module is a PURE TRANSFORM: the guest hands it `senderPk ‖ chatType ‖
 // body` and it returns the render bytes for the iframe. The guest — not the WASM
 // and not the kernel — does all the I/O: the shell authenticates the sender via the
-// AKE channel, invokes the app's guest `handle` entrypoint (the same seam an
-// initiator's runGuest takes), and the guest drives its module by naming it on the
+// AKE channel, invokes the app's guest `handle` entrypoint (the same seam a
+// local `invoke` takes), and the guest drives its module by naming it on the
 // same seam (§12.2). Inbound delivery and local echo both cross the guest, so
 // chat's whole app logic is the one-line forwarding guest it ships in the bundle.
 //
@@ -741,11 +782,41 @@ function dismissOffer(bytesHashHex) {
   renderOfferList();
 }
 
-function broadcastToPeers(proto, payload) {
-  if (!net) return; // no transport yet — nothing to send to
+// ── sending ─────────────────────────────────────────────────────────────────
+//
+// Every outbound frame leaves through an APP's guest, because that is the only thing
+// that can send: the host's driver holds sockets and no request face at all, and the
+// network is the transport, reached by calling the id it claims (§12.10). So the shell asks
+// an app it has installed to put the frame on the wire — a loopback `invoke` with the
+// `send` op, whose argument the guest's `handle` reads (chat-app.js).
+//
+// `sender` is which app does the asking, and it is a real choice rather than a detail.
+// For a chat frame it is the app that CLAIMS the protocol, so the app the message is
+// about is the app that speaks; for an Offer — a bundle in transit, on a reserved id no
+// app claims — it is the app being offered, which is by definition installed here.
+/** One local op into `sender`'s app: `shell.invoke` loops back through `handle`, writing
+ *  the host's caller id and the op envelope, and the op NAME is the app's own vocabulary
+ *  (chat-app.js). Nothing is framed here — the envelope is the guest ABI's. */
+function appInvoke(sender, op, arg) {
+  return shell.invoke(op, arg, sender);
+}
+
+function sendFrame(sender, peerId, proto, payload) {
   const protoBytes = new TextEncoder().encode(proto);
-  for (const peerId of net.linkedPeers()) {
-    shell.transport.send(peerId, protoBytes, payload);
+  const arg = new Uint8Array(32 + 1 + protoBytes.length + payload.length);
+  arg.set(hexToBytes(peerId), 0);
+  arg[32] = protoBytes.length;
+  arg.set(protoBytes, 33);
+  arg.set(payload, 33 + protoBytes.length);
+  return appInvoke(sender, CHAT_OP_SEND, arg);
+}
+
+async function broadcastToPeers(proto, payload) {
+  const sender = shell.resolve(proto);
+  if (!sender) return; // nothing installed claims this protocol — nothing to send with
+  for (const peerId of await linkedPeers()) {
+    try { await sendFrame(sender, peerId, proto, payload); }
+    catch (err) { shellPrint(`send to ${peerId.slice(0, 8)} failed: ${err.message}`, "err"); }
   }
 }
 
@@ -758,19 +829,23 @@ async function renderLocal(rec, payload) {
   // same seam a peer's request would take. Which means it can fail the same way,
   // so it reports rather than rejecting into a caller that has nowhere to put it.
   let render;
-  try { render = await shell.runGuest("handle", input, rec.key); }
+  try { render = await appInvoke(rec.key, CHAT_OP_RENDER, input); }
   catch (err) { shellPrint(`local echo failed: ${err.message}`, "err"); return; }
   if (render) deliverRender(new Uint8Array(render));
 }
 
 // Broadcast the stored bundle for `id` to every open peer. Anyone who receives
 // this can forward it to others — that's transitivity for free.
-function offerApp(key) {
+async function offerApp(key) {
   const rec = installedApps.get(key);
   if (!rec) return;
-  const linked = net ? net.linkedPeers() : [];
+  const linked = await linkedPeers();
   for (const peerId of linked) {
-    shell.transport.send(peerId, new TextEncoder().encode(OFFER_PROTO), rec.bundleBytes);
+    // The offered app carries its own offer: `_offer` is the SHELL's id (nothing claims
+    // it, and the receiving shell answers it itself), so there is no app to resolve it
+    // to — the one we know is installed is the one whose bytes are in the frame.
+    try { await sendFrame(rec.key, peerId, OFFER_PROTO, rec.bundleBytes); }
+    catch (err) { shellPrint(`offer to ${peerId.slice(0, 8)} failed: ${err.message}`, "err"); }
   }
   const n = linked.length;
   shellPrint(
@@ -1167,13 +1242,16 @@ async function ensureTransport() {
       deliverSys(`P2P link to ${peerId.slice(0, 8)} open`);
       updatePeerPill();
       // Replay our last nick so a peer joining mid-session learns our identity
-      // without us re-sending it (chat v2 uses chatType 0x02 for nick).
-      if (lastSentNickBody && shell.resolve(lastSentNickBody.proto)) {
+      // without us re-sending it (chat v2 uses chatType 0x02 for nick). It goes out
+      // through the app that claims the protocol, like every other frame.
+      const nickSender = lastSentNickBody && shell.resolve(lastSentNickBody.proto);
+      if (nickSender) {
         const body = lastSentNickBody.body;
         const chatBytes = new Uint8Array(1 + body.length);
         chatBytes[0] = 0x02;
         chatBytes.set(body, 1);
-        shell.transport.send(peerId, new TextEncoder().encode(lastSentNickBody.proto), chatBytes);
+        sendFrame(nickSender, peerId, lastSentNickBody.proto, chatBytes)
+          .catch((err) => shellPrint(`nick replay to ${peerId.slice(0, 8)} failed: ${err.message}`, "err"));
       }
     },
     onPeerDown: (peerId) => {
@@ -1193,36 +1271,6 @@ async function ensureTransport() {
       });
     },
   });
-  if (!transportWired) {
-    transportWired = true;
-    // One plane, one dispatch scheme: the shell owns the shared dispatch (§12.10).
-    // An inbound frame names a protocol id; the shell resolves it to the app claiming
-    // it and invokes that app's guest `handle` entrypoint — the answer is a Promise,
-    // which the driver awaits and we render when it settles.
-    // The only special protocol is _offer (bundle transit), which we handle
-    // directly. Wired here, on the standing driver, because the shell's
-    // `transport` face is a throw-until-loaded stub before that.
-    shell.transport.onRequest((from, proto, payload) => {
-      if (proto === OFFER_PROTO) {
-        handleOffer(payload, from).catch(() => {});
-        return null;
-      }
-      const result = shell.dispatch(from, proto, payload);
-      if (result) {
-        const appKey = shell.resolve(proto);
-        if (appKey === activeAppKey) {
-          // A second consumer of the same promise, purely for the local view — the
-          // driver owns the answer that goes back on the wire. It needs its own
-          // catch: a guest that throws (or blows its execution budget, §12.3) would
-          // otherwise surface as an unhandled rejection with no route to the user.
-          result.then(
-            (bytes) => { if (bytes) deliverRender(new Uint8Array(bytes)); },
-            (err) => shellPrint(`app "${proto}" failed to render an inbound message: ${err.message}`, "err"));
-        }
-      }
-      return result;
-    });
-  }
 }
 
 // Boot the app registry now that the shell exists: render the (empty) lists, then
@@ -1254,12 +1302,15 @@ let localStream = null;
 let micEnabled = true;
 const remoteTiles = new Map(); // pkHex -> { wrap, video, stream }
 
-function updateCallStatus() {
+async function updateCallStatus() {
   if (!localStream) {
     callStatus.textContent = "idle";
     callBar.classList.add("idle");
   } else {
-    const n = net ? net.linkedPeers().length : 0;
+    const n = (await linkedPeers()).length;
+    // Re-read after the await: a hang-up while the transport was answering means there is no
+    // call to report on any more, and the idle branch above has already had the last word.
+    if (!localStream) return;
     callStatus.textContent = n === 0
       ? "in call (waiting for peers)"
       : `in call · ${n} peer${n === 1 ? "" : "s"}`;

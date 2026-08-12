@@ -27,9 +27,9 @@ const {
   MANIFEST_FILE, GUEST_FILE, moduleFile, appKeyFor,
 } = await import("seedkernel-wasm/bundle");
 const { createSafeRealm } = await import("seedkernel-wasm/safe-js");
-const { GUEST_ABI_VERSION } = await import("seedkernel-wasm/guest-seam");
+const { GUEST_ABI_VERSION, NET_PROTOCOL } = await import("seedkernel-wasm/guest-seam");
 // The chat app shape the browser shell authors from — same guest source, same authority set.
-const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO } = await import("../browser/chat-app.js");
+const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO } = await import("../browser/chat-app.js");
 
 // The built transport bundle blob — the exact bytes host/transport-bundle.js
 // embeds as B64 (both are written by the same kernel build step). Read from the
@@ -44,7 +44,7 @@ const toHex = (b) => Buffer.from(b).toString("hex");
 // ── the chat-shell admit gates, in shape ──────────────────────────────────────
 // ONE admission predicate (§12.5) keyed on the privileges the manifest's
 // `requires` reach, said with `byPrivilege`: the `base` branch is the consent
-// gate, the `mount` grant pins the transport author.
+// gate, the `link` grant pins the transport author.
 const pendingApprovals = new Set();
 function admit(v) {
   const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
@@ -52,10 +52,10 @@ function admit(v) {
   pendingApprovals.delete(bytesHashHex);
   return true;
 }
-function admitMount(v) {
+function admitTransport(v) {
   return toHex(v.author) === transportAuthorHex;
 }
-const admitPolicy = byPrivilege({ base: admit, grants: { mount: admitMount } });
+const admitPolicy = byPrivilege({ base: admit, grants: { link: admitTransport } });
 
 function chatPlatform(identity, contactSecret) {
   return {
@@ -103,6 +103,9 @@ async function until(fn, ms = 4000, what = "condition") {
 }
 
 const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+// The one string in the kernel's vocabulary chat spells by hand (chat-app.js keeps a
+// no-imports shape) must be the kernel's own constant, or the guest calls nothing.
+assert(NET_PROTO === NET_PROTOCOL, `chat's net id ${JSON.stringify(NET_PROTO)} must equal the kernel's NET_PROTOCOL`);
 let failed = 0;
 const ok = (name) => console.log(`  OK   ${name}`);
 const fail = (name, err) => { failed++; console.log(`  FAIL ${name}\n       ${err.message}`); };
@@ -118,25 +121,56 @@ const identityB = { publicKey: kpB.publicKey, privateKey: kpB.privateKey };
 const authorA = hybridAuthorKeysFromSeed(sodium, identityA.privateKey.slice(0, 32));
 const CONTACT = new Uint8Array(32).fill(7); // a "room secret" both ends share
 
-const A = createShell({ platform: chatPlatform(identityA, CONTACT), admit: admitPolicy });
-const B = createShell({ platform: chatPlatform(identityB, CONTACT), admit: admitPolicy });
+// What B's shell saw arrive, filled in by its `answer` hook below — the browser
+// shell's own inbound seam, in the same shape (§12.10).
+const inbound = { render: null, err: null, offers: 0 };
 
-// 1. transport bundle admitted by author pin; shell.transport live
+const A = createShell({ platform: chatPlatform(identityA, CONTACT), admit: admitPolicy });
+const B = createShell({
+  platform: chatPlatform(identityB, CONTACT),
+  admit: admitPolicy,
+  // The shell's own seam, consulted on each inbound frame before the routing table —
+  // the successor to wrapping the driver's `onRequest`, which is gone along with the
+  // request facade it hung off (there is no host-side send or receive any more). chat
+  // answers `_offer` itself (nothing claims a reserved id) and taps everything else for
+  // the local view while handing the routing's own answer straight back.
+  answer: (from, proto, payload) => {
+    if (proto === "_offer") { inbound.offers++; return null; }
+    const result = B.dispatch(from, proto, payload);
+    if (result) result.then(
+      (bytes) => { inbound.render = bytes && new Uint8Array(bytes); },
+      (err) => { inbound.err = err; });
+    return result;
+  },
+});
+
+// 1. transport bundle admitted by author pin; the socket driver standing
 try {
   await A.loadBundleBlob(TRANSPORT_BYTES);
   await B.loadBundleBlob(TRANSPORT_BYTES);
-  assert(typeof A.transport.linkedPeers === "function", "shell.transport should be the transport driver");
-  assert(typeof A.transport.send === "function", "shell.transport should be live");
-  ok("transport bundle admitted by author pin; shell.transport live");
+  // What is left on the driver is the host's half of the network: sockets, the address
+  // book, listeners. `send` is deliberately NOT here — an app sends by calling the id
+  // the transport claims (§12.10) — so asserting its absence is asserting the seam.
+  assert(typeof A.transport.openLink === "function", "shell.transport should be the socket driver");
+  assert(typeof A.transport.linkedPeers === "function", "the driver answers the transport's peer set");
+  assert(A.transport.send === undefined, "the driver has no request facade — sending is an app's");
+  ok("transport bundle admitted by author pin; the socket driver stands");
 } catch (err) { fail("transport bundle admission", err); }
 
-// 2. a FORGED bundle claiming the transport role must be refused
+// 2. a FORGED bundle claiming the transport id must be refused
 try {
   const forgedManifest = {
-    app: "evil", version: 1, role: "transport", modules: [],
-    // Claims both mount halves (§12.5) — the requires that make a bundle a transport
-    // — signed by an author the transport slot does not pin.
-    guest: { hash: "00".repeat(32), abi: GUEST_ABI_VERSION, requires: ["link/open", "link/send", "link/close", "link/stat", "transport/deliver", "transport/settle", "transport/link-auth", "transport/peer-edge", "transport/ready", "transport/link-down", "node/sign", "node/random", "timer/arm", "timer/clear"] },
+    app: "evil", version: 1, modules: [],
+    // A bundle that would BE the network: it claims the transport's reserved id and
+    // reaches the `link` privilege by naming `link/*` (§12.5) — the whole of what makes
+    // a bundle a transport now that a privilege is one thing rather than a pair of halves.
+    // Signed by an author the link grant does not pin, which is the only reason it is
+    // refused: nothing about the claim itself is malformed.
+    protocols: ["_net"],
+    guest: {
+      hash: "00".repeat(32), abi: GUEST_ABI_VERSION,
+      requires: ["link/open", "link/send", "link/close", "link/stat", "node/sign", "node/random", "timer/arm", "timer/clear"],
+    },
   };
   const env = signManifest(sodium, authorA, forgedManifest);
   const blob = packBundle({ [MANIFEST_FILE]: env, [GUEST_FILE]: new Uint8Array(0) });
@@ -203,34 +237,31 @@ try {
   ok("two transport ends authenticated over the channel seam");
 } catch (err) { fail("transport handshake", err); }
 
-// 5. dispatch: A sends a chat message, B renders it via its bound app's guest
+// 5. dispatch: A's chat app sends a message, B renders it via its bound app's guest
 try {
-  let delivered = null;
-  let dispatchErr = null;
-  B.transport.onRequest((from, proto, payload) => {
-    if (proto === "_offer") return null;
-    const result = B.dispatch(from, proto, payload);
-    // The shell's dispatch always returns the guest's answer — a Promise the driver
-    // awaits; the smoke test settles it to inspect the render bytes. Both arms, so a
-    // failing guest fails this test by name instead of timing out on `delivered`.
-    if (result) result.then(
-      (bytes) => { delivered = bytes && new Uint8Array(bytes); },
-      (err) => { dispatchErr = err; });
-    return result;
-  });
   const body = new TextEncoder().encode("hi there");
   const chatBytes = new Uint8Array(1 + body.length);
   chatBytes[0] = 0x00;
   chatBytes.set(body, 1);
-  A.transport.send(B.transport.peerId, new TextEncoder().encode("chat"), chatBytes);
-  await until(() => delivered !== null || dispatchErr !== null, 4000, "rendered message");
-  if (dispatchErr) throw dispatchErr;
+  // The send leaves through A's chat app, because that is the only thing that can send:
+  // its guest's `handle` frames the transport's op wire and calls `_net`, on the local
+  // `send` op. Same argument shape the browser shell builds (`sendFrame` in chat-shell.js).
+  const proto = new TextEncoder().encode(CHAT_PROTO);
+  const arg = new Uint8Array(32 + 1 + proto.length + chatBytes.length);
+  arg.set(B.transport.peerId ? Buffer.from(B.transport.peerId, "hex") : new Uint8Array(32), 0);
+  arg[32] = proto.length;
+  arg.set(proto, 33);
+  arg.set(chatBytes, 33 + proto.length);
+  await A.invoke(CHAT_OP_SEND, arg, chatKey);
+  await until(() => inbound.render !== null || inbound.err !== null, 4000, "rendered message");
+  if (inbound.err) throw inbound.err;
+  const delivered = inbound.render;
   // chat v1 render: [type 1][pk_len 1][pk 32][body]
   assert(delivered[0] === 0x00, "render type");
   assert(delivered[1] === 32, "render pk_len");
   assert(toHex(delivered.slice(2, 34)) === toHex(identityA.publicKey), "render sender pk = A's key");
   assert(new TextDecoder().decode(delivered.slice(34)) === "hi there", "render body");
-  ok(`dispatch round-trip: A → transport → B's chat app's guest → ${delivered.length} render bytes`);
+  ok(`dispatch round-trip: A's app → _net → B's shell → B's chat app's guest → ${delivered.length} render bytes`);
 } catch (err) { fail("chat dispatch round-trip", err); }
 
 // 6. the appKey derivation chat uses for its registry. It leads with the AUTHOR ID —
@@ -245,9 +276,9 @@ try {
 } catch (err) { fail("appKeyFor", err); }
 
 // 7. the shape gate an Offer passes through (peekMeta → isChatApp). A peer's bundle
-// is installed on one click of a row showing a name and an author, so the requires
-// it declares are the whole of what that click grants — and a chat app grants nothing
-// at all: its own module map is a primitive, not an authority (seedkernel §12.1).
+// is installed on one click of a row showing a name and an author, so the requires it
+// declares are the whole of what that click grants — and a chat app's are exactly one
+// name, `_net`: the network it must reach to be a chat app at all, and nothing else.
 try {
   const chatManifest = (requires, modules, protocols) => ({
     app: "chat", version: 1,
@@ -256,9 +287,10 @@ try {
     guest: { hash: "bb", abi: GUEST_ABI_VERSION, requires },
   });
   assert(isChatApp(chatManifest(CHAT_APP_REQUIRES)), "the shell's own app shape is accepted");
-  assert(!isChatApp(chatManifest(["net/send"])), "an offered app claiming net is refused");
-  assert(!isChatApp(chatManifest(["fs/get"])), "an offered app claiming fs is refused");
-  assert(!isChatApp(chatManifest(["node/sign"])), "an offered app claiming node is refused");
+  assert(!isChatApp(chatManifest([...CHAT_APP_REQUIRES, "fs/get"])), "an offered app claiming fs beside the network is refused");
+  assert(!isChatApp(chatManifest([...CHAT_APP_REQUIRES, "node/sign"])), "an offered app claiming a signing oracle is refused");
+  assert(!isChatApp(chatManifest(["link/open"])), "an offered app reaching for sockets is refused");
+  assert(!isChatApp(chatManifest(["fs/get"])), "an offered app claiming fs instead of the network is refused");
   assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, [])), "a no-module app is refused");
   // The claim is part of what one click grants now (§12.10): installing an offered
   // bundle routes every id it claims to it, so a bundle claiming something other than
@@ -266,7 +298,7 @@ try {
   assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined, [])), "an app claiming no protocol is refused");
   assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined, ["seedstore"])), "an app claiming another protocol is refused");
   assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined, [CHAT_PROTO, "seedstore"])), "an app claiming an extra protocol is refused");
-  ok("the offer shape gate admits only zero-authority chat apps claiming the chat protocol");
+  ok("the offer shape gate admits only network-only chat apps claiming the chat protocol");
 } catch (err) { fail("offer shape gate", err); }
 
 try { B.close(); } catch {}

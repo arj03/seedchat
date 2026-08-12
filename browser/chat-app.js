@@ -23,12 +23,30 @@ export function assertAppId(id) {
         throw new Error(`invalid app id ${JSON.stringify(id)}: expected 1-64 chars of [A-Za-z0-9_-] (§12.4)`);
 }
 
-/** The whole authority a chat app holds (§12.2): none. Its own module map is not a
- *  grant — a bare `host.call` name is a primitive, the bundle's own code, ungated
- *  like `crypto` (seedkernel §12.1) — so the manifest declares an empty `requires` set.
+/** The reserved id the transport claims (seedkernel `NET_PROTOCOL`). Named
+ *  here rather than imported so this file keeps its no-imports property: it is the one
+ *  string in the runtime's vocabulary chat has to spell, and `smoke.mjs` asserts it
+ *  against the kernel's own constant. */
+export const NET_PROTO = "_net";
+
+/** The whole authority a chat app holds (§12.2): the network, and nothing else.
+ *
+ *  It used to be nothing at all, and the change is not a relaxation — it is where
+ *  sending moved to. The host has no send: the socket driver holds descriptors and the
+ *  transport is a guest that claims `_net`, so a message reaches a peer by an app CALLING
+ *  that id (§12.10). A chat app that could not name `_net` could receive chat and never
+ *  send it, and the shell would need a second app of its own to do the sending — the
+ *  same authority, one indirection further from the thing that uses it.
+ *
+ *  It is still the strongest statement the consent row can make, because of what stays
+ *  absent: no `node/sign`, no `fs/*`, no `link/*`. `_net` carries no privilege — an
+ *  operator is asked who may *be* the network (`link/*`), not who may talk over it — and
+ *  a chat app's own module map is not a grant either (a bare `host.call` name is the
+ *  bundle's own code, ungated like `crypto`, seedkernel §12.1).
+ *
  *  Authored into every bundle this shell builds, and required of every bundle it
  *  accepts — see `peekMeta`. */
-export const CHAT_APP_REQUIRES = [];
+export const CHAT_APP_REQUIRES = [NET_PROTO];
 
 /** The wire protocol every chat app speaks (§12.10) — one id, claimed by every
  *  bundle this shell authors and required of every bundle it accepts.
@@ -45,28 +63,88 @@ export const CHAT_APP_REQUIRES = [];
  *  claim off the manifest instead of offering a bind button. */
 export const CHAT_PROTO = "chat";
 
-/** The one-line guest every chat app ships. Its `handle` entrypoint forwards its
- *  input to the app's own module — named directly on the same `host.call` seam every
- *  other capability uses (§12.2) — and returns the render bytes. That is the whole app.
+/** The chat guest's LOCAL op names — its one-vocabulary fold (seedkernel §12.2). A chat
+ *  app registers a single entrypoint, `handle`; a peer's inbound frame carries
+ *  `[peer 32][chatType ‖ body]`, and the host's own `invoke` loopback carries
+ *  `[zero 32][opLen u8][op][args]` — the 32-byte caller id tells the two apart, and the
+ *  guest splits both with the ABI's own `callerOf`/`readOp`.
  *
- *  Interpolating the id into a string literal is safe because `assertAppId` already
- *  held it to `[A-Za-z0-9_-]`: nothing to escape, no quote to break out of, and no
- *  `/`, which is what keeps it a module name rather than a host name. */
+ *  NAMES rather than bytes, and that is not cosmetic: an op byte is a number the shell
+ *  and the guest source have to agree on, which is exactly what collapsing entrypoints
+ *  onto one call must not smuggle back in. An op this guest does not implement then
+ *  fails by name instead of silently landing on a neighbouring case. */
+export const CHAT_OP_SEND = "send";     // [to 32][protoLen u8][proto][payload]
+export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's render bytes
+
+/** The guest every chat app ships — ONE entrypoint, `handle`, serving both directions.
+ *
+ *  `handle` is inbound: a peer's frame arrives as `senderPk ‖ body`, and the guest
+ *  forwards it to the app's own module — named directly on the same `host.call` seam every
+ *  other capability uses (§12.2) — and returns the render bytes. That has not changed.
+ *
+ *  Sending is a LOCAL op on the same `handle`. The host owns no send: a message reaches a
+ *  peer by calling the id the transport claims, and only a guest can call it. The shell
+ *  drives this with `invoke(CHAT_OP_SEND, …)`, and the local echo with
+ *  `invoke(CHAT_OP_RENDER, …)`.
+ *
+ *    send argument   `[to 32][protoLen u8][proto][payload]` — the shell's shape, chosen so a
+ *                    caller writes what it knows (a peer, a protocol id, a body).
+ *    to `_net`       `writeOp("send", [noReply u8][deadline u32][to blob][proto blob][payload blob])`
+ *                    — the transport's op wire, where a blob is `[len u32][bytes]`. The
+ *                    envelope is the ABI's (`writeOp`, seedkernel `host/guest-seam.ts`), so
+ *                    this guest writes the ARGUMENTS and never the framing. The host prepends
+ *                    this app's own 32-byte key as the caller, exactly as it prepends the
+ *                    sender's key inbound, so the transport can tell an app's request from the
+ *                    platform's own events.
+ *
+ *  `noReply` is 1: chat is a broadcast, not a round trip. The frame is handed to the wire
+ *  and the call answers `[1]` without waiting for the far end, which is what the shell's
+ *  fire-and-forget send always was — the difference is that the choice is now written
+ *  down in the frame instead of implied by which host method was called. A deadline of 0
+ *  means the node's own default, which is the only place that number should live.
+ *
+ *  Interpolating the id into a string literal is safe because `assertAppId` already held
+ *  it to `[A-Za-z0-9_-]`: nothing to escape, no quote to break out of, and no `/`, which
+ *  is what keeps it a module name rather than a host name. */
 export function chatGuestSource(appId) {
     assertAppId(appId);
-    return `register("handle", (input) => host.call("${appId}", input));`;
+    return `register("handle", (arg) => {
+  const { fromHost, body } = callerOf(arg);
+  if (fromHost) {
+    const { op, args: p } = readOp(body);
+    if (op === ${JSON.stringify(CHAT_OP_SEND)}) {
+      const protoLen = p[32];
+      const proto = p.subarray(33, 33 + protoLen);
+      const payload = p.subarray(33 + protoLen);
+      // The send op's ARGUMENTS: [noReply u8][deadline u32] then three blobs. The op name
+      // and this app's caller id are framing, and framing is not ours to write.
+      const args = new Uint8Array(1 + 4 + 4 + 32 + 4 + proto.length + 4 + payload.length);
+      let o = 0;
+      args[o++] = 1;                   // noReply — a chat frame is not a round trip
+      o += 4;                          // deadline 0 — the node's own default
+      const u32 = (v) => { args[o] = v >>> 24; args[o + 1] = (v >>> 16) & 255; args[o + 2] = (v >>> 8) & 255; args[o + 3] = v & 255; o += 4; };
+      u32(32); args.set(p.subarray(0, 32), o); o += 32;
+      u32(proto.length); args.set(proto, o); o += proto.length;
+      u32(payload.length); args.set(payload, o);
+      return host.call("${NET_PROTO}", writeOp("send", args));
+    }
+    if (op === ${JSON.stringify(CHAT_OP_RENDER)}) return host.call("${appId}", p);
+    return new Uint8Array(0);
+  }
+  return host.call("${appId}", arg);
+});`;
 }
 
-/** Does a verified manifest describe a chat app this shell will run? The demo's
- *  apps are one module driven by the forwarding guest, and — the load-bearing half
- *  — they hold no capability at all.
+/** Does a verified manifest describe a chat app this shell will run? The demo's apps are
+ *  one module driven by the one-entrypoint guest, and — the load-bearing half — they hold
+ *  EXACTLY `_net` and nothing else.
  *
- *  The requires check is not decoration. An Offer arrives from a peer and is
- *  installed on one click of a row showing a name, a version and an author; the
- *  manifest's `guest.requires` are the only place the bundle's authority is
- *  written down, and nothing else on this path reads them. Without this, a peer
- *  could offer an app whose guest holds `net/send`, `node/sign` or `fs/*` and the
- *  consent prompt would look exactly the same. */
+ *  The requires check is not decoration, and it is an equality rather than a subset test
+ *  for that reason. An Offer arrives from a peer and is installed on one click of a row
+ *  showing a name, a version and an author; the manifest's `guest.requires` are the only
+ *  place the bundle's authority is written down, and nothing else on this path reads
+ *  them. Without this, a peer could offer an app whose guest holds `node/sign`, `fs/*` or
+ *  `link/open` and the consent prompt would look exactly the same. */
 export function isChatApp(manifest) {
     if (manifest.modules.length !== 1)
         return false;
