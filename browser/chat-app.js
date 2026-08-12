@@ -63,24 +63,39 @@ export const CHAT_APP_REQUIRES = [NET_PROTO];
  *  claim off the manifest instead of offering a bind button. */
 export const CHAT_PROTO = "chat";
 
-/** The guest every chat app ships — two entrypoints, one per direction.
+/** The chat guest's LOCAL op names — its one-vocabulary fold (seedkernel §12.2). A chat
+ *  app registers a single entrypoint, `handle`; a peer's inbound frame carries
+ *  `[peer 32][chatType ‖ body]`, and the host's own `invoke` loopback carries
+ *  `[zero 32][opLen u8][op][args]` — the 32-byte caller id tells the two apart, and the
+ *  guest splits both with the ABI's own `callerOf`/`readOp`.
  *
- *  `handle` is inbound: the shell invokes it with `senderPk ‖ body`, it forwards that to
- *  the app's own module — named directly on the same `host.call` seam every other
- *  capability uses (§12.2) — and returns the render bytes. That has not changed.
+ *  NAMES rather than bytes, and that is not cosmetic: an op byte is a number the shell
+ *  and the guest source have to agree on, which is exactly what collapsing entrypoints
+ *  onto one call must not smuggle back in. An op this guest does not implement then
+ *  fails by name instead of silently landing on a neighbouring case. */
+export const CHAT_OP_SEND = "send";     // [to 32][protoLen u8][proto][payload]
+export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's render bytes
+
+/** The guest every chat app ships — ONE entrypoint, `handle`, serving both directions.
  *
- *  `send` is outbound, and it is new because outbound had to move in here. The host owns
- *  no send: a message reaches a peer by calling the id the transport claims, and only a guest
- *  can call it. The shell drives this with `runGuest("send", …)`, once per peer.
+ *  `handle` is inbound: a peer's frame arrives as `senderPk ‖ body`, and the guest
+ *  forwards it to the app's own module — named directly on the same `host.call` seam every
+ *  other capability uses (§12.2) — and returns the render bytes. That has not changed.
  *
- *    argument   `[to 32][protoLen u8][proto][payload]` — the shell's shape, chosen so a
- *               caller writes what it knows (a peer, a protocol id, a body).
- *    to `_net`  `[opLen u8]["send"][noReply u8][deadline u32][to blob][proto blob][payload blob]`
- *               — the transport's op wire, where a blob is `[len u32][bytes]` and the op is a
- *               NAME rather than a number the two sides must agree on. The host prepends
- *               this app's own 32-byte key as the caller, exactly as it prepends the
- *               sender's key inbound, so the transport can tell an app's request from the
- *               platform's own events.
+ *  Sending is a LOCAL op on the same `handle`. The host owns no send: a message reaches a
+ *  peer by calling the id the transport claims, and only a guest can call it. The shell
+ *  drives this with `invoke(CHAT_OP_SEND, …)`, and the local echo with
+ *  `invoke(CHAT_OP_RENDER, …)`.
+ *
+ *    send argument   `[to 32][protoLen u8][proto][payload]` — the shell's shape, chosen so a
+ *                    caller writes what it knows (a peer, a protocol id, a body).
+ *    to `_net`       `writeOp("send", [noReply u8][deadline u32][to blob][proto blob][payload blob])`
+ *                    — the transport's op wire, where a blob is `[len u32][bytes]`. The
+ *                    envelope is the ABI's (`writeOp`, seedkernel `host/guest-seam.ts`), so
+ *                    this guest writes the ARGUMENTS and never the framing. The host prepends
+ *                    this app's own 32-byte key as the caller, exactly as it prepends the
+ *                    sender's key inbound, so the transport can tell an app's request from the
+ *                    platform's own events.
  *
  *  `noReply` is 1: chat is a broadcast, not a round trip. The frame is handed to the wire
  *  and the call answers `[1]` without waiting for the far end, which is what the shell's
@@ -93,28 +108,35 @@ export const CHAT_PROTO = "chat";
  *  is what keeps it a module name rather than a host name. */
 export function chatGuestSource(appId) {
     assertAppId(appId);
-    return `register("handle", (input) => host.call("${appId}", input));
-register("send", (arg) => {
-  const protoLen = arg[32];
-  const proto = arg.subarray(33, 33 + protoLen);
-  const payload = arg.subarray(33 + protoLen);
-  const op = "send";
-  const out = new Uint8Array(1 + op.length + 1 + 4 + 4 + 32 + 4 + proto.length + 4 + payload.length);
-  let o = 0;
-  out[o++] = op.length;
-  for (let i = 0; i < op.length; i++) out[o++] = op.charCodeAt(i);
-  out[o++] = 1;                       // noReply — a chat frame is not a round trip
-  o += 4;                             // deadline 0 — the node's own default
-  const u32 = (v) => { out[o] = v >>> 24; out[o + 1] = (v >>> 16) & 255; out[o + 2] = (v >>> 8) & 255; out[o + 3] = v & 255; o += 4; };
-  u32(32); out.set(arg.subarray(0, 32), o); o += 32;
-  u32(proto.length); out.set(proto, o); o += proto.length;
-  u32(payload.length); out.set(payload, o);
-  return host.call("${NET_PROTO}", out);
+    return `register("handle", (arg) => {
+  const { fromHost, body } = callerOf(arg);
+  if (fromHost) {
+    const { op, args: p } = readOp(body);
+    if (op === ${JSON.stringify(CHAT_OP_SEND)}) {
+      const protoLen = p[32];
+      const proto = p.subarray(33, 33 + protoLen);
+      const payload = p.subarray(33 + protoLen);
+      // The send op's ARGUMENTS: [noReply u8][deadline u32] then three blobs. The op name
+      // and this app's caller id are framing, and framing is not ours to write.
+      const args = new Uint8Array(1 + 4 + 4 + 32 + 4 + proto.length + 4 + payload.length);
+      let o = 0;
+      args[o++] = 1;                   // noReply — a chat frame is not a round trip
+      o += 4;                          // deadline 0 — the node's own default
+      const u32 = (v) => { args[o] = v >>> 24; args[o + 1] = (v >>> 16) & 255; args[o + 2] = (v >>> 8) & 255; args[o + 3] = v & 255; o += 4; };
+      u32(32); args.set(p.subarray(0, 32), o); o += 32;
+      u32(proto.length); args.set(proto, o); o += proto.length;
+      u32(payload.length); args.set(payload, o);
+      return host.call("${NET_PROTO}", writeOp("send", args));
+    }
+    if (op === ${JSON.stringify(CHAT_OP_RENDER)}) return host.call("${appId}", p);
+    return new Uint8Array(0);
+  }
+  return host.call("${appId}", arg);
 });`;
 }
 
 /** Does a verified manifest describe a chat app this shell will run? The demo's apps are
- *  one module driven by the two-entrypoint guest, and — the load-bearing half — they hold
+ *  one module driven by the one-entrypoint guest, and — the load-bearing half — they hold
  *  EXACTLY `_net` and nothing else.
  *
  *  The requires check is not decoration, and it is an equality rather than a subset test

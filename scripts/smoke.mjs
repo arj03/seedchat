@@ -29,7 +29,7 @@ const {
 const { createSafeRealm } = await import("seedkernel-wasm/safe-js");
 const { GUEST_ABI_VERSION, NET_PROTOCOL } = await import("seedkernel-wasm/guest-seam");
 // The chat app shape the browser shell authors from — same guest source, same authority set.
-const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, NET_PROTO } = await import("../browser/chat-app.js");
+const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO } = await import("../browser/chat-app.js");
 
 // The built transport bundle blob — the exact bytes host/transport-bundle.js
 // embeds as B64 (both are written by the same kernel build step). Read from the
@@ -244,15 +244,15 @@ try {
   chatBytes[0] = 0x00;
   chatBytes.set(body, 1);
   // The send leaves through A's chat app, because that is the only thing that can send:
-  // its guest's `send` entrypoint frames the transport's op wire and calls `_net`. Same
-  // argument shape the browser shell builds (`sendFrame` in chat-shell.js).
+  // its guest's `handle` frames the transport's op wire and calls `_net`, on the local
+  // `send` op. Same argument shape the browser shell builds (`sendFrame` in chat-shell.js).
   const proto = new TextEncoder().encode(CHAT_PROTO);
   const arg = new Uint8Array(32 + 1 + proto.length + chatBytes.length);
   arg.set(B.transport.peerId ? Buffer.from(B.transport.peerId, "hex") : new Uint8Array(32), 0);
   arg[32] = proto.length;
   arg.set(proto, 33);
   arg.set(chatBytes, 33 + proto.length);
-  await A.runGuest("send", arg, chatKey);
+  await A.invoke(CHAT_OP_SEND, arg, chatKey);
   await until(() => inbound.render !== null || inbound.err !== null, 4000, "rendered message");
   if (inbound.err) throw inbound.err;
   const delivered = inbound.render;

@@ -188,8 +188,9 @@
      the seedkernel-wasm/* specifiers below are the entire contract between this
      app and the runtime. The QuickJS entries are the realm engine every app's
      guest runs in — the transport bundle's and each chat app's (safe-js's graph:
-     quickjs-emscripten + the two quickjs-ng wasm variants, whose .wasm rides in
-     the same dir). Same layout seed store's build-browser-demo.mjs stages. -->
+     the kernel's own quickjs-ng build, whose .wasm rides beside its variant, plus
+     quickjs-emscripten-core, the JS API layer over it). Same layout seed store's
+     build-browser-demo.mjs stages. -->
 <script type="importmap">
 {
   "imports": {
@@ -201,17 +202,9 @@
     "seedkernel-wasm/transport-bundle": "./vendor/host/transport-bundle.js",
     "seedkernel-wasm/pq":            "./vendor/host/pq.js",
     "seedkernel-wasm/libsodium":     "./vendor/libsodium-wrappers.mjs",
-    "quickjs-emscripten":                         "./vendor/quickjs-emscripten/index.mjs",
-    "quickjs-emscripten-core":                    "./vendor/quickjs-emscripten-core/index.mjs",
-    "@jitl/quickjs-ffi-types":                    "./vendor/quickjs-ffi-types/index.mjs",
-    "@jitl/quickjs-ng-wasmfile-release-asyncify":                  "./vendor/qjs-async/index.mjs",
-    "@jitl/quickjs-ng-wasmfile-release-asyncify/emscripten-module": "./vendor/qjs-async/emscripten-module.browser.mjs",
-    "@jitl/quickjs-ng-wasmfile-release-sync":                      "./vendor/qjs-sync/index.mjs",
-    "@jitl/quickjs-ng-wasmfile-release-sync/emscripten-module":    "./vendor/qjs-sync/emscripten-module.browser.mjs",
-    "@jitl/quickjs-wasmfile-release-asyncify": "./vendor/qjs-async/index.mjs",
-    "@jitl/quickjs-wasmfile-debug-asyncify":   "./vendor/qjs-async/index.mjs",
-    "@jitl/quickjs-wasmfile-release-sync":     "./vendor/qjs-sync/index.mjs",
-    "@jitl/quickjs-wasmfile-debug-sync":       "./vendor/qjs-sync/index.mjs"
+    "seedkernel-wasm/quickjs":       "./vendor/quickjs/variant.mjs",
+    "quickjs-emscripten-core":       "./vendor/quickjs-emscripten-core/index.mjs",
+    "@jitl/quickjs-ffi-types":       "./vendor/quickjs-ffi-types/index.mjs"
   }
 }
 </script>

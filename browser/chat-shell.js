@@ -14,7 +14,7 @@ import { signManifest, hybridAuthorId, hybridAuthorKeysFromSeed, packBundle,
          unpackBundle, verifyManifest, verifyBundle, FreshnessMarks, MANIFEST_FILE, GUEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
 import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
-import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO } from "./chat-app.js";
+import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, CHAT_OP_RENDER } from "./chat-app.js";
 
 const RTC_CONFIG = { iceServers: [{ urls: [
   "stun:stun.l.google.com:19302",
@@ -340,8 +340,8 @@ async function updatePeerPill() {
 // An app's module is a PURE TRANSFORM: the guest hands it `senderPk ‖ chatType ‖
 // body` and it returns the render bytes for the iframe. The guest — not the WASM
 // and not the kernel — does all the I/O: the shell authenticates the sender via the
-// AKE channel, invokes the app's guest `handle` entrypoint (the same seam an
-// initiator's runGuest takes), and the guest drives its module by naming it on the
+// AKE channel, invokes the app's guest `handle` entrypoint (the same seam a
+// local `invoke` takes), and the guest drives its module by naming it on the
 // same seam (§12.2). Inbound delivery and local echo both cross the guest, so
 // chat's whole app logic is the one-line forwarding guest it ships in the bundle.
 //
@@ -787,13 +787,20 @@ function dismissOffer(bytesHashHex) {
 // Every outbound frame leaves through an APP's guest, because that is the only thing
 // that can send: the host's driver holds sockets and no request face at all, and the
 // network is the transport, reached by calling the id it claims (§12.10). So the shell asks
-// an app it has installed to put the frame on the wire — `runGuest("send", …)` with the
-// argument its guest's `send` entrypoint takes (chat-app.js).
+// an app it has installed to put the frame on the wire — a loopback `invoke` with the
+// `send` op, whose argument the guest's `handle` reads (chat-app.js).
 //
 // `sender` is which app does the asking, and it is a real choice rather than a detail.
 // For a chat frame it is the app that CLAIMS the protocol, so the app the message is
 // about is the app that speaks; for an Offer — a bundle in transit, on a reserved id no
 // app claims — it is the app being offered, which is by definition installed here.
+/** One local op into `sender`'s app: `shell.invoke` loops back through `handle`, writing
+ *  the host's caller id and the op envelope, and the op NAME is the app's own vocabulary
+ *  (chat-app.js). Nothing is framed here — the envelope is the guest ABI's. */
+function appInvoke(sender, op, arg) {
+  return shell.invoke(op, arg, sender);
+}
+
 function sendFrame(sender, peerId, proto, payload) {
   const protoBytes = new TextEncoder().encode(proto);
   const arg = new Uint8Array(32 + 1 + protoBytes.length + payload.length);
@@ -801,7 +808,7 @@ function sendFrame(sender, peerId, proto, payload) {
   arg[32] = protoBytes.length;
   arg.set(protoBytes, 33);
   arg.set(payload, 33 + protoBytes.length);
-  return shell.runGuest("send", arg, sender);
+  return appInvoke(sender, CHAT_OP_SEND, arg);
 }
 
 async function broadcastToPeers(proto, payload) {
@@ -822,7 +829,7 @@ async function renderLocal(rec, payload) {
   // same seam a peer's request would take. Which means it can fail the same way,
   // so it reports rather than rejecting into a caller that has nowhere to put it.
   let render;
-  try { render = await shell.runGuest("handle", input, rec.key); }
+  try { render = await appInvoke(rec.key, CHAT_OP_RENDER, input); }
   catch (err) { shellPrint(`local echo failed: ${err.message}`, "err"); return; }
   if (render) deliverRender(new Uint8Array(render));
 }

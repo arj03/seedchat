@@ -1,11 +1,11 @@
 # seedchat — the chat app layer for [seedkernel](https://github.com/arj03/seedkernel)
 
 Chat is the smallest possible app on the runtime: a confined JS **guest** over a
-single **pure-transform** WASM module. The guest is a few lines — its `handle`
-entrypoint forwards its input to the module by name on the same `host.call` seam and
-returns the render bytes, and its `send` entrypoint puts a frame on the wire by
-calling the id the transport claims — and the module does no I/O and no
-crypto: it reads `senderPk ‖ chatType ‖ body` and returns render bytes for the
+single **pure-transform** WASM module. The guest is a few lines — its one `handle`
+entrypoint forwards an inbound frame to the module by name on the same `host.call`
+seam, returns the render bytes, and serves the local `send` op (a loopback that puts a
+frame on the wire by calling the id the transport claims) — and the module does no I/O
+and no crypto: it reads `senderPk ‖ chatType ‖ body` and returns render bytes for the
 UI. Everything around it — authenticating the sender, moving frames, driving the
 iframe — is the runtime's job, because a pure transform has no reach of its own
 and a guest reaches the world only through `host.call`.
@@ -66,9 +66,9 @@ reads the secret at install time.
 **Both directions cross an app's guest.** The host has no send and no receive: an
 inbound frame reaches the shell as the transport's `_host` op and is routed to the app
 claiming the protocol, and an outbound frame leaves by an app *calling* `_net` — so
-a chat app's manifest declares exactly that one grant, and its guest has a `send`
-entrypoint beside `handle` (`browser/chat-app.js`). The shell drives it with
-`runGuest("send", …)`, once per linked peer. The one thing chat still answers for
+a chat app's manifest declares exactly that one grant, and its guest serves the local
+`send` op on the one `handle` (`browser/chat-app.js`). The shell drives it with a
+loopback `invoke`, once per linked peer. The one thing chat still answers for
 itself is `_offer`, the bundle-in-transit id, through `createShell({ answer })`:
 the app that would handle it is the thing being offered.
 
