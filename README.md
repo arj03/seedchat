@@ -21,8 +21,9 @@ chat makes into the runtime has to go through a published entry point.
 | --- | --- |
 | `assembly/chat-app-v1/` | v1 handler — text only. `index.ts` is the pure transform, `ui.html` is the iframe UI embedded into the module as a custom section. |
 | `assembly/chat-app-v2/` | v2 handler — text + image + nick. Same shape; upgrading v1→v2 is a re-admit at the same name under the same key. |
-| `browser/chat-shell.*` | The browser shell: identity, admission policy, the transport-bundle network under a WebRTC mesh, the sandboxed iframe. Roughly 1,600 lines. The inline import map in `chat-shell.html` names the kernel surface. |
+| `browser/chat-shell.*` | The browser shell: identity, admission policy, the transport-bundle network under a WebRTC mesh, the sandboxed iframe. Roughly 1,700 lines. The inline import map in `chat-shell.html` names the kernel surface. |
 | `browser/chat-app.js` | The chat app *shape*, in one place: the guest's source (both directions), the id grammar it may be built from, and the network-and-nothing-else authority a chat app holds. The shell authors bundles from it and gates received Offers against it; `scripts/smoke.mjs` imports the same file, so the guest source that gets signed is written once. |
+| `browser/media-rtc.js` | The call feature: `MediaRtcNetwork`, a subclass of the kernel's `RtcNetwork` that publishes camera/mic over the peer connections the data channel already uses. The kernel seam is raw I/O only, so live media is chat's — it renegotiates through the seam's own perfect-negotiation path and adds no signaling. |
 | `scripts/embed-ui.mjs` | Appends a `ui` custom section to a built `.wasm`. |
 | `scripts/embed-meta.mjs` | Appends an `app_meta` JSON custom section (id, name, version). |
 | `scripts/vendor.mjs` | Copies the kernel's built host (`build-min`: `host/` + `core/`) into `browser/vendor/`, plus the browser libsodium, `mldsa65.wasm`, and the QuickJS realm engine (safe-js's graph), for a bundler-free static serve. Refuses a stale (un-minified-since-compile) kernel build. |
@@ -42,7 +43,7 @@ The entire dependency is seven published entry points of `seedkernel-wasm`:
 | `seedkernel-wasm/shell-core` | `createShell`, `ModuleTable` |
 | `seedkernel-wasm/bundle` | `signManifest`, `packBundle`, `unpackBundle`, `verifyManifest`, `verifyBundle`, `genesisHash`, `kernelNameFor`, `appKeyFor`, `handlesOf`, `FreshnessMarks`, `MANIFEST_FILE`, `GUEST_FILE`, `moduleFile` |
 | `seedkernel-wasm/guest-seam` | `GUEST_ABI_VERSION` — the guest seam version the chat bundle's guest declares |
-| `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC mesh |
+| `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC mesh, subclassed for calls in `browser/media-rtc.js` |
 | `seedkernel-wasm/safe-js` | `createSafeRealm` — the QuickJS realm every app's guest runs in (the transport bundle's and each chat app's) |
 | `seedkernel-wasm/pq` | `withMlDsa65`, `loadMlDsa65` |
 | `seedkernel-wasm/libsodium` | the browser libsodium build |

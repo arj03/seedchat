@@ -5,7 +5,6 @@
 // kernel change breaks chat, it broke a public export, which is the point.
 import sodium from "seedkernel-wasm/libsodium";
 import { createShell, ModuleTable, byPrivilege } from "seedkernel-wasm/shell-core";
-import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { createSafeRealm } from "seedkernel-wasm/safe-js";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import { withMlDsa65, loadMlDsa65 } from "seedkernel-wasm/pq";
@@ -14,6 +13,9 @@ import { signManifest, hybridAuthorId, hybridAuthorKeysFromSeed, packBundle,
          unpackBundle, verifyManifest, verifyBundle, FreshnessMarks, MANIFEST_FILE, GUEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
 import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
+// Chat's own code. media-rtc.js is the call feature: the kernel's WebRTC seam is
+// raw I/O, so live audio/video is a subclass of it that lives here.
+import { MediaRtcNetwork } from "./media-rtc.js";
 import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, CHAT_OP_RENDER } from "./chat-app.js";
 
 const RTC_CONFIG = { iceServers: [{ urls: [
@@ -1232,7 +1234,7 @@ async function ensureTransport() {
   if (net) net = null; // links die with the outgoing driver's close below
   await shell.loadBundleBlob(TRANSPORT_BYTES);
   transportSecret = secret;
-  net = new RtcNetwork({
+  net = new MediaRtcNetwork({
     driver: shell.transport,
     signaling,
     rtcConfig: RTC_CONFIG,
@@ -1283,13 +1285,14 @@ restoreInstalledApps().catch((err) =>
 
 // ─── live audio/video calls ────────────────────────────────────────────
 //
-// Calls ride the same RTCPeerConnections as the data channel. net.addLocalTrack
-// publishes our camera/mic to every connected peer (and to peers that connect
-// later); RtcNetwork renegotiates as tracks are added (startCall) or removed
-// (endCall → net.removeLocalTracks). Remote tracks arrive via the onTrack
-// callback wired on `net` above and land in a per-peer tile keyed by pubkey
-// hex; a tile is cleaned up when its track ends or the peer's link drops
-// (onPeerDown).
+// Calls ride the same RTCPeerConnections as the data channel, through
+// MediaRtcNetwork (./media-rtc.js) — chat's subclass of the kernel's raw-I/O
+// WebRTC seam. net.addLocalTrack publishes our camera/mic to every connected
+// peer (and to peers that connect later), renegotiating as tracks are added
+// (startCall) or removed (endCall → net.removeLocalTracks). Remote tracks arrive
+// via the onTrack callback wired on `net` above and land in a per-peer tile keyed
+// by pubkey hex; a tile is cleaned up when its track ends or the peer's link
+// drops (onPeerDown).
 
 const callBar      = document.getElementById("call-bar");
 const callStartBtn = document.getElementById("call-start");
@@ -1405,7 +1408,7 @@ async function startCall() {
   callEndBtn.disabled = false;
   callStartBtn.disabled = true;
   ensureLocalTile();
-  // RtcNetwork publishes each track to every connected peer and to any peer
+  // MediaRtcNetwork publishes each track to every connected peer and to any peer
   // that connects later, renegotiating as needed.
   if (!net) {
     shellPrint("Connect to a relay first — there is no network yet.", "err");
