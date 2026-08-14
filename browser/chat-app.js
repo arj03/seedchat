@@ -87,6 +87,11 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *  drives this with `invoke(CHAT_OP_SEND, …)`, and the local echo with
  *  `invoke(CHAT_OP_RENDER, …)`.
  *
+ *  The handler is `async` and `await`s its `host.call`s because both names round-trip:
+ *  `_net` is a cross-realm call, and since guest ABI 6 a bare module name (the app's
+ *  own module) runs in its own worker, so its answer crosses an isolate. The await is
+ *  what makes the returned render bytes real bytes rather than a pending promise.
+ *
  *    send argument   `[to 32][protoLen u8][proto][payload]` — the shell's shape, chosen so a
  *                    caller writes what it knows (a peer, a protocol id, a body).
  *    to `_net`       `writeOp("send", [noReply u8][deadline u32][to blob][proto blob][payload blob])`
@@ -108,7 +113,7 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *  is what keeps it a module name rather than a host name. */
 export function chatGuestSource(appId) {
     assertAppId(appId);
-    return `register("handle", (arg) => {
+    return `register("handle", async (arg) => {
   const { fromHost, body } = callerOf(arg);
   if (fromHost) {
     const { op, args: p } = readOp(body);
@@ -126,12 +131,12 @@ export function chatGuestSource(appId) {
       u32(32); args.set(p.subarray(0, 32), o); o += 32;
       u32(proto.length); args.set(proto, o); o += proto.length;
       u32(payload.length); args.set(payload, o);
-      return host.call("${NET_PROTO}", writeOp("send", args));
+      return await host.call("${NET_PROTO}", writeOp("send", args));
     }
-    if (op === ${JSON.stringify(CHAT_OP_RENDER)}) return host.call("${appId}", p);
+    if (op === ${JSON.stringify(CHAT_OP_RENDER)}) return await host.call("${appId}", p);
     return new Uint8Array(0);
   }
-  return host.call("${appId}", arg);
+  return await host.call("${appId}", arg);
 });`;
 }
 

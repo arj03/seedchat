@@ -15,12 +15,20 @@
      and can reach the shell only via postMessage. The shell's own document has no
      inline scripts and no untrusted innerHTML, so 'unsafe-inline' opens nothing
      here; 'wasm-unsafe-eval' covers WebAssembly.instantiate (kernel hosts,
-     libsodium, QuickJS). -->
+     libsodium, QuickJS).
+
+     worker-src allows blob: because that is where an app's MODULES run since guest
+     ABI 6: the kernel's module table stands each one up in its own worker so a call
+     can be killed at its deadline, and the worker script is a blob URL. Without this
+     the fallback is script-src, which has no blob:, and every module bind — so every
+     app install — fails at the CSP. -->
+
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'self';
   script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline';
   style-src 'self' 'unsafe-inline';
   connect-src 'self' ws: wss:;
+  worker-src 'self' blob:;
   frame-src 'self' blob:;
   img-src 'self' data: blob:;
   media-src 'self' blob:;
