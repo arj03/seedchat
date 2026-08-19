@@ -36,11 +36,12 @@ kernel never reads either section. They live here because the reader lives here.
 
 ## The kernel surface chat uses
 
-The entire dependency is seven published entry points of `seedkernel-wasm`:
+The entire dependency is eight published entry points of `seedkernel-wasm`:
 
 | Import | Used for |
 | --- | --- |
-| `seedkernel-wasm/shell-core` | `createShell`, `ModuleTable` |
+| `seedkernel-wasm/shell-core` | `createShell`, `ModuleTable`, `byPrivilege` |
+| `seedkernel-wasm/transport-host` | `TransportHost` — the channel adapter the platform owns and the shell points at the `_net` claimant |
 | `seedkernel-wasm/bundle` | `signManifest`, `packBundle`, `unpackBundle`, `verifyManifest`, `verifyBundle`, `genesisHash`, `kernelNameFor`, `appKeyFor`, `handlesOf`, `FreshnessMarks`, `MANIFEST_FILE`, `GUEST_FILE`, `moduleFile` |
 | `seedkernel-wasm/guest-seam` | `GUEST_ABI_VERSION` — the guest seam version the chat bundle's guest declares |
 | `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC mesh, subclassed for calls in `browser/media-rtc.js` |
@@ -53,16 +54,18 @@ from `seedkernel-wasm/assembly/seedkernel/handler` — the AssemblyScript half o
 the handler ABI (§4). It is imported, never vendored: an ABI that apps fork is an
 ABI that drifts.
 
-**The network is a bundle, not a platform member.** `ShellPlatform` takes no
-`network` — the channel AKE, record layer and request/response layer ship as a
-*signed transport bundle* that claims the reserved protocol id `_net`, embedded in
-the host as `TRANSPORT_BUNDLE_B64` and consumed in the browser from
-`seedkernel-wasm/transport-bundle`. Admitting it stands the socket driver up. Chat
-admits it at first relay connect under an **author pin** — only the exact artifact
-this host ships may reach the `link` privilege, the browser equivalent of an
-operator's `grants: { link: [...] }` policy entry — and rebuilds the `RtcNetwork`
-under it whenever the room secret changes, because the driver's accepting-side gate
-reads the secret at install time.
+**The protocol is a bundle; the sockets are the platform's.** The channel AKE, record
+layer and request/response layer ship as a *signed transport bundle* that claims the
+reserved protocol id `_net`, embedded in the host as `TRANSPORT_BUNDLE_B64` and consumed
+in the browser from `seedkernel-wasm/transport-bundle`. What stays host-side is the
+`TransportHost` — link ids, the address book, the handshake budgets — which chat
+constructs itself and hands to `createShell` as `platform.transportHost`; the shell's
+whole part is pointing it at whichever bundle currently claims `_net`, and `shell.close()`
+closes it. Chat admits the bundle at first relay connect under an **author pin** — only
+the exact artifact this host ships may reach the `link` privilege, the browser equivalent
+of an operator's `grants: { link: [...] }` policy entry — and rebuilds the `RtcNetwork`
+under it whenever the room secret changes, because the accepting-side gate is re-read
+each time the adapter attaches to a claimant.
 
 **Both directions cross an app's guest.** The host has no send and no receive: an
 inbound frame reaches the shell as the transport's `_host` op and is routed to the app

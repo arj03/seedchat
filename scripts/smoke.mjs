@@ -22,6 +22,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const { loadCrypto } = await import("seedkernel-wasm");
 const sodium = await loadCrypto();
 const { createShell, ModuleTable, byPrivilege } = await import("seedkernel-wasm/shell-core");
+const { TransportHost } = await import("seedkernel-wasm/transport-host");
 const {
   FreshnessMarks, signManifest, hybridAuthorId, hybridAuthorKeysFromSeed, packBundle, verifyBundle, genesisHash,
   MANIFEST_FILE, GUEST_FILE, moduleFile, appKeyFor,
@@ -57,15 +58,24 @@ function admitTransport(v) {
 }
 const admitPolicy = byPrivilege({ base: admit, grants: { link: admitTransport } });
 
-function chatPlatform(identity, contactSecret) {
+/** The channel adapter — the PLATFORM's, exactly as chat-shell.js builds it: the shell
+ *  only points it at whichever bundle claims `_net`. The `contactSecret` getter is how
+ *  chat feeds the CURRENT room secret to the accepting side, re-read on every attach
+ *  (§12.6.3), which is what makes re-loading the bundle a way to change it. */
+function chatTransport(identity, contactSecret) {
+  return new TransportHost({
+    identity,
+    get contactSecret() { return contactSecret; },
+  });
+}
+
+function chatPlatform(identity, transportHost) {
   return {
     sodium,
     identity,
     table: new ModuleTable(),
     freshnessStore: new FreshnessMarks(),
-    // The getter is how chat-shell feeds the current room secret to the
-    // transport driver at install time (§12.6.3).
-    get contactSecret() { return contactSecret; },
+    transportHost,
     createRealm: async (o) => createSafeRealm(o),
   };
 }
@@ -125,9 +135,12 @@ const CONTACT = new Uint8Array(32).fill(7); // a "room secret" both ends share
 // shell's own inbound seam, in the same shape (§12.10).
 const inbound = { render: null, err: null, offers: 0 };
 
-const A = createShell({ platform: chatPlatform(identityA, CONTACT), admit: admitPolicy });
+const netA = chatTransport(identityA, CONTACT);
+const netB = chatTransport(identityB, CONTACT);
+
+const A = createShell({ platform: chatPlatform(identityA, netA), admit: admitPolicy });
 const B = createShell({
-  platform: chatPlatform(identityB, CONTACT),
+  platform: chatPlatform(identityB, netB),
   admit: admitPolicy,
   // The shell's own seam, consulted on each inbound frame before the routing table —
   // the successor to wrapping the driver's `onRequest`, which is gone along with the
@@ -148,13 +161,17 @@ const B = createShell({
 try {
   await A.loadBundleBlob(TRANSPORT_BYTES);
   await B.loadBundleBlob(TRANSPORT_BYTES);
-  // What is left on the driver is the host's half of the network: sockets, the address
-  // book, listeners. `send` is deliberately NOT here — an app sends by calling the id
-  // the transport claims (§12.10) — so asserting its absence is asserting the seam.
-  assert(typeof A.transport.openLink === "function", "shell.transport should be the socket driver");
-  assert(typeof A.transport.linkedPeers === "function", "the driver answers the transport's peer set");
-  assert(A.transport.send === undefined, "the driver has no request facade — sending is an app's");
-  ok("transport bundle admitted by author pin; the socket driver stands");
+  // The adapter carries the host's half of the network: sockets, the address book,
+  // listeners. `send` is deliberately NOT there — an app sends by calling the id the
+  // transport claims (§12.10) — so asserting its absence is asserting the seam. Nor is
+  // the adapter on the SHELL: it is the platform's, and the shell's whole part is having
+  // routed `_net` to the bundle just admitted.
+  assert(A.transport === undefined, "the shell exposes no transport — the adapter is the platform's");
+  assert(A.resolve(NET_PROTOCOL) !== null, `the admitted bundle claims ${NET_PROTOCOL}`);
+  assert(typeof netA.openLink === "function", "the adapter takes channels");
+  assert(typeof netA.linkedPeers === "function", "the adapter answers the transport's peer set");
+  assert(netA.send === undefined, "the adapter has no request facade — sending is an app's");
+  ok("transport bundle admitted by author pin; the channel adapter has a claimant");
 } catch (err) { fail("transport bundle admission", err); }
 
 // 2. a FORGED bundle claiming the transport id must be refused
@@ -223,12 +240,12 @@ try {
 const st = { a: { authed: false }, b: { authed: false } };
 try {
   const [chA, chB] = wirePair();
-  const aLink = A.transport.openLink({
-    channel: chA, weDialed: true, expectPeerId: B.transport.peerId,
+  const aLink = netA.openLink({
+    channel: chA, weDialed: true, expectPeerId: netB.peerId,
     contactSecret: CONTACT, source: chA.remoteAddr,
     onAuth: () => { st.a.authed = true; },
   });
-  const bLink = B.transport.openLink({
+  const bLink = netB.openLink({
     channel: chB, weDialed: false, source: chB.remoteAddr,
     onAuth: () => { st.b.authed = true; },
   });
@@ -248,7 +265,7 @@ try {
   // `send` op. Same argument shape the browser shell builds (`sendFrame` in chat-shell.js).
   const proto = new TextEncoder().encode(CHAT_PROTO);
   const arg = new Uint8Array(32 + 1 + proto.length + chatBytes.length);
-  arg.set(B.transport.peerId ? Buffer.from(B.transport.peerId, "hex") : new Uint8Array(32), 0);
+  arg.set(netB.peerId ? Buffer.from(netB.peerId, "hex") : new Uint8Array(32), 0);
   arg[32] = proto.length;
   arg.set(proto, 33);
   arg.set(chatBytes, 33 + proto.length);

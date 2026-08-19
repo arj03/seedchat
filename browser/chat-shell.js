@@ -5,6 +5,7 @@
 // kernel change breaks chat, it broke a public export, which is the point.
 import sodium from "seedkernel-wasm/libsodium";
 import { createShell, ModuleTable, byPrivilege } from "seedkernel-wasm/shell-core";
+import { TransportHost } from "seedkernel-wasm/transport-host";
 import { createSafeRealm } from "seedkernel-wasm/safe-js";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import { withMlDsa65, loadMlDsa65 } from "seedkernel-wasm/pq";
@@ -155,11 +156,13 @@ const transportAuthorHex = bytesToHex(verifyBundle(sodium, TRANSPORT_BYTES).auth
 // open policy, so consent — not a static author allow-list — is this shell's gate.
 const pendingApprovals = new Set();
 let shell;
-// The WebRTC socket seam over the transport driver, and the state that tracks
-// whether the standing driver still matches the room's current secret — see
+// The WebRTC socket seam over the channel adapter, and the state that tracks
+// whether the attached claimant still matches the room's current secret — see
 // ensureTransport() in the networking section.
 let net = null;
 let transportSecret = null;
+/** The channel adapter — built beside the shell, below, once the tab's identity exists. */
+let transportHost;
 
 // ─── per-tab Ed25519 identity ──────────────────────────────────────────
 let myKeys;
@@ -191,12 +194,25 @@ const myAuthorId = hybridAuthorId(sodium, myKeys.publicKey, myPqKeys.publicKey);
 
 shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 
+// The channel adapter: link ids, the address book, the handshake budgets. It is the
+// PLATFORM's — the shell only points it at whichever bundle currently claims `_net`, and
+// `shell.close()` closes it, so there is one teardown rather than two. This tab has no
+// sockets of its own (no `channels`): every link arrives through `openLink`, handed over
+// by the MediaRtcNetwork in ensureTransport().
+//
+// `contactSecret` is a GETTER on purpose. The adapter re-reads it every time it attaches
+// to a claimant (§12.6.3), so a room secret minted after boot still gates this node's
+// accepting side — that is exactly what makes the re-install in ensureTransport() work.
+// A captured value would freeze the open-room secret in place for the tab's life.
+transportHost = new TransportHost({
+  identity: myKeys,
+  get contactSecret() { return roomSecret ?? undefined; },
+});
+
 // Assemble the shared shell now that the identity exists. The platform is a browser
 // seam: sodium, our identity, a WebAssembly-backed handler table, an in-memory
-// freshness store — and NO network. The transport is no longer a platform member: it
-// is a signed bundle admitted below, which stands the driver (the shell's `net` /
-// `transport`) up. The `contactSecret` getter is read at that install moment, so a
-// room secret minted after boot still gates this node's accepting side (§12.6.3).
+// freshness store — and the channel adapter above, which has no claimant until a bundle
+// reaching `link` is admitted below.
 //
 // The QuickJS realm factory (safe-js) is supplied because every app is a guest:
 // the transport bundle needs a realm to run in, and so does each chat app — its
@@ -213,7 +229,7 @@ shell = createShell({
     identity: myKeys,
     table: new ModuleTable(),
     freshnessStore: new FreshnessMarks(),
-    get contactSecret() { return roomSecret ?? undefined; },
+    transportHost,
     createRealm: async (o) => createSafeRealm(o),
   },
   // The shell's own inbound seam (§12.10), consulted on every arriving frame before the
@@ -1221,21 +1237,21 @@ const signaling = {
 // code path that touches it earlier — not a failure we would see now.
 let roomSecret = null;
 
-// Admit the kernel-shipped transport bundle (standing the shell's transport driver
-// up), then put the WebRTC socket seam under it. Runs lazily on the first relay
-// connect — nothing needs a network before that — and re-runs whenever the room
-// secret changed, because the driver's ACCEPTING-side gate reads the secret at
-// install time (§12.6.3): the re-install is the in-place upgrade path the shell
-// supports for a replaced transport bundle. The DIALING side stays fully dynamic —
-// `peerContactFor` is a hook the RtcNetwork reads afresh for every link.
+// Admit the kernel-shipped transport bundle (giving the channel adapter a claimant),
+// then put the WebRTC socket seam under it. Runs lazily on the first relay connect —
+// nothing needs a network before that — and re-runs whenever the room secret changed,
+// because the ACCEPTING-side gate is read when the adapter ATTACHES to a claimant
+// (§12.6.3): re-loading the bundle is a fresh attach, which is the in-place replacement
+// path the shell supports. The DIALING side stays fully dynamic — `peerContactFor` is a
+// hook the RtcNetwork reads afresh for every link.
 async function ensureTransport() {
   const secret = roomSecret ?? undefined;
   if (net && transportSecret === secret) return;
-  if (net) net = null; // links die with the outgoing driver's close below
+  if (net) net = null; // links die with the outgoing claimant's detach below
   await shell.loadBundleBlob(TRANSPORT_BYTES);
   transportSecret = secret;
   net = new MediaRtcNetwork({
-    driver: shell.transport,
+    driver: transportHost,
     signaling,
     rtcConfig: RTC_CONFIG,
     peerContactFor: () => roomSecret ?? undefined,
