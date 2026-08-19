@@ -36,11 +36,12 @@ kernel never reads either section. They live here because the reader lives here.
 
 ## The kernel surface chat uses
 
-The entire dependency is eight published entry points of `seedkernel-wasm`:
+The entire dependency is nine published entry points of `seedkernel-wasm`:
 
 | Import | Used for |
 | --- | --- |
-| `seedkernel-wasm/shell-core` | `createShell`, `ModuleTable`, `byPrivilege` |
+| `seedkernel-wasm/shell-core` | `createShell`, `byPrivilege` |
+| `seedkernel-wasm/module-table` | `ModuleTable` — the JS target's builder for one bundle slot's private WASM modules |
 | `seedkernel-wasm/transport-host` | `TransportHost` — the channel adapter the platform owns and the shell points at the `_net` claimant |
 | `seedkernel-wasm/bundle` | `signManifest`, `packBundle`, `unpackBundle`, `verifyManifest`, `verifyBundle`, `genesisHash`, `kernelNameFor`, `appKeyFor`, `handlesOf`, `FreshnessMarks`, `MANIFEST_FILE`, `GUEST_FILE`, `moduleFile` |
 | `seedkernel-wasm/guest-seam` | `GUEST_ABI_VERSION` — the guest seam version the chat bundle's guest declares |

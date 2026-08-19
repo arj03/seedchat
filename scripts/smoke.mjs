@@ -21,7 +21,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 // browser shell's withMlDsa65 does.
 const { loadCrypto } = await import("seedkernel-wasm");
 const sodium = await loadCrypto();
-const { createShell, ModuleTable, byPrivilege } = await import("seedkernel-wasm/shell-core");
+const { createShell, byPrivilege } = await import("seedkernel-wasm/shell-core");
+// The JS target's builder for one bundle slot's private WASM modules — a target
+// implementation rather than shell API, so it has an entry point of its own.
+const { ModuleTable } = await import("seedkernel-wasm/module-table");
 const { TransportHost } = await import("seedkernel-wasm/transport-host");
 const {
   FreshnessMarks, signManifest, hybridAuthorId, hybridAuthorKeysFromSeed, packBundle, verifyBundle, genesisHash,
@@ -73,7 +76,7 @@ function chatPlatform(identity, transportHost) {
   return {
     sodium,
     identity,
-    table: new ModuleTable(),
+    modules: new ModuleTable(),
     freshnessStore: new FreshnessMarks(),
     transportHost,
     createRealm: async (o) => createSafeRealm(o),
@@ -225,7 +228,9 @@ try {
   pendingApprovals.add(moduleHash);            // auto-approve like addAppFromWasm
   const loaded = await A.loadBundleBlob(chatBundle);
   chatKey = appKeyFor(loaded.author, "chat");
-  assert(A.host.isBound(chatKey, "chat"), `handler bound under ${chatKey}`);
+  // The app's module is private to its slot now, so there is no table to ask what landed:
+  // a load builds every module or none (§12.4), and what the shell exposes is the claim.
+  assert(A.resolve(CHAT_PROTO) === chatKey, `A routes "${CHAT_PROTO}" to the app it installed`);
   // The receiving peer installs its own app, and that is the whole of it: the manifest
   // claims "chat" and B's load routes it there (§12.10). Each peer's routing is its own
   // — B would answer the same frames with a different author's chat app, as long as it

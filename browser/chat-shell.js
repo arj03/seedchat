@@ -4,7 +4,10 @@
 // import map in chat-shell.html resolves them to the vendored build. If a future
 // kernel change breaks chat, it broke a public export, which is the point.
 import sodium from "seedkernel-wasm/libsodium";
-import { createShell, ModuleTable, byPrivilege } from "seedkernel-wasm/shell-core";
+import { createShell, byPrivilege } from "seedkernel-wasm/shell-core";
+// The JS target's builder for one bundle slot's private WASM modules. A target
+// implementation rather than shell API, so it has an entry point of its own.
+import { ModuleTable } from "seedkernel-wasm/module-table";
 import { TransportHost } from "seedkernel-wasm/transport-host";
 import { createSafeRealm } from "seedkernel-wasm/safe-js";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
@@ -227,7 +230,7 @@ shell = createShell({
   platform: {
     sodium,
     identity: myKeys,
-    table: new ModuleTable(),
+    modules: new ModuleTable(),
     freshnessStore: new FreshnessMarks(),
     transportHost,
     createRealm: async (o) => createSafeRealm(o),
@@ -238,8 +241,10 @@ shell = createShell({
   // `_offer` is the shell's protocol: it carries a signed bundle from one browser to
   // another, and the app that would handle it is the thing being offered — so there is
   // nobody to route it to and the shell answers. It is a RESERVED id (`_`-led), which is
-  // what makes that safe rather than a second routing table: no ordinary bundle can spell
-  // one, so a chat app and this id can never contend.
+  // what makes that safe rather than a second routing table: this hook gets first refusal
+  // on every inbound frame, and a peer's frame can never fall through to a bundle that
+  // claimed the same id — the kernel stops a reserved claim at the shell (§12.10), because
+  // a reserved id is a LOCAL service name. So a chat app and this id can never contend.
   //
   // Everything else is an app's, and the shell's only interest is the local view: it
   // dispatches exactly as the routing would and hands the same promise back, taking a
