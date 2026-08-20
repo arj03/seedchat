@@ -20,7 +20,13 @@ import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
 // Chat's own code. media-rtc.js is the call feature: the kernel's WebRTC seam is
 // raw I/O, so live audio/video is a subclass of it that lives here.
 import { MediaRtcNetwork } from "./media-rtc.js";
-import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, CHAT_OP_RENDER } from "./chat-app.js";
+import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, CHAT_OP_RENDER, RENDER_PROTO } from "./chat-app.js";
+
+// The shell's own local service names (§12.10) — exact claims the shell answers
+// itself, registered at createShell below. `_offer` carries a signed bundle between
+// two browsers before either has an app that could receive it; `_render` is the
+// relay a chat app's guest pushes its inbound render bytes through.
+const OFFER_PROTO = "_offer";
 
 const RTC_CONFIG = { iceServers: [{ urls: [
   "stun:stun.l.google.com:19302",
@@ -132,21 +138,22 @@ withMlDsa65(sodium, await loadMlDsa65(
 // The transport bundle — the kernel-shipped signed program that IS the network
 // (§12.6): the channel AKE, the record layer, link routing and the request/
 // response layer run as a confined guest (transport/guest.js), signed into a
-// bundle that claims the reserved `_net` id and embedded in the host as
-// TRANSPORT_BUNDLE_B64. Admitting it below stands the shell's transport driver
-// up; chat's own apps are ordinary guest bundles that claim only `chat`.
+// bundle that serves the local service name `_net` (an ordinary `_`-led claim,
+// no kernel semantics) and embedded in the host as TRANSPORT_BUNDLE_B64.
+// Admitting it below stands the shell's transport driver up; chat's own apps are
+// ordinary guest bundles that claim only `chat`.
 const TRANSPORT_BYTES = (() => {
   const bin = atob(TRANSPORT_BUNDLE_B64);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
 })();
-// The author id of that exact artifact. The admit gate below pins the `link`
-// privilege to it — the browser equivalent of an operator's `grants: { link: [...] }`
-// policy entry (§12.5) — so a bundle a PEER offers can never become this node's
-// network, whatever its manifest claims. That matters more than it used to: a transport
-// is an ordinary app that claims `_net`, and a later load wins a contested id (§12.10), so
-// the pin is the only thing standing between an offered bundle and the wire.
+// The author id of that exact artifact. The admit gate below pins BOTH privileges
+// to it — `link` (the raw sockets) and `route` (attributed inbound delivery) — the
+// browser equivalent of an operator's `grants: { link, route }` policy entries
+// (§12.5) — so a bundle a PEER offers can never become this node's network,
+// whatever its manifest claims. A transport reaches both privileges, and a bundle
+// reaching a privilege is judged by every grant it reaches, so the pin is both.
 const transportAuthorHex = bytesToHex(verifyBundle(sodium, TRANSPORT_BYTES).author);
 
 // The shell (kernel host + admission policy + bundle loader) is assembled once the
@@ -160,8 +167,8 @@ const transportAuthorHex = bytesToHex(verifyBundle(sodium, TRANSPORT_BYTES).auth
 const pendingApprovals = new Set();
 let shell;
 // The WebRTC socket seam over the channel adapter, and the state that tracks
-// whether the attached claimant still matches the room's current secret — see
-// ensureTransport() in the networking section.
+// whether the raw-link binding's owner still matches the room's current secret —
+// see ensureTransport() in the networking section.
 let net = null;
 let transportSecret = null;
 /** The channel adapter — built beside the shell, below, once the tab's identity exists. */
@@ -198,15 +205,16 @@ const myAuthorId = hybridAuthorId(sodium, myKeys.publicKey, myPqKeys.publicKey);
 shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 
 // The channel adapter: link ids, the address book, the handshake budgets. It is the
-// PLATFORM's — the shell only points it at whichever bundle currently claims `_net`, and
-// `shell.close()` closes it, so there is one teardown rather than two. This tab has no
-// sockets of its own (no `channels`): every link arrives through `openLink`, handed over
-// by the MediaRtcNetwork in ensureTransport().
+// PLATFORM's — its raw-link events go to whichever admitted slot owns the `link`
+// binding, and `shell.close()` closes it, so there is one teardown rather than two.
+// This tab has no sockets of its own (no `channels`): every link arrives through
+// `openLink`, handed over by the MediaRtcNetwork in ensureTransport().
 //
-// `contactSecret` is a GETTER on purpose. The adapter re-reads it every time it attaches
-// to a claimant (§12.6.3), so a room secret minted after boot still gates this node's
-// accepting side — that is exactly what makes the re-install in ensureTransport() work.
-// A captured value would freeze the open-room secret in place for the tab's life.
+// `contactSecret` is a GETTER on purpose. The adapter re-reads it every time a fresh
+// transport load activates the binding (§12.6.3), so a room secret minted after boot
+// still gates this node's accepting side — that is exactly what makes the re-install
+// in ensureTransport() work. A captured value would freeze the open-room secret in
+// place for the tab's life.
 transportHost = new TransportHost({
   identity: myKeys,
   get contactSecret() { return roomSecret ?? undefined; },
@@ -214,8 +222,8 @@ transportHost = new TransportHost({
 
 // Assemble the shared shell now that the identity exists. The platform is a browser
 // seam: sodium, our identity, a WebAssembly-backed handler table, an in-memory
-// freshness store — and the channel adapter above, which has no claimant until a bundle
-// reaching `link` is admitted below.
+// freshness store — and the channel adapter above, which has no raw-link owner until
+// a bundle reaching `link` is admitted below.
 //
 // The QuickJS realm factory (safe-js) is supplied because every app is a guest:
 // the transport bundle needs a realm to run in, and so does each chat app — its
@@ -224,8 +232,9 @@ transportHost = new TransportHost({
 // engine for chat apps where it once paid only for the transport. Admission is
 // ONE predicate (§12.5) keyed on the privileges the manifest's `requires` reach,
 // said with `byPrivilege`: the `base` branch is the user-consent gate for an
-// app that reaches no privilege, the `link` grant admits the transport bundle
-// by author pin.
+// app that reaches no privilege, the `link` and `route` grants admit the
+// kernel-shipped transport bundle by author pin — it reaches BOTH, and a bundle
+// reaching a privilege is judged by every grant it reaches.
 shell = createShell({
   platform: {
     sodium,
@@ -235,37 +244,33 @@ shell = createShell({
     transportHost,
     createRealm: async (o) => createSafeRealm(o),
   },
-  // The shell's own inbound seam (§12.10), consulted on every arriving frame before the
-  // routing table. Two things happen here, and both are the shell speaking for itself.
+  // The shell's own local claims (§12.10) — exact names, no wildcard and no
+  // fall-through; a bundle contesting one is refused at load like any other claimant.
+  // Two, and both are the shell speaking for itself.
   //
-  // `_offer` is the shell's protocol: it carries a signed bundle from one browser to
-  // another, and the app that would handle it is the thing being offered — so there is
-  // nobody to route it to and the shell answers. It is a RESERVED id (`_`-led), which is
-  // what makes that safe rather than a second routing table: this hook gets first refusal
-  // on every inbound frame, and a peer's frame can never fall through to a bundle that
-  // claimed the same id — the kernel stops a reserved claim at the shell (§12.10), because
-  // a reserved id is a LOCAL service name. So a chat app and this id can never contend.
+  // `_offer` carries a signed bundle from one browser to another, and the app that
+  // would handle it is the thing being offered — so there is nobody to route it to.
+  // It is a `_`-led LOCAL name: a peer's frame can never fall through to a bundle's
+  // `_`-led claim, and registering one is host code saying what it means. A chat app
+  // and this id can never contend.
   //
-  // Everything else is an app's, and the shell's only interest is the local view: it
-  // dispatches exactly as the routing would and hands the same promise back, taking a
-  // second read of the answer to draw it in the iframe. The driver still owns what goes
-  // back on the wire; this is a tap, not an interception, which is why the wire answer
-  // and the rendered one are the same bytes by construction.
-  answer: (from, proto, payload) => {
-    if (proto === OFFER_PROTO) {
-      handleOffer(payload, from).catch(() => {});
-      return null;
-    }
-    const result = shell.dispatch(from, proto, payload);
-    if (result && shell.resolve(proto) === activeAppKey) {
-      // A second consumer of the same promise, purely for the local view. It needs its
-      // own catch: a guest that throws (or blows its execution budget, §12.3) would
-      // otherwise surface as an unhandled rejection with no route to the user.
-      result.then(
-        (bytes) => { if (bytes) deliverRender(new Uint8Array(bytes)); },
-        (err) => shellPrint(`app "${proto}" failed to render an inbound message: ${err.message}`, "err"));
-    }
-    return result;
+  // `_render` is the other half of the same seam. A chat app's guest relays the
+  // render bytes it produced for an inbound frame here — the seam has no host-side
+  // tap on the routing's answer — and the caller is attributed by its APP key (a
+  // peer key can never reach this name), so the shell draws only the mounted app's
+  // renders, exactly the gating the old dispatch tap applied.
+  claims: {
+    [OFFER_PROTO]: (attribution, payload) => {
+      handleOffer(payload, bytesToHex(attribution)).catch(() => {});
+      return Promise.resolve(new Uint8Array(0));
+    },
+    [RENDER_PROTO]: (callerId, renderBytes) => {
+      if (activeAppKey && renderBytes.length > 0) {
+        const activeCaller = genesisHash(sodium, new TextEncoder().encode(activeAppKey));
+        if (bytesEqual(callerId, activeCaller)) deliverRender(new Uint8Array(renderBytes));
+      }
+      return Promise.resolve(new Uint8Array(0));
+    },
   },
   admit: byPrivilege({
     base(v) {
@@ -276,6 +281,9 @@ shell = createShell({
     },
     grants: {
       link(v) {
+        return bytesToHex(v.author) === transportAuthorHex;
+      },
+      route(v) {
         return bytesToHex(v.author) === transportAuthorHex;
       },
     },
@@ -387,8 +395,6 @@ let activeAppKey = null;
 // answers who holds it; the Apps panel below reads that rather than storing anything.
 
 const STORE = "apps.v2";
-
-const OFFER_PROTO = "_offer";
 
 // ── shell frame wire format ─────────────────────────────────────────────
 //
@@ -864,9 +870,9 @@ async function offerApp(key) {
   if (!rec) return;
   const linked = await linkedPeers();
   for (const peerId of linked) {
-    // The offered app carries its own offer: `_offer` is the SHELL's id (nothing claims
-    // it, and the receiving shell answers it itself), so there is no app to resolve it
-    // to — the one we know is installed is the one whose bytes are in the frame.
+    // The offered app carries its own offer: `_offer` is the SHELL's claim (the app
+    // that would handle it is the thing being offered), so there is no app to resolve
+    // it to — the one we know is installed is the one whose bytes are in the frame.
     try { await sendFrame(rec.key, peerId, OFFER_PROTO, rec.bundleBytes); }
     catch (err) { shellPrint(`offer to ${peerId.slice(0, 8)} failed: ${err.message}`, "err"); }
   }
@@ -1242,17 +1248,17 @@ const signaling = {
 // code path that touches it earlier — not a failure we would see now.
 let roomSecret = null;
 
-// Admit the kernel-shipped transport bundle (giving the channel adapter a claimant),
+// Admit the kernel-shipped transport bundle (making it the raw-link binding's owner),
 // then put the WebRTC socket seam under it. Runs lazily on the first relay connect —
 // nothing needs a network before that — and re-runs whenever the room secret changed,
-// because the ACCEPTING-side gate is read when the adapter ATTACHES to a claimant
-// (§12.6.3): re-loading the bundle is a fresh attach, which is the in-place replacement
-// path the shell supports. The DIALING side stays fully dynamic — `peerContactFor` is a
-// hook the RtcNetwork reads afresh for every link.
+// because the ACCEPTING-side gate is read when a fresh transport load ACTIVATES the
+// binding (§12.6.3): re-loading the bundle is a fresh activate, which is the
+// in-place replacement path the shell supports. The DIALING side stays fully dynamic
+// — `peerContactFor` is a hook the RtcNetwork reads afresh for every link.
 async function ensureTransport() {
   const secret = roomSecret ?? undefined;
   if (net && transportSecret === secret) return;
-  if (net) net = null; // links die with the outgoing claimant's detach below
+  if (net) net = null; // links die with the outgoing binding's release below
   await shell.loadBundleBlob(TRANSPORT_BYTES);
   transportSecret = secret;
   net = new MediaRtcNetwork({

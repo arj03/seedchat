@@ -23,30 +23,45 @@ export function assertAppId(id) {
         throw new Error(`invalid app id ${JSON.stringify(id)}: expected 1-64 chars of [A-Za-z0-9_-] (§12.4)`);
 }
 
-/** The reserved id the transport claims (seedkernel `NET_PROTOCOL`). Named
- *  here rather than imported so this file keeps its no-imports property: it is the one
- *  string in the runtime's vocabulary chat has to spell, and `smoke.mjs` asserts it
- *  against the kernel's own constant. */
+/** The local service name the transport bundle serves (the `_net` of the bundled
+ *  composition; no kernel semantics attach to the spelling). Named here rather than
+ *  imported so this file keeps its no-imports property: it is the one string in the
+ *  runtime's vocabulary chat has to spell, and `smoke.mjs` asserts it against the
+ *  transport bundle's own claim. */
 export const NET_PROTO = "_net";
 
-/** The whole authority a chat app holds (§12.2): the network, and nothing else.
+/** The chat shell's own local service name, the render relay (§12.10): a chat app
+ *  serves an inbound frame by rendering it, and the shell's iframe needs those render
+ *  bytes — but the seam has no push, so the app's guest relays them to this `_`-led
+ *  name, which the shell answers itself. Local only: a peer can never reach it, and a
+ *  bundle claiming it is refused (the platform holds it). */
+export const RENDER_PROTO = "_render";
+
+/** The whole authority a chat app holds (§12.2): the network, and the render relay.
  *
  *  It used to be nothing at all, and the change is not a relaxation — it is where
  *  sending moved to. The host has no send: the socket driver holds descriptors and the
- *  transport is a guest that claims `_net`, so a message reaches a peer by an app CALLING
- *  that id (§12.10). A chat app that could not name `_net` could receive chat and never
- *  send it, and the shell would need a second app of its own to do the sending — the
- *  same authority, one indirection further from the thing that uses it.
+ *  transport is a guest that serves the local service name `_net`, so a message reaches
+ *  a peer by an app CALLING that id (§12.10). A chat app that could not name `_net`
+ *  could receive chat and never send it, and the shell would need a second app of its
+ *  own to do the sending — the same authority, one indirection further from the thing
+ *  that uses it.
+ *
+ *  `_render` is the second name, and the smallest it could be: the seam has no
+ *  host-side tap on the routing's answer, so the app's guest relays the render bytes
+ *  it produced for an inbound frame to the shell's own claim, and the shell draws them
+ *  in the iframe. It reaches nothing the guest does not already hold — the bytes it
+ *  just computed — so it is a pipe, not a privilege.
  *
  *  It is still the strongest statement the consent row can make, because of what stays
- *  absent: no `node/sign`, no `fs/*`, no `link/*`. `_net` carries no privilege — an
- *  operator is asked who may *be* the network (`link/*`), not who may talk over it — and
- *  a chat app's own module map is not a grant either (a bare `host.call` name is the
+ *  absent: no `node/sign`, no `fs/*`, no `link/*`. Neither name carries a privilege —
+ *  an operator is asked who may *be* the network (`link/*`), not who may talk over it —
+ *  and a chat app's own module map is not a grant either (a bare `host.call` name is the
  *  bundle's own code, ungated like `crypto`, seedkernel §12.1).
  *
  *  Authored into every bundle this shell builds, and required of every bundle it
  *  accepts — see `peekMeta`. */
-export const CHAT_APP_REQUIRES = [NET_PROTO];
+export const CHAT_APP_REQUIRES = [NET_PROTO, RENDER_PROTO];
 
 /** The wire protocol every chat app speaks (§12.10) — one id, claimed by every
  *  bundle this shell authors and required of every bundle it accepts.
@@ -92,6 +107,11 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *  own module) runs in its own worker, so its answer crosses an isolate. The await is
  *  what makes the returned render bytes real bytes rather than a pending promise.
  *
+ *  An inbound frame is served by rendering it, and the render bytes have exactly one
+ *  consumer: the shell's iframe. The seam has no push, so the guest relays them to the
+ *  shell's own `_render` name on the way out — fire-and-forget, since the wire reply
+ *  to a broadcast frame is skipped anyway and an unclaimed name answers empty.
+ *
  *    send argument   `[to 32][protoLen u8][proto][payload]` — the shell's shape, chosen so a
  *                    caller writes what it knows (a peer, a protocol id, a body).
  *    to `_net`       `writeOp("send", [noReply u8][deadline u32][to blob][proto blob][payload blob])`
@@ -136,13 +156,20 @@ export function chatGuestSource(appId) {
     if (op === ${JSON.stringify(CHAT_OP_RENDER)}) return await host.call("${appId}", p);
     return new Uint8Array(0);
   }
-  return await host.call("${appId}", arg);
+  const render = await host.call("${appId}", arg);
+  // The render bytes are this app's answer to the frame, and their one consumer is
+  // the shell's iframe. The seam has no push, so they go back through the shell's own
+  // name: the _render local service the shell answers itself, fire-and-forget — the
+  // wire reply to a broadcast frame is skipped anyway, and an unclaimed name answers
+  // empty rather than throwing.
+  host.call("${RENDER_PROTO}", render).catch(() => {});
+  return render;
 });`;
 }
 
 /** Does a verified manifest describe a chat app this shell will run? The demo's apps are
  *  one module driven by the one-entrypoint guest, and — the load-bearing half — they hold
- *  EXACTLY `_net` and nothing else.
+ *  EXACTLY `_net` and `_render` and nothing else.
  *
  *  The requires check is not decoration, and it is an equality rather than a subset test
  *  for that reason. An Offer arrives from a peer and is installed on one click of a row
