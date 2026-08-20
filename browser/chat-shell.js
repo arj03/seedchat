@@ -22,11 +22,13 @@ import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
 import { MediaRtcNetwork } from "./media-rtc.js";
 import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, CHAT_OP_RENDER, RENDER_PROTO } from "./chat-app.js";
 
-// The shell's own local service names (§12.10) — exact claims the shell answers
-// itself, registered at createShell below. `_offer` carries a signed bundle between
-// two browsers before either has an app that could receive it; `_render` is the
-// relay a chat app's guest pushes its inbound render bytes through.
-const OFFER_PROTO = "_offer";
+// The shell's own claims (§12.10) — exact names the shell answers itself, registered
+// at createShell below, and one of each KIND. `offer/v1` is an ordinary id because it
+// is reached by a peer: a signed bundle arriving from another browser before either
+// has an app that could receive it. `_render` is `_`-led because it must never be —
+// the kernel refuses a reserved id on the inbound path whoever holds it, the platform
+// included, so the spelling is the whole of what decides reach.
+const OFFER_PROTO = "offer/v1";
 
 const RTC_CONFIG = { iceServers: [{ urls: [
   "stun:stun.l.google.com:19302",
@@ -248,17 +250,19 @@ shell = createShell({
   // fall-through; a bundle contesting one is refused at load like any other claimant.
   // Two, and both are the shell speaking for itself.
   //
-  // `_offer` carries a signed bundle from one browser to another, and the app that
+  // `offer/v1` carries a signed bundle from one browser to another, and the app that
   // would handle it is the thing being offered — so there is nobody to route it to.
-  // It is a `_`-led LOCAL name: a peer's frame can never fall through to a bundle's
-  // `_`-led claim, and registering one is host code saying what it means. A chat app
-  // and this id can never contend.
+  // An ordinary id, because a peer is exactly who reaches it; a chat app claims only
+  // `chat` (isChatApp), and a bundle contesting a platform claim is refused at load
+  // anyway, so the two can never contend.
   //
-  // `_render` is the other half of the same seam. A chat app's guest relays the
-  // render bytes it produced for an inbound frame here — the seam has no host-side
-  // tap on the routing's answer — and the caller is attributed by its APP key (a
-  // peer key can never reach this name), so the shell draws only the mounted app's
-  // renders, exactly the gating the old dispatch tap applied.
+  // `_render` is the other half of the same seam, and `_`-led for the opposite reason.
+  // A chat app's guest relays the render bytes it produced for an inbound frame here —
+  // the seam has no host-side tap on the routing's answer — and the shell draws them
+  // only if the caller is the mounted app's key. That check is a comparison of 32
+  // bytes, so it holds only while the 32 bytes cannot be a PEER's: the kernel refuses a
+  // reserved id inbound before it consults the platform table, which is what keeps a
+  // peer from pushing renders into this iframe under an app key's place.
   claims: {
     [OFFER_PROTO]: (attribution, payload) => {
       handleOffer(payload, bytesToHex(attribution)).catch(() => {});
@@ -870,7 +874,7 @@ async function offerApp(key) {
   if (!rec) return;
   const linked = await linkedPeers();
   for (const peerId of linked) {
-    // The offered app carries its own offer: `_offer` is the SHELL's claim (the app
+    // The offered app carries its own offer: `offer/v1` is the SHELL's claim (the app
     // that would handle it is the thing being offered), so there is no app to resolve
     // it to — the one we know is installed is the one whose bytes are in the frame.
     try { await sendFrame(rec.key, peerId, OFFER_PROTO, rec.bundleBytes); }

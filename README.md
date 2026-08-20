@@ -78,10 +78,12 @@ routed to the app claiming the protocol, and an outbound frame leaves by an app
 *calling* `_net` — so a chat app's manifest declares exactly those two local names,
 and its guest serves the local `send` op on the one `handle` (`browser/chat-app.js`).
 The shell drives it with a loopback `invoke`, once per linked peer. The shell's own
-claims (`createShell({ claims })`) are `_offer`, the bundle-in-transit id whose
+claims (`createShell({ claims })`) are `offer/v1`, the bundle-in-transit id whose
 handler is the thing being offered, and `_render`, the name a chat app's guest pushes
 its inbound render bytes through — the receiving shell's view of the answer, since
-the routing's reply goes back over the wire and there is no host-side tap.
+the routing's reply goes back over the wire and there is no host-side tap. The
+spellings are the reach: an ordinary id is what a peer may name, and a `_`-led one is
+refused on the inbound path whoever claims it, the shell itself included.
 
 The JS entry points are declared in exactly two places: the imports at the top of
 `chat-shell.js`, and the inline import map in `chat-shell.html` (which also names

@@ -158,13 +158,14 @@ const A = createShell({ platform: chatPlatform(identityA, netA), admit: admitPol
 const B = createShell({
   platform: chatPlatform(identityB, netB),
   admit: admitPolicy,
-  // The shell's own exact claims (§12.10), no wildcard and no fall-through. `_offer`
-  // is the shell's (the app that would handle it is the thing being offered), and
-  // `_render` is the render relay a chat app's guest pushes through when it serves an
-  // inbound frame — the receiving shell's only view of the answer since the host-side
+  // The shell's own exact claims (§12.10), no wildcard and no fall-through, and one of
+  // each kind. `offer/v1` is an ordinary id because a PEER reaches it (the app that
+  // would handle it is the thing being offered); `_render` is `_`-led because only a
+  // co-resident guest may — the render relay a chat app pushes through when it serves
+  // an inbound frame, the receiving shell's only view of the answer since the host-side
   // dispatch tap went away with `route/deliver`.
   claims: {
-    "_offer": (attribution, payload) => {
+    "offer/v1": (attribution, payload) => {
       inbound.offers++;
       return Promise.resolve(new Uint8Array(0));
     },
