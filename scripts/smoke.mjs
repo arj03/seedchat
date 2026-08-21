@@ -1,7 +1,7 @@
 // Headless smoke test: does chat still work on the kernel it depends on?
 //
-// Replays the boot path browser/chat-shell.js actually runs — the createShell
-// platform + author-pinned transport admission + consent-gated chat install +
+// Replays the boot path browser/chat-shell.js actually runs — the bootShell
+// assembly + its implicit transport-author pin + consent-gated chat install +
 // protocol dispatch — minus the browser-only WebRTC/DOM. Two shells link over
 // the transport's openLink seam (the shape RtcNetwork hands it), and a real
 // chat-app-v1.wasm round-trips a message. Run it after a kernel update:
@@ -21,74 +21,58 @@ const here = dirname(fileURLToPath(import.meta.url));
 // browser shell's withMlDsa65 does.
 const { loadCrypto } = await import("seedkernel-wasm");
 const sodium = await loadCrypto();
-const { createShell, byPrivilege } = await import("seedkernel-wasm/shell-core");
-// The JS target's builder for one bundle slot's private WASM modules — a target
-// implementation rather than shell API, so it has an entry point of its own.
-const { ModuleTable } = await import("seedkernel-wasm/module-table");
+// bootShell is the assembly itself (§12.9): platform members defaulted, the
+// transport bundle pinned to its own author, the adapter taken as the instance
+// below. The shells' admit is then ONLY the consent gate.
+const { bootShell } = await import("seedkernel-wasm/shell-core");
 const { TransportHost } = await import("seedkernel-wasm/transport-host");
+const { transportBundleBytes } = await import("seedkernel-wasm/transport-bundle");
 const {
-  FreshnessMarks, signManifest, hybridAuthorId, hybridAuthorKeysFromSeed, packBundle, unpackBundle,
-  verifyManifest, verifyBundle, genesisHash,
-  MANIFEST_FILE, GUEST_FILE, moduleFile, appKeyFor,
+  signManifest, hybridAuthorId, hybridAuthorKeysFromSeed, packBundle, unpackBundle,
+  verifyManifest, genesisHash,
+  MANIFEST_FILE, GUEST_FILE, moduleFile,
 } = await import("seedkernel-wasm/bundle");
-const { createSafeRealm } = await import("seedkernel-wasm/safe-js");
 const { GUEST_ABI_VERSION } = await import("seedkernel-wasm/guest-seam");
 // The chat app shape the browser shell authors from — same guest source, same authority set.
 const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO, RENDER_PROTO } = await import("../browser/chat-app.js");
 
-// The built transport bundle blob — the exact bytes host/transport-bundle.js
-// embeds as B64 (both are written by the same kernel build step). Read from the
-// dependency's build dir rather than parsing the embedded copy, so the smoke
-// test touches no non-published surface.
-const TRANSPORT_BYTES = new Uint8Array(readFileSync(
-  resolve(here, "../node_modules/seedkernel-wasm/build/transport.skb")));
-const transportAuthorHex = Buffer.from(verifyBundle(sodium, TRANSPORT_BYTES).author).toString("hex");
+// The exact transport bundle bytes the kernel embeds, reached through the export —
+// so the smoke test touches no non-published surface and never reads the dependency's
+// build directory off disk.
+const TRANSPORT_BYTES = transportBundleBytes();
 
 const toHex = (b) => Buffer.from(b).toString("hex");
 
-// ── the chat-shell admit gates, in shape ──────────────────────────────────────
-// ONE admission predicate (§12.5) keyed on the privileges the manifest's
-// `requires` reach, said with `byPrivilege`: the `base` branch is the consent
-// gate, the `link` and `route` grants pin the transport author — the
-// kernel-shipped transport reaches BOTH (raw links and attributed inbound
-// delivery), and a bundle reaching a privilege is judged by every grant it
-// reaches, so one pin, two entries.
+// ── the chat-shell admit gate, in shape ────────────────────────────────────────
+// ONE admission predicate (§12.5), and the one branch that is actually chat's: the
+// consent gate. The transport author pin is the assembly's half (`bootShell` composes
+// it from the blob itself), so the FORGED-transport check below exercises the pin the
+// browser shell actually runs under rather than a copy of it.
 const pendingApprovals = new Set();
-function admit(v) {
+function admit(v, ctx) {
+  // A bundle reaching a privilege is not an app: it would BE the network, and who may
+  // be the network is the pin bootShell ANDed onto this gate — the kernel-shipped
+  // transport author, and no other. Deferring is safe in both directions: the pin
+  // refuses a privilege it does not know rather than inheriting this `true`. Consent
+  // is for apps.
+  if (ctx.privileges.length > 0) return true;
   const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
   if (!pendingApprovals.has(bytesHashHex)) return false;
   pendingApprovals.delete(bytesHashHex);
   return true;
 }
-function admitTransport(v) {
-  return toHex(v.author) === transportAuthorHex;
-}
-const admitPolicy = byPrivilege({
-  base: admit,
-  grants: { link: admitTransport, route: admitTransport },
-});
 
 /** The channel adapter — the PLATFORM's, exactly as chat-shell.js builds it: the shell
  *  only routes its raw-link events to whichever admitted slot owns the `link` binding.
  *  The `contactSecret` getter is how chat feeds the CURRENT room secret to the
  *  accepting side, re-read on every fresh transport load (§12.6.3), which is what makes
- *  re-loading the bundle a way to change it. */
+ *  re-loading the bundle a way to change it. Handed to bootShell as an instance, so the
+ *  transport load stays where chat puts it. */
 function chatTransport(identity, contactSecret) {
   return new TransportHost({
     identity,
     get contactSecret() { return contactSecret; },
   });
-}
-
-function chatPlatform(identity, transportHost) {
-  return {
-    sodium,
-    identity,
-    modules: new ModuleTable(),
-    freshnessStore: new FreshnessMarks(),
-    transportHost,
-    createRealm: async (o) => createSafeRealm(o),
-  };
 }
 
 // ── an instrumented channel pair (mirrors the kernel's wirePair) ──────────────
@@ -126,9 +110,9 @@ async function until(fn, ms = 4000, what = "condition") {
 const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 // The one string in the kernel's vocabulary chat spells by hand (chat-app.js keeps a
 // no-imports shape) must be the transport bundle's own claim, or the guest calls
-// nothing. The kernel's NET_PROTOCOL constant is gone with the `_net` reservation:
-// the claim is now an ordinary local service name chosen by the composition that
-// built the bundle, so the bundle itself is the ground truth.
+// nothing. The kernel reserves no name for it: the claim is an ordinary local service
+// name chosen by the composition that built the bundle, so the bundle itself is the
+// ground truth.
 const transportManifest = verifyManifest(sodium, unpackBundle(TRANSPORT_BYTES)[MANIFEST_FILE]).manifest;
 assert((transportManifest.protocols ?? []).includes(NET_PROTO),
   `chat's net id ${JSON.stringify(NET_PROTO)} must be the transport bundle's claim`);
@@ -154,10 +138,9 @@ const inbound = { render: null, offers: 0 };
 const netA = chatTransport(identityA, CONTACT);
 const netB = chatTransport(identityB, CONTACT);
 
-const A = createShell({ platform: chatPlatform(identityA, netA), admit: admitPolicy });
-const B = createShell({
-  platform: chatPlatform(identityB, netB),
-  admit: admitPolicy,
+const A = (await bootShell({ sodium, identity: identityA, transport: netA, admit })).shell;
+const B = (await bootShell({
+  sodium, identity: identityB, transport: netB, admit,
   // The shell's own exact claims (§12.10), no wildcard and no fall-through, and one of
   // each kind. `offer/v1` is an ordinary id because a PEER reaches it (the app that
   // would handle it is the thing being offered); `_render` is `_`-led because only a
@@ -174,7 +157,7 @@ const B = createShell({
       return Promise.resolve(new Uint8Array(0));
     },
   },
-});
+})).shell;
 
 // 1. transport bundle admitted by author pin (both privileges); the socket driver standing
 try {
@@ -199,9 +182,9 @@ try {
     app: "evil", version: 1, modules: [],
     // A bundle that would BE the network: it reaches the `link` privilege by naming
     // `link/*` and `route` by naming `route/deliver` (§12.5) — the whole of what makes
-    // a bundle a transport. Its `_net` claim is an ordinary service name now, nothing
-    // malformed about the spelling: it is refused purely because an author the grants
-    // do not pin reached a privilege.
+    // a bundle a transport. Its `_net` claim is an ordinary service name, nothing
+    // malformed about the spelling: it is refused purely because an author the
+    // transport pin does not pin reached a privilege.
     protocols: ["_net"],
     guest: {
       hash: "00".repeat(32), abi: GUEST_ABI_VERSION,
@@ -244,8 +227,8 @@ try {
   const moduleHash = toHex(genesisHash(sodium, chatWasm));
   pendingApprovals.add(moduleHash);            // auto-approve like addAppFromWasm
   const loaded = await A.loadBundleBlob(chatBundle);
-  chatKey = appKeyFor(loaded.author, "chat");
-  // The app's module is private to its slot now, so there is no table to ask what landed:
+  chatKey = loaded.key;
+  // The app's module is private to its slot, so there is no table to ask what landed:
   // a load builds every module or none (§12.4), and what the shell exposes is the claim.
   assert(A.resolve(CHAT_PROTO) === chatKey, `A routes "${CHAT_PROTO}" to the app it installed`);
   // The receiving peer installs its own app, and that is the whole of it: the manifest
@@ -309,11 +292,13 @@ try {
 // landed under above.
 try {
   const authorId = hybridAuthorId(sodium, authorA.ed.publicKey, authorA.mlDsa.publicKey);
-  const key = appKeyFor(authorId, "chat");
-  assert(key === chatKey, "appKeyFor derives the key the load bound under");
-  assert(key.startsWith(toHex(authorId).slice(0, 8)), "appKeyFor shape");
-  ok("appKeyFor shape");
-} catch (err) { fail("appKeyFor", err); }
+  // The app key the load bound under is `<author hex>:<app>` (§5.1) — the shape the
+  // handle carries, which this test pins rather than re-derives.
+  const key = toHex(authorId) + ":chat";
+  assert(key === chatKey, "the handle's key is the load's own derivation");
+  assert(chatKey.startsWith(toHex(authorId).slice(0, 8)), "appKey shape");
+  ok("app key shape");
+} catch (err) { fail("app key", err); }
 
 // 7. the shape gate an Offer passes through (peekMeta → isChatApp). A peer's bundle
 // is installed on one click of a row showing a name and an author, so the requires it
@@ -335,7 +320,7 @@ try {
   assert(!isChatApp(chatManifest(["link/open"])), "an offered app reaching for sockets is refused");
   assert(!isChatApp(chatManifest(["fs/get"])), "an offered app claiming fs instead of the network is refused");
   assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, [])), "a no-module app is refused");
-  // The claim is part of what one click grants now (§12.10): installing an offered
+  // The claim is part of what one click grants (§12.10): installing an offered
   // bundle routes every id it claims to it, so a bundle claiming something other than
   // the chat protocol — or nothing, or extra ids beside it — is not a chat app.
   assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined, [])), "an app claiming no protocol is refused");

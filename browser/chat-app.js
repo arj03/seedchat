@@ -39,8 +39,8 @@ export const RENDER_PROTO = "_render";
 
 /** The whole authority a chat app holds (§12.2): the network, and the render relay.
  *
- *  It used to be nothing at all, and the change is not a relaxation — it is where
- *  sending moved to. The host has no send: the socket driver holds descriptors and the
+ *  Naming `_net` is not an indulgence but the whole of how an app sends. The host has
+ *  no send: the socket driver holds descriptors and the
  *  transport is a guest that serves the local service name `_net`, so a message reaches
  *  a peer by an app CALLING that id (§12.10). A chat app that could not name `_net`
  *  could receive chat and never send it, and the shell would need a second app of its
@@ -124,9 +124,9 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *
  *  `noReply` is 1: chat is a broadcast, not a round trip. The frame is handed to the wire
  *  and the call answers `[1]` without waiting for the far end, which is what the shell's
- *  fire-and-forget send always was — the difference is that the choice is now written
- *  down in the frame instead of implied by which host method was called. A deadline of 0
- *  means the node's own default, which is the only place that number should live.
+ *  fire-and-forget send is. The choice is written down in the frame rather than implied
+ *  by which host method was called. A deadline of 0 means the node's own default, which
+ *  is the only place that number should live.
  *
  *  Interpolating the id into a string literal is safe because `assertAppId` already held
  *  it to `[A-Za-z0-9_-]`: nothing to escape, no quote to break out of, and no `/`, which
@@ -180,7 +180,7 @@ export function chatGuestSource(appId) {
 export function isChatApp(manifest) {
     if (manifest.modules.length !== 1)
         return false;
-    // What it will SERVE, checked beside what it may do. A bundle's claim is now the
+    // What it will SERVE, checked beside what it may do. A bundle's claim IS the
     // routing (§12.10) — installing it points `chat` at it — so the claim is part of
     // what the consent prompt is agreeing to, and an offered bundle claiming ids this
     // shell knows nothing about would take those over on one click.

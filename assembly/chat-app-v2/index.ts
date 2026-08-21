@@ -17,7 +17,7 @@
 // render can be tagged with the sender's most recent known nick — even on
 // text/image messages where the sender didn't re-announce a nick.
 
-import { PRIV_USER_OFF, PK_LEN } from "seedkernel-wasm/assembly/seedkernel/handler";
+import { PRIV_USER_OFF, PK_LEN } from "seedkernel-wasm/guest-handler";
 
 const SCRATCH_SIZE: i32 = 0x40000; // 256 KB — input (pk‖type‖body) + render output
 const PRIVATE_SIZE: i32 = 0x40000; // 256 KB

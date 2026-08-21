@@ -4,17 +4,18 @@
 // import map in chat-shell.html resolves them to the vendored build. If a future
 // kernel change breaks chat, it broke a public export, which is the point.
 import sodium from "seedkernel-wasm/libsodium";
-import { createShell, byPrivilege } from "seedkernel-wasm/shell-core";
-// The JS target's builder for one bundle slot's private WASM modules. A target
-// implementation rather than shell API, so it has an entry point of its own.
-import { ModuleTable } from "seedkernel-wasm/module-table";
+// bootShell is the assembly itself (§12.9): platform members defaulted, the
+// transport bundle pinned to its own author, the channel adapter taken as the
+// instance below. Chat's admit is then ONLY its consent gate — who may be the
+// network is the assembly's, so nobody can lose it by forgetting it.
+import { bootShell } from "seedkernel-wasm/shell-core";
 import { TransportHost } from "seedkernel-wasm/transport-host";
 import { createSafeRealm } from "seedkernel-wasm/safe-js";
-import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
+import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import { withMlDsa65, loadMlDsa65 } from "seedkernel-wasm/pq";
 import { signManifest, hybridAuthorId, hybridAuthorKeysFromSeed, packBundle,
-         genesisHash, appKeyFor,
-         unpackBundle, verifyManifest, verifyBundle, FreshnessMarks, MANIFEST_FILE, GUEST_FILE, moduleFile }
+         genesisHash,
+         unpackBundle, verifyManifest, MANIFEST_FILE, GUEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
 import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
 // Chat's own code. media-rtc.js is the call feature: the kernel's WebRTC seam is
@@ -23,7 +24,7 @@ import { MediaRtcNetwork } from "./media-rtc.js";
 import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, CHAT_OP_RENDER, RENDER_PROTO } from "./chat-app.js";
 
 // The shell's own claims (§12.10) — exact names the shell answers itself, registered
-// at createShell below, and one of each KIND. `offer/v1` is an ordinary id because it
+// at bootShell below, and one of each KIND. `offer/v1` is an ordinary id because it
 // is reached by a peer: a signed bundle arriving from another browser before either
 // has an app that could receive it. `_render` is `_`-led because it must never be —
 // the kernel refuses a reserved id on the inbound path whoever holds it, the platform
@@ -141,22 +142,11 @@ withMlDsa65(sodium, await loadMlDsa65(
 // (§12.6): the channel AKE, the record layer, link routing and the request/
 // response layer run as a confined guest (transport/guest.js), signed into a
 // bundle that serves the local service name `_net` (an ordinary `_`-led claim,
-// no kernel semantics) and embedded in the host as TRANSPORT_BUNDLE_B64.
-// Admitting it below stands the shell's transport driver up; chat's own apps are
-// ordinary guest bundles that claim only `chat`.
-const TRANSPORT_BYTES = (() => {
-  const bin = atob(TRANSPORT_BUNDLE_B64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-})();
-// The author id of that exact artifact. The admit gate below pins BOTH privileges
-// to it — `link` (the raw sockets) and `route` (attributed inbound delivery) — the
-// browser equivalent of an operator's `grants: { link, route }` policy entries
-// (§12.5) — so a bundle a PEER offers can never become this node's network,
-// whatever its manifest claims. A transport reaches both privileges, and a bundle
-// reaching a privilege is judged by every grant it reaches, so the pin is both.
-const transportAuthorHex = bytesToHex(verifyBundle(sodium, TRANSPORT_BYTES).author);
+// no kernel semantics). bootShell pins the transport slot to this blob's own
+// author (derived from the blob, never restated), so no bundle a PEER offers can
+// ever become this node's network, whatever its manifest claims. Chat's admit gate
+// below is only the consent dialog.
+const TRANSPORT_BYTES = transportBundleBytes();
 
 // The shell (kernel host + admission policy + bundle loader) is assembled once the
 // identity exists — see the boot sequence below. It is declared here because handlers
@@ -222,30 +212,28 @@ transportHost = new TransportHost({
   get contactSecret() { return roomSecret ?? undefined; },
 });
 
-// Assemble the shared shell now that the identity exists. The platform is a browser
-// seam: sodium, our identity, a WebAssembly-backed handler table, an in-memory
-// freshness store — and the channel adapter above, which has no raw-link owner until
-// a bundle reaching `link` is admitted below.
+// Assemble the shared shell now that the identity exists — via bootShell, the ONE
+// assembly (§12.9). The platform is a browser seam: sodium, our identity, a
+// WebAssembly-backed module builder, an in-memory freshness store — all defaulted by
+// bootShell — and the channel adapter above, which has no raw-link owner until a
+// bundle reaching `link` is admitted below.
+//
+// The adapter is handed over as an INSTANCE (not an options object): chat owns its
+// transport-bundle load — ensureTransport loads lazily, and re-loads to change the
+// room secret — so bootShell neither loads it nor starts it. The transport author
+// pin is composed into the shell's admission by bootShell, from the blob itself.
 //
 // The QuickJS realm factory (safe-js) is supplied because every app is a guest:
 // the transport bundle needs a realm to run in, and so does each chat app — its
 // guest forwards to its module under the shell's execution budget (§12.3). That
-// is the honest cost of one app shape: this shell now pays the lazy QuickJS
-// engine for chat apps where it once paid only for the transport. Admission is
-// ONE predicate (§12.5) keyed on the privileges the manifest's `requires` reach,
-// said with `byPrivilege`: the `base` branch is the user-consent gate for an
-// app that reaches no privilege, the `link` and `route` grants admit the
-// kernel-shipped transport bundle by author pin — it reaches BOTH, and a bundle
-// reaching a privilege is judged by every grant it reaches.
-shell = createShell({
-  platform: {
-    sodium,
-    identity: myKeys,
-    modules: new ModuleTable(),
-    freshnessStore: new FreshnessMarks(),
-    transportHost,
-    createRealm: async (o) => createSafeRealm(o),
-  },
+// is the honest cost of one app shape: the lazy QuickJS engine is paid for every
+// app, not for the transport alone. Admission is
+// ONE predicate (§12.5), and the one branch that is actually chat's: the
+// user-consent gate. The transport author pin is the assembly's half.
+shell = (await bootShell({
+  sodium,
+  identity: myKeys,
+  transport: transportHost,
   // The shell's own local claims (§12.10) — exact names, no wildcard and no
   // fall-through; a bundle contesting one is refused at load like any other claimant.
   // Two, and both are the shell speaking for itself.
@@ -276,30 +264,27 @@ shell = createShell({
       return Promise.resolve(new Uint8Array(0));
     },
   },
-  admit: byPrivilege({
-    base(v) {
-      const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
-      if (!pendingApprovals.has(bytesHashHex)) return false;
-      pendingApprovals.delete(bytesHashHex);
-      return true;
-    },
-    grants: {
-      link(v) {
-        return bytesToHex(v.author) === transportAuthorHex;
-      },
-      route(v) {
-        return bytesToHex(v.author) === transportAuthorHex;
-      },
-    },
-  }),
-});
+  admit(v, ctx) {
+    // A bundle reaching a privilege is not an app: it would BE the network, and who may
+    // be the network is the pin bootShell ANDed onto this gate — the kernel-shipped
+    // transport author, and no other. Deferring is safe in both directions: the pin
+    // refuses a privilege it does not know rather than inheriting this `true`. My
+    // consent is for apps.
+    if (ctx.privileges.length > 0) return true;
+    const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
+    if (!pendingApprovals.has(bytesHashHex)) return false;
+    pendingApprovals.delete(bytesHashHex);
+    return true;
+  },
+  createRealm: async (o) => createSafeRealm(o),
+})).shell;
 
 // ─── channel identity ──────────────────────────────────────────────────
 //
 // Transport identity is the transport bundle's job. Each data channel runs its
 // in-channel HELLO/AUTH challenge (§12.6), proving the far end holds the kernel
-// private key for the pubkey it claims — a continuous channel binding that
-// subsumes the old SDP a=fingerprint signing and any per-message signature.
+// private key for the pubkey it claims — a continuous channel binding, which
+// subsumes both SDP a=fingerprint signing and any per-message signature.
 // Frames the driver hands us are already attributed to an authenticated peer, so
 // the sender pubkey (`_from`) is authoritative — we prepend it to the message
 // before running the app transform; there is no envelope signer to verify.
@@ -329,7 +314,7 @@ function setRelayPill(state, label) {
   relayPillText.textContent = label;
 }
 
-// The linked set is the TRANSPORT's answer now, not a field on the driver: links are the
+// The linked set is the TRANSPORT's answer, not a field on the driver: links are the
 // transport guest's, so asking costs a round trip through its realm and this is async.
 // A node with no transport standing has nothing to ask — read that as no peers rather
 // than letting a rejection escape into a status-bar update.
@@ -351,21 +336,19 @@ async function updatePeerPill() {
 // envelope plus the app's WASM module and its guest program in one blob. That blob
 // IS the bundle format — the same bytes seedstore's flagship deployment loads from
 // disk, so a chat app is just a guest that calls its one module and needs no
-// chat-specific install format, domain, or peek/unwrap code. `verifyBundle` (the
-// shared loader) authenticates the author's signature over the manifest, which
-// commits to the guest's and module's genesisHash, so the blob survives any number
-// of transitive relays and still authenticates against its original author —
-// exactly the store-and-forward property an Offer needs. The local "add app" flow
-// and the peer-to-peer Offer below carry the identical bundle.
+// chat-specific install format, domain, or peek/unwrap code. The shell's
+// `loadBundleBlob` (the shared §12.4 loader) authenticates the author's signature
+// over the manifest, which commits to the guest's and module's genesisHash, so the
+// blob survives any number of transitive relays and still authenticates against its
+// original author — exactly the store-and-forward property an Offer needs. The local
+// "add app" flow and the peer-to-peer Offer below carry the identical bundle.
 //
 // The module's WASM carries two embedded custom sections the runtime ignores but
 // this shell reads: "app_meta" (JSON — id, name, version) and "ui" (HTML rendered
-// in the sandboxed iframe). The signed manifest's `app` is the id, and the loader
-// binds the module inside its app's map, under `appKeyFor(author, app)` at the
-// module's logical name (§5.1). The manifest declares no bind name, so there is
-// nothing in it a forged manifest could point at an unexpected handler; the shell
-// calls the same `appKeyFor` the loader does rather than keeping a derivation of
-// its own.
+// in the sandboxed iframe). The signed manifest's `app` is the id; the load's
+// handle carries the key the app landed under — `<author hex>:<app>` (§5.1) — so
+// the registry binds the module's record to the same derivation the loader used,
+// with no second copy of it here.
 //
 // The key is node-local. Two peers need not agree on it: a CHAT frame carries a
 // *protocol id*, and each side resolves that to whichever app it installed that claims
@@ -402,10 +385,9 @@ const STORE = "apps.v2";
 
 // ── shell frame wire format ─────────────────────────────────────────────
 //
-// Messages now ride the Transport request plane: a chat message is a req with a
-// protocol id in the frame, and the receiving shell resolves that to the app claiming
-// it. The custom FRAME_CHAT / FRAME_OFFER framing that used to live here is gone —
-// one plane, one dispatch scheme (§12.10).
+// Messages ride the Transport request plane: a chat message is a req with a protocol
+// id in the frame, and the receiving shell resolves that to the app claiming it. There
+// is no chat-specific framing at all — one plane, one dispatch scheme (§12.10).
 
 // ── iframe bridge ──────────────────────────────────────────────────────
 //
@@ -571,9 +553,10 @@ async function applyAppBundle(bundleBytes) {
   const heldBefore = new Map(peeked.protocols.map((p) => [p, shell.resolve(p)]));
 
   const loaded = await shell.loadBundleBlob(bundleBytes);
-  const author = loaded.author;
-  const key = appKeyFor(author, peeked.app);
-  // Installing IS the routing (§12.10): this bundle's claim now points at it. Say so
+  // The load's handle carries the app key with the binding — the same derivation the
+  // loader used, so the registry and the loopback never restate it.
+  const key = loaded.key;
+  // Installing IS the routing (§12.10): this bundle's claim points at it. Say so
   // when it took an id off another installed app — the displaced app is still here and
   // still intact, just idle, and removing this one hands the protocol straight back.
   for (const [proto, before] of heldBefore) {
@@ -587,13 +570,17 @@ async function applyAppBundle(bundleBytes) {
   const record = {
     id: peeked.app,
     key,
+    /** The load's handle — the loopback `invoke` bound to this app, so no call site
+     *  passes the key to `shell.invoke` (and "the only loaded app" is never something
+     *  this node can mean). */
+    invoke: (op, arg) => loaded.invoke(op, arg),
     /** The manifest's signed claim (§12.10) — what this app serves when nothing
      *  later has taken the id over. The app row reads it against `shell.resolve`. */
     protocols: peeked.protocols,
     name: meta.name || peeked.app,
     version: meta.version || "",
     description: meta.description || "",
-    authorPk: author.slice(),
+    authorPk: loaded.author.slice(),
     bytesHash: genesisHash(sodium, peeked.wasm),
     bundleBytes: bundleBytes.slice(),
     moduleName: peeked.moduleName,
@@ -696,7 +683,7 @@ async function restoreInstalledApps() {
       const bundleBytes = new Uint8Array(raw);
       const peeked = peekMeta(bundleBytes);
       if (!peeked) continue;
-      // Restored apps were previously approved — wave through the admit gate.
+      // A restored app cleared the consent gate when it was installed — wave it through.
       pendingApprovals.add(peeked.moduleHash);
       await applyAppBundle(bundleBytes);
     } catch (err) {
@@ -827,11 +814,11 @@ function dismissOffer(bytesHashHex) {
 // For a chat frame it is the app that CLAIMS the protocol, so the app the message is
 // about is the app that speaks; for an Offer — a bundle in transit, on a reserved id no
 // app claims — it is the app being offered, which is by definition installed here.
-/** One local op into `sender`'s app: `shell.invoke` loops back through `handle`, writing
- *  the host's caller id and the op envelope, and the op NAME is the app's own vocabulary
- *  (chat-app.js). Nothing is framed here — the envelope is the guest ABI's. */
-function appInvoke(sender, op, arg) {
-  return shell.invoke(op, arg, sender);
+/** One local op into `rec`'s app: the record's handle loops back through `handle`,
+ *  writing the host's caller id and the op envelope, and the op NAME is the app's own
+ *  vocabulary (chat-app.js). Nothing is framed here — the envelope is the guest ABI's. */
+function appInvoke(rec, op, arg) {
+  return rec.invoke(op, arg);
 }
 
 function sendFrame(sender, peerId, proto, payload) {
@@ -845,8 +832,10 @@ function sendFrame(sender, peerId, proto, payload) {
 }
 
 async function broadcastToPeers(proto, payload) {
-  const sender = shell.resolve(proto);
-  if (!sender) return; // nothing installed claims this protocol — nothing to send with
+  const key = shell.resolve(proto);
+  if (!key) return; // nothing installed claims this protocol — nothing to send with
+  const sender = installedApps.get(key);
+  if (!sender) return;
   for (const peerId of await linkedPeers()) {
     try { await sendFrame(sender, peerId, proto, payload); }
     catch (err) { shellPrint(`send to ${peerId.slice(0, 8)} failed: ${err.message}`, "err"); }
@@ -877,7 +866,7 @@ async function offerApp(key) {
     // The offered app carries its own offer: `offer/v1` is the SHELL's claim (the app
     // that would handle it is the thing being offered), so there is no app to resolve
     // it to — the one we know is installed is the one whose bytes are in the frame.
-    try { await sendFrame(rec.key, peerId, OFFER_PROTO, rec.bundleBytes); }
+    try { await sendFrame(rec, peerId, OFFER_PROTO, rec.bundleBytes); }
     catch (err) { shellPrint(`offer to ${peerId.slice(0, 8)} failed: ${err.message}`, "err"); }
   }
   const n = linked.length;
@@ -958,7 +947,7 @@ function buildAppRow(rec) {
   // row has nothing to offer the user but the truth: which ids this bundle claimed, and
   // for each, whether this app is the one holding it. A claim it does not hold means a
   // later-installed app took the id over — the app stays installed and intact, and gets
-  // it back the moment that one is removed, which is the whole of "rebinding" now.
+  // it back the moment that one is removed, which is the whole of "rebinding".
   const protos = document.createElement("div");
   protos.className = "app-row-meta";
   const claimed = rec.protocols;
@@ -1211,7 +1200,7 @@ window.addEventListener("message", async (ev) => {
 // Networking — the transport bundle under a WebRTC socket seam (RtcNetwork,
 // host/net-rtc.ts) over a relay signaling channel.
 //
-// The transport is now a signed bundle (see TRANSPORT_BYTES above): the channel
+// The transport is a signed bundle (see TRANSPORT_BYTES above): the channel
 // AKE, record layer, link routing and request/response layer run as its confined
 // guest program, driven by the shell's TransportHost. What net-rtc.ts contributes
 // is the WebRTC fabric — perfect negotiation, the relay rendezvous, the unauthed-
@@ -1249,7 +1238,7 @@ const signaling = {
 // `let` is not hoisted like `var`, so a declaration below this point would leave a
 // getter reading a temporal-dead-zone binding. Nothing reads it during module
 // evaluation today, which means that would be a latent throw waiting for the first
-// code path that touches it earlier — not a failure we would see now.
+// code path that touches it earlier — not one any of today's paths would show.
 let roomSecret = null;
 
 // Admit the kernel-shipped transport bundle (making it the raw-link binding's owner),
@@ -1277,7 +1266,8 @@ async function ensureTransport() {
       // Replay our last nick so a peer joining mid-session learns our identity
       // without us re-sending it (chat v2 uses chatType 0x02 for nick). It goes out
       // through the app that claims the protocol, like every other frame.
-      const nickSender = lastSentNickBody && shell.resolve(lastSentNickBody.proto);
+      const nickKey = lastSentNickBody && shell.resolve(lastSentNickBody.proto);
+      const nickSender = nickKey ? installedApps.get(nickKey) : null;
       if (nickSender) {
         const body = lastSentNickBody.body;
         const chatBytes = new Uint8Array(1 + body.length);

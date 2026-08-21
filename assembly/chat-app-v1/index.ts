@@ -9,7 +9,7 @@
 // Input:   [pk PK_LEN][type u8][body ..]   type = 0x00 (text)
 // Render:  [type u8][pk_len u8][pk ..][body ..]
 
-import { PRIV_USER_OFF, PK_LEN } from "seedkernel-wasm/assembly/seedkernel/handler";
+import { PRIV_USER_OFF, PK_LEN } from "seedkernel-wasm/guest-handler";
 
 const SCRATCH_SIZE: i32 = 0x20000; // 128 KB
 const PRIVATE_SIZE: i32 = 0x20000; // 128 KB
