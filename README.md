@@ -49,7 +49,7 @@ The entire dependency is nine published entry points of `seedkernel-wasm`:
 | `seedkernel-wasm/guest-seam` | `GUEST_ABI_VERSION` — the guest seam version the chat bundle's guest declares |
 | `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC mesh, subclassed for calls in `browser/media-rtc.js` |
 | `seedkernel-wasm/safe-js` | `createSafeRealm` — the QuickJS realm every app's guest runs in (the transport bundle's and each chat app's) |
-| `seedkernel-wasm/pq` | `withMlDsa65`, `loadMlDsa65` — the browser's substitute for Node's `loadCrypto` |
+| `seedkernel-wasm/crypto-browser` | `loadCrypto` — the browser build of the same crypto seam Node's `loadCrypto` provides |
 | `seedkernel-wasm/libsodium` | the browser libsodium build |
 
 Plus one on the guest side: the app modules import `PK_LEN` and `PRIV_USER_OFF`

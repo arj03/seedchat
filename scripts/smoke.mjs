@@ -17,8 +17,8 @@ import { dirname, resolve } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 
 // sodium + the host resolve through seedkernel-wasm; loadCrypto (the Node entry's
-// one crypto seam) readies libsodium AND mixes in ML-DSA-65, exactly what the
-// browser shell's withMlDsa65 does.
+// one crypto seam) readies libsodium AND mixes in ML-DSA-65 + ML-KEM-768, exactly
+// what the browser shell's seedkernel-wasm/crypto-browser loadCrypto does.
 const { loadCrypto } = await import("seedkernel-wasm");
 const sodium = await loadCrypto();
 // bootShell is the assembly itself (§12.9): platform members defaulted, the

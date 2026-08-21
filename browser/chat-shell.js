@@ -12,7 +12,7 @@ import { bootShell } from "seedkernel-wasm/shell-core";
 import { TransportHost } from "seedkernel-wasm/transport-host";
 import { createSafeRealm } from "seedkernel-wasm/safe-js";
 import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
-import { withMlDsa65, loadMlDsa65 } from "seedkernel-wasm/pq";
+import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { hybridAuthorId, hybridAuthorKeysFromSeed,
          genesisHash, verifyBundle }
   from "seedkernel-wasm/bundle";
@@ -119,23 +119,16 @@ function hexToBytes(hex) {
 }
 
 shellPrint("Starting the handler table...", "sys");
-// libsodium instantiates its wasm asynchronously; every crypto call below — identity
-// generation, manifest signing, genesis hashing — needs it ready first.
-await sodium.ready;
-
-// ML-DSA-65 for manifest suite 0x02 (§12.4, §14.1), from the same mldsa65.wasm Node
-// reads and the Go loader embeds — so this shell admits exactly the bundles they
-// admit. It is loaded at boot rather than on first hybrid manifest because
-// verifyManifest is synchronous: the method is either on `sodium` before the first
-// verify or the bundle is refused as an unsupported suite.
+// libsodium + ML-DSA-65 + ML-KEM-768, all mixed onto `sodium` before anything below
+// touches it — bootShell's verifyBundle needs the PQ half for ANY bundle, and
+// verifyManifest is synchronous, so this can't be lazy (seedkernel's crypto-browser.ts).
 //
 // This shell SIGNS suite 0x02, the hybrid Ed25519 + ML-DSA-65 envelope (§12.4,
-// §14.1). Verifying led on purpose — every node had to be able to check a hybrid
-// manifest before any node started producing one — and that gate is long closed,
-// so the demo signs PQ by default like every other author, and its author id is
-// the key-set hash rather than the Ed25519 key.
-withMlDsa65(sodium, await loadMlDsa65(
-  await (await fetch(new URL("./vendor/mldsa65.wasm", import.meta.url))).arrayBuffer()));
+// §14.1) — every node had to be able to VERIFY a hybrid manifest before any node
+// produced one, and that gate is long closed, so the demo signs PQ by default like
+// every other author, and its author id is the key-set hash rather than the
+// Ed25519 key.
+await loadCrypto(sodium, new URL("./vendor/", import.meta.url));
 
 // The transport bundle — the kernel-shipped signed program that IS the network
 // (§12.6): the channel AKE, the record layer, link routing and the request/
