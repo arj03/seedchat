@@ -202,7 +202,9 @@ try {
   else ok("forged transport bundle refused (author pin on link and route)");
 }
 
-// 3. build + install a real chat app bundle (chat-shell's buildAppBundle)
+// 3. build + install a real chat app bundle (the shape scripts/build-app-bundle.mjs
+//    now authors offline; this test still assembles its own inline so it exercises
+//    signManifest/packBundle directly rather than shelling out)
 const chatWasm = new Uint8Array(readFileSync(resolve(here, "../build/chat-app-v1.wasm")));
 let chatKey = "";
 try {

@@ -13,15 +13,14 @@ import { TransportHost } from "seedkernel-wasm/transport-host";
 import { createSafeRealm } from "seedkernel-wasm/safe-js";
 import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import { withMlDsa65, loadMlDsa65 } from "seedkernel-wasm/pq";
-import { signManifest, hybridAuthorId, hybridAuthorKeysFromSeed, packBundle,
-         genesisHash,
-         unpackBundle, verifyManifest, MANIFEST_FILE, GUEST_FILE, moduleFile }
+import { hybridAuthorId, hybridAuthorKeysFromSeed,
+         genesisHash, verifyBundle }
   from "seedkernel-wasm/bundle";
 import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
 // Chat's own code. media-rtc.js is the call feature: the kernel's WebRTC seam is
 // raw I/O, so live audio/video is a subclass of it that lives here.
 import { MediaRtcNetwork } from "./media-rtc.js";
-import { assertAppId, chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, CHAT_OP_RENDER, RENDER_PROTO } from "./chat-app.js";
+import { isChatApp, CHAT_OP_SEND, CHAT_OP_RENDER, RENDER_PROTO } from "./chat-app.js";
 
 // The shell's own claims (§12.10) — exact names the shell answers itself, registered
 // at bootShell below, and one of each KIND. `offer/v1` is an ordinary id because it
@@ -165,6 +164,13 @@ let net = null;
 let transportSecret = null;
 /** The channel adapter — built beside the shell, below, once the tab's identity exists. */
 let transportHost;
+// The room's contact secret (see "Room secret" further down for the sharing UI). Must be
+// initialized before `transportHost` is constructed below: its `contactSecret` getter
+// closes over this binding, and bootShell's very first transport-guest boot reads it
+// SYNCHRONOUSLY (guest `init()` → `link/config` → `TransportHost.configuration()`) —
+// well before the module has run as far as any code that only sets a real value later.
+// A `let` declared after that first boot is a temporal-dead-zone throw on every load.
+let roomSecret = null;
 
 // ─── per-tab Ed25519 identity ──────────────────────────────────────────
 let myKeys;
@@ -431,108 +437,33 @@ async function readWasmSections(wasmBytes) {
   return { meta: parsedMeta, uiHtml };
 }
 
-function promptMeta(defaultId) {
-  // Fallback when a dropped .wasm has no app_meta section.
-  const id = prompt("App id (lowercase, no spaces — used as the kernel name):", defaultId);
-  if (!id) return null;
-  const trimmed = id.trim();
-  // The same charset a manifest module name is held to (§12.4): the id becomes the
-  // module's name, and so its file in the bundle. Reject it here rather than let the
-  // user sign a manifest their own shell would then refuse as malformed.
-  if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) {
-    const msg = "App id must be alphanumeric / _ -";
-    shellPrint(msg, "err");
-    showAppsNotice(msg, "err");
-    return null;
-  }
-  const name = prompt("Display name:", trimmed) || trimmed;
-  const version = prompt("Version label:", "v1") || "v1";
-  return { id: trimmed, name, version };
-}
-
-// ── build an app bundle (local-authored) ────────────────────────────────
-//
-// Turn a WASM module into a signed bundle: read its app_meta for the
-// id, build a manifest declaring the module under that id plus the ~5-line guest
-// that forwards to it, sign the manifest under
-// the local key (the real §12.4 manifest signature), and pack the manifest envelope
-// + module + guest into one blob. The manifest names no kernel name — the loader derives
-// it from the signed `(app, name)` pair. `version` is a nominal 1 — the interactive
-// shell gates installs on user consent (the approve callback), not on a monotonic
-// freshness mark, so a chat bundle carries no meaningful version counter.
-//
-// A chat app is an ordinary guest bundle: the guest's `handle` forwards its input to
-// the app's own module by name on the same `host.call` seam and returns the render bytes —
-// the whole app is that forwarding guest (chat-app.js). It declares no authority at
-// all (§12.2): its own module map is a primitive, not a grant (seedkernel §12.1).
-async function buildAppBundle(wasmBytes) {
-  const { meta } = await readWasmSections(wasmBytes);
-  if (!meta || !meta.id) throw new Error("cannot build a bundle: wasm has no app_meta id");
-  // The id is attacker-chosen text from a custom section, and it is about to be
-  // interpolated into JS this key signs — so it is checked against the §12.4 name
-  // grammar HERE, before the template, not by the manifest parser afterwards.
-  assertAppId(meta.id);
-  const guestBytes = new TextEncoder().encode(chatGuestSource(meta.id));
-  const manifest = {
-    app: meta.id,
-    version: 1,
-    // What this app serves (§12.10), signed with the rest of the manifest. Every chat
-    // app claims the one chat protocol — that is what lets two peers running different
-    // apps talk — and claiming it is what routes it: installing this bundle makes it
-    // this node's `chat` app, taking the id over from whatever held it.
-    protocols: [CHAT_PROTO],
-    modules: [{
-      name: meta.id,
-      hash: bytesToHex(genesisHash(sodium, wasmBytes)),
-    }],
-    guest: {
-      hash: bytesToHex(genesisHash(sodium, guestBytes)),
-      abi: GUEST_ABI_VERSION,
-      requires: CHAT_APP_REQUIRES,
-    },
-  };
-  const manifestEnv = signManifest(sodium, myAuthorKeys, manifest);
-  return packBundle({
-    [MANIFEST_FILE]: manifestEnv,
-    [moduleFile(meta.id)]: wasmBytes,
-    [GUEST_FILE]: guestBytes,
-  });
-}
-
 // ── extract metadata from a bundle blob ──────────────────────────────────
 //
-// Read app + module metadata off a bundle for the UI and the approval gate,
-// through the SHARED §12.4 manifest parser (bundle.ts verifyManifest): it reads the
-// envelope suite, verifies the author signature, and returns the parsed manifest +
-// the author key. So this shell never hand-parses envelope offsets — the layout stays
-// private to bundle.ts, where the suite-first parse lives. (Module-byte integrity is
-// still loadBundleBlob's job at install; this only needs the manifest.) Returns null on
-// anything malformed, unauthentic, or not the demo's one-module app shape.
+// Read app + module metadata off a bundle for the UI and the approval gate, through
+// the SHARED §12.4 verify path (bundle.ts verifyBundle): one call unpacks the
+// container, verifies the author signature, and checks every module's and the
+// guest's content hash against what the manifest commits to — so a peek here
+// already rejects a signature-valid-but-tampered bundle, not just at install.
+// Returns null on anything malformed, unauthentic, or not the demo's one-module
+// app shape.
 function peekMeta(bundleBytes) {
-  let files;
-  try { files = unpackBundle(bundleBytes); }
+  let v;
+  try { v = verifyBundle(sodium, bundleBytes); }
   catch { return null; }
-  const env = files[MANIFEST_FILE];
-  if (!env) return null;
-  let vm;
-  try { vm = verifyManifest(sodium, env); }   // throws on an unsupported suite / malformed body
-  catch { return null; }
-  if (!vm) return null;                        // bad signature ⇒ decline quietly
-  const { author, manifest } = vm;
   // One module, and a guest holding no authority at all (chat-app.js). The
   // requires half is what keeps an Offer from installing authority behind a consent
   // row that only shows a name: `guest.requires` is where a bundle's reach is
   // written down, and this is the one place on the install path that reads it.
-  if (!isChatApp(manifest)) return null;
-  const mod = manifest.modules[0];
-  const wasm = files[moduleFile(mod.name)];
+  if (!isChatApp(v.manifest)) return null;
+  const mod = v.manifest.modules[0];
+  const wasm = v.modules[0].wasm;
   if (!wasm || wasm.length === 0) return null;
   // `protocols` rides along because it is what the bundle will SERVE once admitted
   // (§12.10) — the same manifest read that gates the install answers "and what does it
   // take over", so the UI never re-parses the envelope to find out.
   return {
-    app: manifest.app, moduleName: mod.name, moduleHash: mod.hash, wasm, authorPk: author,
-    protocols: manifest.protocols ?? [],
+    app: v.manifest.app, moduleName: mod.name, moduleHash: mod.hash, wasm, authorPk: v.author,
+    protocols: v.manifest.protocols ?? [],
   };
 }
 
@@ -581,7 +512,9 @@ async function applyAppBundle(bundleBytes) {
     version: meta.version || "",
     description: meta.description || "",
     authorPk: loaded.author.slice(),
-    bytesHash: genesisHash(sodium, peeked.wasm),
+    // Already-verified in peekMeta's verifyBundle call — reuse it rather than
+    // re-hashing wasm bytes we just proved match this exact hash.
+    bytesHash: hexToBytes(peeked.moduleHash),
     bundleBytes: bundleBytes.slice(),
     moduleName: peeked.moduleName,
     uiHtml,
@@ -590,63 +523,6 @@ async function applyAppBundle(bundleBytes) {
   persistInstalledApps();
   renderAppList();
   return record;
-}
-
-// Add an app from raw WASM bytes by building + signing a bundle with the local
-// key (the local user becomes the author).
-async function addAppFromWasm(wasmBytes, fallbackId) {
-  let { meta } = await readWasmSections(wasmBytes);
-  if (!meta || !meta.id) {
-    meta = promptMeta(fallbackId);
-    if (!meta) return;
-    wasmBytes = embedAppMeta(wasmBytes, meta);
-  }
-  const bundleBytes = await buildAppBundle(wasmBytes);
-  const peeked = peekMeta(bundleBytes);
-  if (!peeked) throw new Error("internal: just-built app bundle did not parse");
-
-  // Auto-approve locally-authored bundles and load through the shared shell.
-  pendingApprovals.add(peeked.moduleHash);
-  try {
-    const record = await applyAppBundle(bundleBytes);
-    shellPrint(`Installed ${record.name} ${record.version}`, "sys");
-    setActiveApp(record.key);
-  } catch (err) {
-    pendingApprovals.delete(peeked.moduleHash);
-    shellPrint(`Install failed: ${err.message}`, "err");
-    showAppsNotice(`Install failed: ${err.message}`, "err");
-  }
-}
-
-// Embed an app_meta JSON custom section into a wasm buffer. Mirror of
-// scripts/embed-meta.mjs so the shell can produce a fully self-describing
-// bundle when the user supplies metadata for a meta-less .wasm.
-function embedAppMeta(wasmBytes, meta) {
-  const json = new TextEncoder().encode(JSON.stringify(meta));
-  const nameUtf = new TextEncoder().encode("app_meta");
-  const leb = (n) => {
-    const out = [];
-    do { let b = n & 0x7f; n >>>= 7; if (n !== 0) b |= 0x80; out.push(b); } while (n !== 0);
-    return new Uint8Array(out);
-  };
-  const inner = (() => {
-    const nl = leb(nameUtf.length);
-    const buf = new Uint8Array(nl.length + nameUtf.length + json.length);
-    let o = 0;
-    buf.set(nl, o); o += nl.length;
-    buf.set(nameUtf, o); o += nameUtf.length;
-    buf.set(json, o);
-    return buf;
-  })();
-  const sz = leb(inner.length);
-  const section = new Uint8Array(1 + sz.length + inner.length);
-  section[0] = 0x00;
-  section.set(sz, 1);
-  section.set(inner, 1 + sz.length);
-  const out = new Uint8Array(wasmBytes.length + section.length);
-  out.set(wasmBytes, 0);
-  out.set(section, wasmBytes.length);
-  return out;
 }
 
 // ── persistence ────────────────────────────────────────────────────────
@@ -851,7 +727,7 @@ async function renderLocal(rec, payload) {
   // same seam a peer's request would take. Which means it can fail the same way,
   // so it reports rather than rejecting into a caller that has nowhere to put it.
   let render;
-  try { render = await appInvoke(rec.key, CHAT_OP_RENDER, input); }
+  try { render = await appInvoke(rec, CHAT_OP_RENDER, input); }
   catch (err) { shellPrint(`local echo failed: ${err.message}`, "err"); return; }
   if (render) deliverRender(new Uint8Array(render));
 }
@@ -983,24 +859,6 @@ function buildAppRow(rec) {
     });
     btns.appendChild(openBtn);
   }
-  if (isMine) {
-    const updateBtn = document.createElement("button");
-    updateBtn.className = "icon";
-    updateBtn.textContent = "Update…";
-    const fileInput = document.createElement("input");
-    fileInput.type = "file";
-    fileInput.accept = ".wasm,application/wasm";
-    fileInput.addEventListener("change", async () => {
-      const f = fileInput.files && fileInput.files[0];
-      if (!f) return;
-      const bytes = new Uint8Array(await f.arrayBuffer());
-      fileInput.value = "";
-      await addAppFromWasm(bytes, rec.id);
-    });
-    updateBtn.addEventListener("click", () => fileInput.click());
-    btns.appendChild(updateBtn);
-    btns.appendChild(fileInput);
-  }
   const offerBtn = document.createElement("button");
   offerBtn.className = "icon";
   offerBtn.textContent = "Offer to peers";
@@ -1110,10 +968,26 @@ function buildOfferRow(hex, offer) {
 async function loadDroppedFile(file) {
   if (!file) return;
   const bytes = new Uint8Array(await file.arrayBuffer());
-  // The filename's stem is the only signal we have for an id when the
-  // bundle is meta-less; the prompt fallback uses it as a default.
-  const stem = (file.name || "app").replace(/\.wasm$/i, "");
-  await addAppFromWasm(bytes, stem);
+  const peeked = peekMeta(bytes);
+  if (!peeked) {
+    const msg = "Not a valid app bundle (.skb)";
+    shellPrint(msg, "err");
+    showAppsNotice(msg, "err");
+    return;
+  }
+  // Dropping a file IS the consent (§12.4) — the same one-shot approval the
+  // (deleted) addAppFromWasm used to grant a just-built bundle, now granted to
+  // whatever already-signed bundle the user picked.
+  pendingApprovals.add(peeked.moduleHash);
+  try {
+    const record = await applyAppBundle(bytes);
+    shellPrint(`Installed ${record.name} ${record.version}`, "sys");
+    setActiveApp(record.key);
+  } catch (err) {
+    pendingApprovals.delete(peeked.moduleHash);
+    shellPrint(`Install failed: ${err.message}`, "err");
+    showAppsNotice(`Install failed: ${err.message}`, "err");
+  }
 }
 
 dropzone.addEventListener("click", () => appFileInput.click());
@@ -1232,14 +1106,8 @@ const signaling = {
 
 // The room's contact secret: 32 bytes, or null for an open room — we answer anyone who
 // finds the room name. Set from the invite link's `#` fragment on load, or minted by
-// "Random"; the sharing machinery is further down, under "Room secret".
-//
-// Declared HERE, above the code that reads it, rather than beside that machinery:
-// `let` is not hoisted like `var`, so a declaration below this point would leave a
-// getter reading a temporal-dead-zone binding. Nothing reads it during module
-// evaluation today, which means that would be a latent throw waiting for the first
-// code path that touches it earlier — not one any of today's paths would show.
-let roomSecret = null;
+// "Random"; the sharing machinery is further down, under "Room secret". Declared with
+// the other networking state near the top of the file, not here — see there for why.
 
 // Admit the kernel-shipped transport bundle (making it the raw-link binding's owner),
 // then put the WebRTC socket seam under it. Runs lazily on the first relay connect —

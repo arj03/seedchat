@@ -61,7 +61,8 @@
 <section id="about" class="about" hidden>
   A signed-install bootstrap. The shell owns only the kernel, signature
   module, installer, WebRTC transport, and a sandboxed iframe. Apps arrive as
-  signed WASM artifacts carrying their own UI; they can be loaded locally,
+  signed <code>.skb</code> bundles carrying their own UI, built offline with
+  <code>scripts/build-app-bundle.mjs</code>; they can be loaded locally,
   exchanged peer-to-peer over the chat channel, and re-shared transitively —
   the author's signature on each install rides through every hop unchanged.
   See <strong>§12.4</strong> for the install model.
@@ -94,7 +95,7 @@
 
     <div id="app-empty" class="empty-state">
       No app is loaded. Open the <strong>Apps</strong> tab to install one — drag a
-      <code>.wasm</code> file in, or accept an offer from a peer.
+      <code>.skb</code> file in, or accept an offer from a peer.
     </div>
 
     <!-- allow-forms lets app UIs use a normal <form> element for the input.
@@ -112,9 +113,8 @@
 
   <!-- ─── Apps registry ────────────────────────────────────────────── -->
   <div id="panel-apps" class="panel hidden" role="tabpanel">
-    <p class="lead-hint">Apps are signed WASM blobs. Drop one in to install it
-      locally, or wait for a peer to offer one. Updates from an author you've
-      already trusted install automatically; everything else asks first.</p>
+    <p class="lead-hint">Apps are signed <code>.skb</code> bundles. Drop one in to
+      install it locally, or wait for a peer to offer one.</p>
 
     <div id="apps-notice" class="apps-notice" hidden role="status" aria-live="polite"></div>
 
@@ -125,12 +125,12 @@
       </header>
       <div class="step-body">
         <div id="dropzone" class="dropzone" tabindex="0" role="button"
-                          aria-label="Drop a .wasm file or click to choose">
+                          aria-label="Drop a .skb file or click to choose">
           <div class="dropzone-inner">
-            <strong>Drop a <code>.wasm</code> here</strong>
+            <strong>Drop a <code>.skb</code> here</strong>
             <span class="hint subtle">or click to choose a file</span>
           </div>
-          <input id="app-file" type="file" accept=".wasm,application/wasm" hidden />
+          <input id="app-file" type="file" accept=".skb" hidden />
         </div>
       </div>
     </section>

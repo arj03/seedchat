@@ -27,6 +27,7 @@ chat makes into the runtime has to go through a published entry point.
 | `browser/media-rtc.js` | The call feature: `MediaRtcNetwork`, a subclass of the kernel's `RtcNetwork` that publishes camera/mic over the peer connections the data channel already uses. The kernel seam is raw I/O only, so live media is chat's — it renegotiates through the seam's own perfect-negotiation path and adds no signaling. |
 | `scripts/embed-ui.mjs` | Appends a `ui` custom section to a built `.wasm`. |
 | `scripts/embed-meta.mjs` | Appends an `app_meta` JSON custom section (id, name, version). |
+| `scripts/build-app-bundle.mjs` | The offline bundle author: signs a built + meta-embedded `.wasm` into a `.skb` under `chat-author.key` (auto-minted on first run, gitignored), tracking a monotonic freshness mark in `chat-author.version`. Anyone wanting to install a custom app builds their own `.skb` with this script instead of dragging a raw `.wasm` into the browser. |
 | `scripts/vendor.mjs` | Copies the kernel's built host (`build-min`: `host/` + `core/`) into `browser/vendor/`, plus the browser libsodium, `mldsa65.wasm`, and the QuickJS realm engine (safe-js's graph), for a bundler-free static serve. Refuses a stale (un-minified-since-compile) kernel build. |
 | `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam and round-trips a message through a real chat-app-v1.wasm. Run it after a kernel update. |
 | `scripts/relay.mjs` | The WebSocket signaling rendezvous for the WebRTC mesh. App-neutral — seed store points at this file too. |
@@ -44,7 +45,7 @@ The entire dependency is nine published entry points of `seedkernel-wasm`:
 | `seedkernel-wasm/shell-core` | `bootShell` — the ONE assembly (§12.9): platform members defaulted, the transport bundle pinned to its own author, the adapter taken as the instance below. Chat's `admit` is only its consent gate. |
 | `seedkernel-wasm/transport-host` | `TransportHost` — the channel adapter the platform owns, whose raw-link events the shell binds to whichever admitted slot holds the `link` capability. Handed to `bootShell` as an instance, so chat owns its transport-bundle load. |
 | `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` — the kernel-shipped transport bundle as raw bytes (§12.6) |
-| `seedkernel-wasm/bundle` | `signManifest`, `packBundle`, `unpackBundle`, `verifyManifest`, `genesisHash`, `MANIFEST_FILE`, `GUEST_FILE`, `moduleFile` — chat authors and signs app bundles at runtime, the same API seedstore's build uses offline |
+| `seedkernel-wasm/bundle` | `unpackBundle`, `verifyManifest`, `genesisHash`, `MANIFEST_FILE`, `GUEST_FILE`, `moduleFile` — the shell only verifies and unpacks bundles at runtime; authoring is offline (`scripts/build-app-bundle.mjs`, `authorBundle`), the same API seedstore's build uses |
 | `seedkernel-wasm/guest-seam` | `GUEST_ABI_VERSION` — the guest seam version the chat bundle's guest declares |
 | `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC mesh, subclassed for calls in `browser/media-rtc.js` |
 | `seedkernel-wasm/safe-js` | `createSafeRealm` — the QuickJS realm every app's guest runs in (the transport bundle's and each chat app's) |
@@ -128,17 +129,24 @@ chat serves the last minified build.
 `localhost` is a secure context, so plain HTTP is enough for WebRTC when both tabs
 are on this machine; reaching the shell from another device needs HTTPS.
 
-Load an app by picking `build/chat-app-v1.wasm` (or `v2`) in the shell — it
-builds a signed one-module bundle from the local identity, verifies it, and the
-loader admits it under the shell's policy. Peers hand each other the same bundles
-in an `OFFER` frame; the recipient re-verifies the original author's manifest
-signature, so a bundle survives any number of relays and still authenticates
-against whoever wrote it. An Offer is installed on one click, so the recipient
-also checks its *shape* before showing that click: one module, and a guest whose
-reach is exactly `_net` and `_render` and nothing else (`browser/chat-app.js`). A
-signature says who wrote a bundle, not what it may reach — `guest.requires` is where
-that is written down, and this shell will not install an app claiming reach it did
-not ask for.
+Load an app by picking `bundle/chat-app-v1.skb` (or `v2`, both written by `npm run
+build`) in the shell — the browser only verifies the bundle's signature and admits
+it under the shell's policy; no signing happens in the browser. Dropping a newer
+`.skb` of an app you already have is how you upgrade it: the shell's install path
+is the same one either way, so a re-drop from the same author replaces the running
+app in place. Peers hand each other the same bundles in an `OFFER` frame; the
+recipient re-verifies the original author's manifest signature, so a bundle
+survives any number of relays and still authenticates against whoever wrote it. An
+Offer is installed on one click, so the recipient also checks its *shape* before
+showing that click: one module, and a guest whose reach is exactly `_net` and
+`_render` and nothing else (`browser/chat-app.js`). A signature says who wrote a
+bundle, not what it may reach — `guest.requires` is where that is written down, and
+this shell will not install an app claiming reach it did not ask for.
+
+Anyone wanting to install a custom app builds their own `.skb` with
+`scripts/build-app-bundle.mjs` — there is no per-browser-session self-signing
+anymore, so admission trust is purely "did I consent to install this bundle",
+never "did I sign it as myself".
 
 The relay is partitioned into **rooms** (`ws://host:8080/<room>`, default
 `global`), set on the shell's **Network** tab. A room is *not* an authenticated
