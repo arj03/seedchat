@@ -157,9 +157,10 @@ let transportSecret = null;
 let transportHost;
 // The room's contact secret (see "Room secret" further down for the sharing UI). Must be
 // initialized before `transportHost` is constructed below: its `contactSecret` getter
-// closes over this binding, and bootShell's very first transport-guest boot reads it
-// SYNCHRONOUSLY (guest `init()` → `link/config` → `TransportHost.configuration()`) —
-// well before the module has run as far as any code that only sets a real value later.
+// closes over this binding, and the shell reads it on every transport-bundle load
+// (the `init` delivery: the host invokes the freshly stood link occupant once with the
+// node facts, `initialConfig()` — see seedkernel shell-core `initLinkSlot`) — well
+// before the module has run as far as any code that only sets a real value later.
 // A `let` declared after that first boot is a temporal-dead-zone throw on every load.
 let roomSecret = null;
 
