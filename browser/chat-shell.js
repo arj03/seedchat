@@ -10,13 +10,11 @@ import sodium from "seedkernel-wasm/libsodium";
 // network is the assembly's, so nobody can lose it by forgetting it.
 import { bootShell } from "seedkernel-wasm/shell-core";
 import { TransportHost } from "seedkernel-wasm/transport-host";
-import { createSafeRealm } from "seedkernel-wasm/safe-js";
 import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { hybridAuthorId, hybridAuthorKeysFromSeed,
          genesisHash, verifyBundle }
   from "seedkernel-wasm/bundle";
-import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
 // Chat's own code. media-rtc.js is the call feature: the kernel's WebRTC seam is
 // raw I/O, so live audio/video is a subclass of it that lives here.
 import { MediaRtcNetwork } from "./media-rtc.js";
@@ -222,13 +220,11 @@ transportHost = new TransportHost({
 // room secret — so bootShell neither loads it nor starts it. The transport author
 // pin is composed into the shell's admission by bootShell, from the blob itself.
 //
-// The QuickJS realm factory (safe-js) is supplied because every app is a guest:
-// the transport bundle needs a realm to run in, and so does each chat app — its
-// guest forwards to its module under the shell's execution budget (§12.3). That
-// is the honest cost of one app shape: the lazy QuickJS engine is paid for every
-// app, not for the transport alone. Admission is
-// ONE predicate (§12.5), and the one branch that is actually chat's: the
-// user-consent gate. The transport author pin is the assembly's half.
+// The realm engine every app's guest runs in — the transport bundle's and each chat
+// app's — is bootShell's default (safe-js), imported lazily on the first realm.
+//
+// Admission is ONE predicate (§12.5), and the one branch that is actually chat's:
+// the user-consent gate. The transport author pin is the assembly's half.
 shell = (await bootShell({
   sodium,
   identity: myKeys,
@@ -275,7 +271,6 @@ shell = (await bootShell({
     pendingApprovals.delete(bytesHashHex);
     return true;
   },
-  createRealm: async (o) => createSafeRealm(o),
 })).shell;
 
 // ─── channel identity ──────────────────────────────────────────────────

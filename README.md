@@ -38,7 +38,7 @@ kernel never reads either section. They live here because the reader lives here.
 
 ## The kernel surface chat uses
 
-The entire dependency is nine published entry points of `seedkernel-wasm`:
+The entire dependency is seven published entry points of `seedkernel-wasm`:
 
 | Import | Used for |
 | --- | --- |
@@ -46,9 +46,7 @@ The entire dependency is nine published entry points of `seedkernel-wasm`:
 | `seedkernel-wasm/transport-host` | `TransportHost` — the channel adapter the platform owns, whose raw-link events the shell binds to whichever admitted slot holds the `link` capability. Handed to `bootShell` as an instance, so chat owns its transport-bundle load. |
 | `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` — the kernel-shipped transport bundle as raw bytes (§12.6) |
 | `seedkernel-wasm/bundle` | `unpackBundle`, `verifyManifest`, `genesisHash`, `MANIFEST_FILE`, `GUEST_FILE`, `moduleFile` — the shell only verifies and unpacks bundles at runtime; authoring is offline (`scripts/build-app-bundle.mjs`, `authorBundle`), the same API seedstore's build uses |
-| `seedkernel-wasm/guest-seam` | `GUEST_ABI_VERSION` — the guest seam version the chat bundle's guest declares |
 | `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC mesh, subclassed for calls in `browser/media-rtc.js` |
-| `seedkernel-wasm/safe-js` | `createSafeRealm` — the QuickJS realm every app's guest runs in (the transport bundle's and each chat app's) |
 | `seedkernel-wasm/crypto-browser` | `loadCrypto` — the browser build of the same crypto seam Node's `loadCrypto` provides |
 | `seedkernel-wasm/libsodium` | the browser libsodium build |
 

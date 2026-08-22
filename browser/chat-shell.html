@@ -194,21 +194,18 @@
 <!-- The kernel surface chat depends on, declared in one place. `npm run vendor`
      copies seedkernel-wasm's built host (build-min: host/ + core/) into ./vendor/;
      the seedkernel-wasm/* specifiers below are the entire contract between this
-     app and the runtime. The QuickJS entries are the realm engine every app's
-     guest runs in — the transport bundle's and each chat app's (safe-js's graph:
-     the kernel's own quickjs-ng build, whose .wasm rides beside its variant, plus
-     quickjs-emscripten-core, the JS API layer over it). Same layout seed store's
-     build-browser-demo.mjs stages. -->
+     app and the runtime. The QuickJS entries are not chat's own: they are the realm
+     engine every app's guest runs in, imported by bare specifier from the vendored
+     safe-js that shell-core loads on the first realm (the kernel's own quickjs-ng
+     build, whose .wasm rides beside its variant, plus quickjs-emscripten-core, the
+     JS API layer over it). Same layout seed store's build-browser-demo.mjs stages. -->
 <script type="importmap">
 {
   "imports": {
     "seedkernel-wasm/shell-core":    "./vendor/host/shell-core.js",
-    "seedkernel-wasm/module-table":  "./vendor/host/module-table.js",
     "seedkernel-wasm/transport-host": "./vendor/host/transport-host.js",
     "seedkernel-wasm/net-rtc":       "./vendor/host/net-rtc.js",
     "seedkernel-wasm/bundle":        "./vendor/host/bundle.js",
-    "seedkernel-wasm/guest-seam":    "./vendor/host/guest-seam.js",
-    "seedkernel-wasm/safe-js":       "./vendor/host/safe-js.js",
     "seedkernel-wasm/transport-bundle": "./vendor/host/transport-bundle.js",
     "seedkernel-wasm/crypto-browser": "./vendor/host/crypto-browser.js",
     "seedkernel-wasm/libsodium":     "./vendor/libsodium-wrappers.mjs",
