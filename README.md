@@ -50,9 +50,10 @@ The entire dependency is seven published entry points of `seedkernel-wasm`:
 | `seedkernel-wasm/crypto-browser` | `loadCrypto` — the browser build of the same crypto seam Node's `loadCrypto` provides |
 | `seedkernel-wasm/libsodium` | the browser libsodium build |
 
-Plus one on the guest side: the app modules import `PK_LEN` and `PRIV_USER_OFF`
-from `seedkernel-wasm/guest-handler` — the AssemblyScript half of the handler ABI
-(§4). It is imported, never vendored: an ABI that apps fork is an ABI that drifts.
+Plus one on the guest side: the app modules define their two memory-layout
+literals — `PK_LEN = 32` (the sender pk the shell prepends) and
+`PRIV_USER_OFF = 0` (where app bookkeeping starts in private memory) — alongside
+their own layout comments (§4).
 
 **The protocol is a bundle; the sockets are the platform's.** The channel AKE, record
 layer and request/response layer ship as a *signed transport bundle* that serves the

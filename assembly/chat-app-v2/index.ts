@@ -6,7 +6,7 @@
 // by the shell (the AKE channel already authenticated it), and the render bytes
 // are the handler's return value, which the shell forwards to the iframe.
 //
-// Input:   [pk PK_LEN][type u8][body ..]
+// Input:   [pk 32][type u8][body ..]
 //   type 0  text    body = utf-8 text
 //   type 1  image   body = jpeg bytes
 //   type 2  nick    body = utf-8 nick (this sender's new nick)
@@ -17,7 +17,11 @@
 // render can be tagged with the sender's most recent known nick — even on
 // text/image messages where the sender didn't re-announce a nick.
 
-import { PRIV_USER_OFF, PK_LEN } from "seedkernel-wasm/guest-handler";
+// The layout literals — the shell prepends the 32-byte sender pk, and the app
+// may start its bookkeeping at offset 0 of private memory (the module reserves
+// nothing, so 0 is both the value and the intent).
+const PK_LEN: i32 = 32;
+const PRIV_USER_OFF: i32 = 0;
 
 const SCRATCH_SIZE: i32 = 0x40000; // 256 KB — input (pk‖type‖body) + render output
 const PRIVATE_SIZE: i32 = 0x40000; // 256 KB

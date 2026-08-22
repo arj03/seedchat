@@ -6,10 +6,14 @@
 // (the AKE channel already authenticated it), and the render bytes are the return
 // value the shell forwards to the iframe.
 //
-// Input:   [pk PK_LEN][type u8][body ..]   type = 0x00 (text)
+// Input:   [pk 32][type u8][body ..]   type = 0x00 (text)
 // Render:  [type u8][pk_len u8][pk ..][body ..]
 
-import { PRIV_USER_OFF, PK_LEN } from "seedkernel-wasm/guest-handler";
+// The layout literals — the shell prepends the 32-byte sender pk, and the app
+// may start its bookkeeping at offset 0 of private memory (the module reserves
+// nothing, so 0 is both the value and the intent).
+const PK_LEN: i32 = 32;
+const PRIV_USER_OFF: i32 = 0;
 
 const SCRATCH_SIZE: i32 = 0x20000; // 128 KB
 const PRIVATE_SIZE: i32 = 0x20000; // 128 KB
