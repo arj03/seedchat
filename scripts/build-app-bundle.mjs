@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadCrypto } from "seedkernel-wasm";
-import { authorBundle, hybridAuthorId, hybridAuthorKeysFromSeed } from "seedkernel-wasm/bundle";
+import { authorBundle, hybridAuthorKeysFromSeed } from "seedkernel-wasm/bundle";
 import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
 import { assertAppId, chatGuestSource, CHAT_PROTO, CHAT_APP_REQUIRES } from "../browser/chat-app.js";
 
@@ -100,8 +100,8 @@ const version = prevVersion + 1;
 
 const keys = hybridAuthorKeysFromSeed(sodium, sk.slice(0, 32));
 
-const guestSource = new TextEncoder().encode(chatGuestSource(meta.id));
-const { blob, manifest } = authorBundle(sodium, keys, {
+const guestSource = chatGuestSource(meta.id);
+const { blob, manifest, author } = authorBundle(sodium, keys, {
   app: meta.id,
   version,
   // Every chat app claims the one chat protocol — that is what lets two peers
@@ -123,7 +123,7 @@ writeFileSync(skbOutPath, blob);
 
 // The pinned id is the derived author id (the key-set hash, §12.4) — a manifest is
 // signed by both halves of the key set, so the Ed25519 key alone is not what an
-// allow-list would pin.
-console.log(`  author ${toHex(hybridAuthorId(sodium, keys.ed.publicKey, keys.mlDsa.publicKey))} (hybrid 0x02)`);
+// allow-list would pin. It is carried on the authorBundle value, not re-derived here.
+console.log(`  author ${toHex(author)} (hybrid 0x02)`);
 console.log(`  wrote ${skbOutArg} (app ${manifest.app} v${manifest.version}, `
   + `${meta.name || meta.id} ${meta.version || ""})`.trimEnd());
