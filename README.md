@@ -74,8 +74,9 @@ bundle whenever the room secret changes, because the accepting-side gate is re-r
 time a fresh transport load activates the binding.
 
 **Both directions cross an app's guest.** The host has no send and no receive: an
-inbound frame reaches the shell as the transport's `route/deliver` submission and is
-routed to the app claiming the protocol, and an outbound frame leaves by an app
+inbound frame reaches the shell as the link occupant's own delivery return — the
+transport's `linkBytes` invocation answers with the request it decoded, and the host's
+claim routing is what hands it to the app claiming the protocol — and an outbound frame leaves by an app
 *calling* `_net` — so a chat app's manifest declares exactly those two local names,
 and its guest serves the local `send` op on the one `handle` (`browser/chat-app.js`).
 The shell drives it with a loopback `invoke`, once per linked peer. The shell's own

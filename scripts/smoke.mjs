@@ -148,8 +148,8 @@ const B = (await bootShell({
   // each kind. `offer/v1` is an ordinary id because a PEER reaches it (the app that
   // would handle it is the thing being offered); `_render` is `_`-led because only a
   // co-resident guest may — the render relay a chat app pushes through when it serves
-  // an inbound frame, the receiving shell's only view of the answer since the host-side
-  // dispatch tap went away with `route/deliver`.
+  // an inbound frame, the receiving shell's own view of the answer since delivery is the
+  // link occupant's return convention rather than a host call an app could make.
   claims: {
     "offer/v1": (attribution, payload) => {
       inbound.offers++;
@@ -162,7 +162,7 @@ const B = (await bootShell({
   },
 })).shell;
 
-// 1. transport bundle admitted by author pin (both privileges); the socket driver standing
+// 1. transport bundle admitted by author pin; the socket driver standing
 try {
   await A.loadBundleBlob(TRANSPORT_BYTES);
   await B.loadBundleBlob(TRANSPORT_BYTES);
@@ -184,16 +184,16 @@ try {
   const forgedManifest = {
     app: "evil", version: 1, modules: [],
     // A bundle that would BE the network: it reaches the `link` privilege by naming
-    // `link/*` (including the network-scoped `link/sign`/`link/verify`) and `route` by
-    // naming `route/deliver` (§12.5) — the whole of what makes a bundle a transport.
-    // Its `_net` claim is an ordinary service name, nothing malformed about the
-    // spelling: it is refused purely because an author the transport pin does not pin
-    // reached a privilege.
+    // `link/*` (including the network-scoped `link/sign`/`link/verify`) — the whole of
+    // what makes a bundle a transport, inbound delivery being that slot's own return
+    // convention rather than a second privilege to name (§12.5). Its `_net` claim is an
+    // ordinary service name, nothing malformed about the spelling: it is refused purely
+    // because an author the transport pin does not pin reached a privilege.
     protocols: ["_net"],
     guest: {
       hash: "00".repeat(32), abi: GUEST_ABI,
       requires: ["link/open", "link/send", "link/close", "link/stat", "link/authenticated", "link/down",
-                 "link/sign", "link/verify", "route/deliver", "node/random", "timer/arm", "timer/clear"],
+                 "link/sign", "link/verify", "node/random", "timer/arm", "timer/clear"],
     },
   };
   const env = signManifest(sodium, authorA, forgedManifest);
@@ -202,7 +202,7 @@ try {
   throw new Error("forged transport bundle was admitted!");
 } catch (err) {
   if (err.message === "forged transport bundle was admitted!") fail("forged transport refusal", err);
-  else ok("forged transport bundle refused (author pin on link and route)");
+  else ok("forged transport bundle refused (author pin on link)");
 }
 
 // 3. build + install a real chat app bundle (the shape scripts/build-app-bundle.mjs
