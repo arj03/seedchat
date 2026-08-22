@@ -23,7 +23,6 @@ import { fileURLToPath } from "node:url";
 
 import { loadCrypto } from "seedkernel-wasm";
 import { authorBundle, hybridAuthorKeysFromSeed } from "seedkernel-wasm/bundle";
-import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
 import { assertAppId, chatGuestSource, CHAT_PROTO, CHAT_APP_REQUIRES } from "../browser/chat-app.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -110,7 +109,6 @@ const { blob, manifest, author } = authorBundle(sodium, keys, {
   protocols: [CHAT_PROTO],
   modules: [{ name: meta.id, wasm: wasmBytes }],
   guestSource,
-  guestAbi: GUEST_ABI_VERSION,
   guestRequires: CHAT_APP_REQUIRES,
 });
 
