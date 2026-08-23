@@ -33,7 +33,7 @@ chat makes into the runtime has to go through a published entry point.
 | `assembly/chat-app-v2/` | v2 handler — text + image + nick. Same shape; upgrading v1→v2 is a re-admit at the same name under the same key. |
 | `browser/chat-shell.*` | The browser shell: identity, admission policy, the transport-bundle and offers-bundle boot loads, a WebRTC mesh, the sandboxed iframe. The inline import map in `chat-shell.html` names the kernel surface. |
 | `browser/chat-app.js` | The chat app *shape*, in one place: the guest's source (both directions), the id grammar it may be built from, and the network-and-nothing-else authority a chat app holds — `_net` to reach the transport, and nothing else; its render bytes are the answer to an inbound frame, read off the load's own `onInbound` (§12.10), not a second claim. The shell authors bundles from it and gates received Offers against it; `scripts/smoke.mjs` imports the same file, so the guest source that gets signed is written once. |
-| `browser/offers-app.js` | The offers app *shape*: the `offer/v1` id, the app id `offers`, its one-name authority (`fs/put`, `fs/get`), and its guest source — a keyspace and a claim, no module, no network, no signing. `scripts/build-offers-bundle.mjs` signs it into the boot bundle every page loads. |
+| `browser/offers-app.js` | The offers app *shape*: the `offer/v1` id, the app id `offers`, its one-service authority (`fs`), and its guest source — a keyspace and a claim, no module, no network, no signing. `scripts/build-offers-bundle.mjs` signs it into the boot bundle every page loads. |
 | `browser/media-rtc.js` | The call feature: `MediaRtcNetwork`, a subclass of the kernel's `RtcNetwork` that publishes camera/mic over the peer connections the data channel already uses. The kernel seam is raw I/O only, so live media is chat's — it renegotiates through the seam's own perfect-negotiation path and adds no signaling. |
 | `scripts/embed-ui.mjs` | Appends a `ui` custom section to a built `.wasm`. |
 | `scripts/embed-meta.mjs` | Appends an `app_meta` JSON custom section (id, name, version). |
@@ -68,8 +68,9 @@ their own layout comments (§4).
 
 **The protocol is a bundle; the sockets are the platform's.** The channel AKE, record
 layer and request/response layer ship as a *signed transport bundle* that serves the
-local service name `_net` (an ordinary `_`-led claim, chosen by the composition that
-built it — no kernel semantics attach to the spelling), embedded in the host and
+local service name `_net` — declared under the manifest's `services` claim, which is a
+co-resident guest's to reach and never a peer's (chosen by the composition that built
+it — no kernel semantics attach to the spelling), embedded in the host and
 reached as raw bytes through `seedkernel-wasm/transport-bundle`. What stays host-side
 is the `TransportHost` — link ids, the address book, the handshake budgets — which
 chat constructs itself and hands to `bootShell` as `transport` (an instance, so

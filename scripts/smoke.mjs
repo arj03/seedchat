@@ -124,12 +124,13 @@ async function until(fn, ms = 4000, what = "condition") {
 const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 // The one string in the kernel's vocabulary chat spells by hand (chat-app.js keeps a
 // no-imports shape) must be the transport bundle's own claim, or the guest calls
-// nothing. The kernel reserves no name for it: the claim is an ordinary local service
-// name chosen by the composition that built the bundle, so the bundle itself is the
-// ground truth.
+// nothing. The kernel reserves no name for it: the claim is an ordinary LOCAL service
+// name (§12.10) — the transport's manifest declares it under `services`, never under
+// `protocols`, so a peer frame naming it is refused by the routing — and the bundle
+// itself is the ground truth.
 const transportManifest = verifyManifest(sodium, unpackBundle(TRANSPORT_BYTES)[MANIFEST_FILE]).manifest;
-assert((transportManifest.protocols ?? []).includes(NET_PROTO),
-  `chat's net id ${JSON.stringify(NET_PROTO)} must be the transport bundle's claim`);
+assert((transportManifest.services ?? []).includes(NET_PROTO),
+  `chat's net id ${JSON.stringify(NET_PROTO)} must be the transport bundle's services claim`);
 // The current host ABI, read off a real signed manifest rather than a client-facing
 // constant — the kernel no longer exposes GUEST_ABI_VERSION outside authorBundle,
 // since a caller can never meaningfully choose a different one.
@@ -182,17 +183,17 @@ try {
   const forgedManifest = {
     app: "evil", version: 1, modules: [],
     // A bundle that would BE the network: it reaches the `link` privilege by naming
-    // `link/*` — the whole of what makes a bundle a transport, inbound delivery being
+    // `link` — the whole of what makes a bundle a transport, inbound delivery being
     // that slot's own return convention rather than a second privilege to name (§12.5).
-    // `node/sign`/`node/verify` are the one sign pair, scoped to this slot's network key;
-    // there is no `link/sign` name anymore. Its `_net` claim is an ordinary service
-    // name, nothing malformed about the spelling: it is refused purely because an
-    // author the transport pin does not pin reached a privilege.
-    protocols: ["_net"],
+    // `node` is the one sign pair, scoped to this slot's network key; there is no
+    // `link/sign` name anymore. Its `_net` claim is an ordinary local service name —
+    // declare it under `services`, never `protocols`, which is what a peer reaches —
+    // and even then it is refused purely because an author the transport pin does not
+    // pin reached a privilege.
+    services: ["_net"],
     guest: {
       hash: "00".repeat(32), abi: GUEST_ABI,
-      requires: ["link/open", "link/send", "link/close", "link/stat", "link/authenticated", "link/down",
-                 "node/sign", "node/verify", "node/random", "timer/arm", "timer/clear"],
+      requires: ["link", "node", "timer"],
     },
   };
   const env = signManifest(sodium, authorA, forgedManifest);
@@ -365,11 +366,11 @@ try {
     guest: { hash: "bb", abi: GUEST_ABI, requires },
   });
   assert(isChatApp(chatManifest(CHAT_APP_REQUIRES)), "the shell's own app shape is accepted");
-  assert(!isChatApp(chatManifest([...CHAT_APP_REQUIRES, "fs/get"])), "an offered app claiming fs beside the network is refused");
-  assert(!isChatApp(chatManifest([...CHAT_APP_REQUIRES, "node/sign"])), "an offered app claiming a signing oracle is refused");
+  assert(!isChatApp(chatManifest([...CHAT_APP_REQUIRES, "fs"])), "an offered app claiming fs beside the network is refused");
+  assert(!isChatApp(chatManifest([...CHAT_APP_REQUIRES, "node"])), "an offered app claiming a signing oracle is refused");
   assert(!isChatApp(chatManifest([])), "an app that cannot reach the network is refused");
-  assert(!isChatApp(chatManifest(["link/open"])), "an offered app reaching for sockets is refused");
-  assert(!isChatApp(chatManifest(["fs/get"])), "an offered app claiming fs instead of the network is refused");
+  assert(!isChatApp(chatManifest(["link"])), "an offered app reaching for sockets is refused");
+  assert(!isChatApp(chatManifest(["fs"])), "an offered app claiming fs instead of the network is refused");
   assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, [])), "a no-module app is refused");
   // The claim is part of what one click grants (§12.10): installing an offered
   // bundle routes every id it claims to it, so a bundle claiming something other than

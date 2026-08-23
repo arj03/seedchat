@@ -30,7 +30,7 @@ export function assertAppId(id) {
  *  composition; no kernel semantics attach to the spelling). Named here rather than
  *  imported so this file keeps its no-imports property: it is the one string in the
  *  runtime's vocabulary chat has to spell, and `smoke.mjs` asserts it against the
- *  transport bundle's own claim. */
+ *  transport bundle's own `services` claim. */
 export const NET_PROTO = "_net";
 
 /** The whole authority a chat app holds (§12.2): the network, and nothing else.
@@ -49,8 +49,8 @@ export const NET_PROTO = "_net";
  *  §12.10) — the page's own load, not a second claim the guest has to push through.
  *
  *  It is still the strongest statement the consent row can make, because of what stays
- *  absent: no `node/sign`, no `fs/*`, no `link/*`. `_net` carries no privilege either —
- *  an operator is asked who may *be* the network (`link/*`), not who may talk over it —
+ *  absent: no `node`, no `fs`, no `link`. `_net` carries no privilege either —
+ *  an operator is asked who may *be* the network (`link`), not who may talk over it —
  *  and a chat app's own module map is not a grant either (a bare `host.call` name is the
  *  bundle's own code, ungated like `crypto`, seedkernel §12.1).
  *
@@ -111,7 +111,7 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *                    caller writes what it knows (a peer, a protocol id, a body).
  *    to `_net`       `writeOp("send", [noReply u8][deadline u32][to blob][proto blob][payload blob])`
  *                    — the transport's op wire, where a blob is `[len u32][bytes]`. The
- *                    envelope is the ABI's (`writeOp`, seedkernel `host/guest-seam.ts`), so
+ *                    envelope is the ABI's (`writeOp`, seedkernel core/op-frame.ts), so
  *                    this guest writes the ARGUMENTS and never the framing. The host prepends
  *                    this app's own 32-byte key as the caller, exactly as it prepends the
  *                    sender's key inbound, so the transport can tell an app's request from the
@@ -173,8 +173,8 @@ async function handle(arg) {
  *  for that reason. An Offer arrives from a peer and is installed on one click of a row
  *  showing a name, a version and an author; the manifest's `guest.requires` are the only
  *  place the bundle's authority is written down, and nothing else on this path reads
- *  them. Without this, a peer could offer an app whose guest holds `node/sign`, `fs/*` or
- *  `link/open` and the consent prompt would look exactly the same. */
+ *  them. Without this, a peer could offer an app whose guest holds `node`, `fs` or
+ *  `link` and the consent prompt would look exactly the same. */
 export function isChatApp(manifest) {
     if (manifest.modules.length !== 1)
         return false;

@@ -13,9 +13,9 @@
 
 /** The wire protocol a peer's offer travels under (§12.10) — an ordinary id, claimed by
  *  the boot bundle this shell builds from this file (scripts/build-offers-bundle.mjs).
- *  Ordinary, not `_`-led, because a PEER is exactly who reaches it: the whole point of an
- *  offer is that it arrives from another browser, before either end has an app installed
- *  that could otherwise receive it. */
+ *  Ordinary, not a local service claim, because a PEER is exactly who reaches it: the
+ *  whole point of an offer is that it arrives from another browser, before either end has
+ *  an app installed that could otherwise receive it. */
 export const OFFER_PROTO = "offer/v1";
 
 /** This app's id, and its manifest's `app`. A literal, not a grammar like chat's
@@ -25,9 +25,12 @@ export const OFFERS_APP = "offers";
 
 /** The whole authority the offers guest holds (§12.2): a keyspace, nothing more. No
  *  network, no signing, no loader — accepting what lands here and installing it is the
- *  page's job, never this guest's. `crypto/blake2b-256` needs no entry here: a `crypto/*`
- *  name is ungated, not a grant (seedkernel §12.1), so it never appears in `requires`. */
-export const OFFERS_REQUIRES = ["fs/put", "fs/get"];
+ *  page's job, never this guest's. The manifest declares the SERVICE, never its finer-
+ *  grained methods: naming `fs` grants the guest `fs/get` and `fs/put` alike, and a
+ *  manifest naming `fs/get` is refused at load (seedkernel §12.2). `crypto/blake2b-256`
+ *  needs no entry here: a `crypto/*` name is ungated, not a grant (seedkernel §12.1), so
+ *  it never appears in `requires`. */
+export const OFFERS_REQUIRES = ["fs"];
 
 /** The prefix every record this guest writes lives under, within its own fs scope
  *  (§12.2). Dot, not the `offers/` a directory reading would suggest: an fs key is a
@@ -41,7 +44,7 @@ export const OFFERS_KEY_PREFIX = "offers.";
 /** The guest this shell signs into the boot bundle (scripts/build-offers-bundle.mjs). Its
  *  `handle` has exactly one caller: a peer's inbound `offer/v1` frame, `[from 32][blob …]`
  *  — the kernel's own attribution prepended to the bundle in transit. Nothing else reaches
- *  it: it declares no `timer/*`, so it is never re-entered for a fired deadline, and
+ *  it: it declares no `timer` service, so it is never re-entered for a fired deadline, and
  *  nothing on this node calls it back as a loopback, so there is no host-op vocabulary to
  *  frame here and no `op-frame` import (contrast chat-app.js, whose guest also serves a
  *  local `send` op on the same `handle`).

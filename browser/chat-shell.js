@@ -128,11 +128,12 @@ await loadCrypto(sodium, new URL("./vendor/", import.meta.url));
 // The transport bundle — the kernel-shipped signed program that IS the network
 // (§12.6): the channel AKE, the record layer, link routing and the request/
 // response layer run as a confined guest (transport/guest.js), signed into a
-// bundle that serves the local service name `_net` (an ordinary `_`-led claim,
-// no kernel semantics). bootShell pins the transport slot to this blob's own
-// author (derived from the blob, never restated), so no bundle a PEER offers can
-// ever become this node's network, whatever its manifest claims. Chat's admit gate
-// below is only the consent dialog.
+// bundle that serves the local service name `_net` — declared under the manifest's
+// `services` claim, which is a co-resident guest's to reach and never a peer's
+// (no kernel semantics attach to the spelling). bootShell pins the transport slot
+// to this blob's own author (derived from the blob, never restated), so no bundle
+// a PEER offers can ever become this node's network, whatever its manifest claims.
+// Chat's admit gate below is only the consent dialog.
 const TRANSPORT_BYTES = transportBundleBytes();
 
 // The shell (kernel host + admission policy + bundle loader) is assembled once the
@@ -723,8 +724,9 @@ function dismissOffer(recordKey) {
 //
 // `sender` is which app does the asking, and it is a real choice rather than a detail.
 // For a chat frame it is the app that CLAIMS the protocol, so the app the message is
-// about is the app that speaks; for an Offer — a bundle in transit, on a reserved id no
-// app claims — it is the app being offered, which is by definition installed here.
+// about is the app that speaks; for an Offer — a bundle in transit, on a local service
+// claim no peer can reach — it is the app being offered, which is by definition
+// installed here.
 /** One local op into `rec`'s app: the record's handle loops back through `handle`,
  *  with the host's caller id in front of THIS app's own op framing - composed by the
  *  kernel's op-frame (content, never the ABI) and never read by it. The op NAME is
