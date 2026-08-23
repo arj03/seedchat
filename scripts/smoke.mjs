@@ -34,6 +34,7 @@ const {
 } = await import("seedkernel-wasm/bundle");
 // The chat app shape the browser shell authors from — same guest source, same authority set.
 const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO, RENDER_PROTO } = await import("../browser/chat-app.js");
+const { writeOp } = await import("seedkernel-wasm/op-frame");
 
 // The exact transport bundle bytes the kernel embeds, reached through the export —
 // so the smoke test touches no non-published surface and never reads the dependency's
@@ -97,10 +98,12 @@ function wirePair() {
   return [a, b];
 }
 
+// The predicate is AWAITED: a promise object is truthy on the first tick, so an async
+// one polled by value would return immediately and make the whole wait a silent no-op.
 async function until(fn, ms = 4000, what = "condition") {
   const start = Date.now();
   for (;;) {
-    if (fn()) return;
+    if (await fn()) return;
     if (Date.now() - start > ms) throw new Error("timeout waiting for " + what);
     await new Promise((r) => setTimeout(r, 5));
   }
@@ -148,8 +151,8 @@ const B = (await bootShell({
   // each kind. `offer/v1` is an ordinary id because a PEER reaches it (the app that
   // would handle it is the thing being offered); `_render` is `_`-led because only a
   // co-resident guest may — the render relay a chat app pushes through when it serves
-  // an inbound frame, the receiving shell's only view of the answer since the host-side
-  // dispatch tap went away with `route/deliver`.
+  // an inbound frame, the receiving shell's own view of the answer since delivery is the
+  // link occupant's return convention rather than a host call an app could make.
   claims: {
     "offer/v1": (attribution, payload) => {
       inbound.offers++;
@@ -162,7 +165,7 @@ const B = (await bootShell({
   },
 })).shell;
 
-// 1. transport bundle admitted by author pin (both privileges); the socket driver standing
+// 1. transport bundle admitted by author pin; the socket driver standing
 try {
   await A.loadBundleBlob(TRANSPORT_BYTES);
   await B.loadBundleBlob(TRANSPORT_BYTES);
@@ -184,16 +187,17 @@ try {
   const forgedManifest = {
     app: "evil", version: 1, modules: [],
     // A bundle that would BE the network: it reaches the `link` privilege by naming
-    // `link/*` (including the network-scoped `link/sign`/`link/verify`) and `route` by
-    // naming `route/deliver` (§12.5) — the whole of what makes a bundle a transport.
-    // Its `_net` claim is an ordinary service name, nothing malformed about the
-    // spelling: it is refused purely because an author the transport pin does not pin
-    // reached a privilege.
+    // `link/*` — the whole of what makes a bundle a transport, inbound delivery being
+    // that slot's own return convention rather than a second privilege to name (§12.5).
+    // `node/sign`/`node/verify` are the one sign pair, scoped to this slot's network key;
+    // there is no `link/sign` name anymore. Its `_net` claim is an ordinary service
+    // name, nothing malformed about the spelling: it is refused purely because an
+    // author the transport pin does not pin reached a privilege.
     protocols: ["_net"],
     guest: {
       hash: "00".repeat(32), abi: GUEST_ABI,
       requires: ["link/open", "link/send", "link/close", "link/stat", "link/authenticated", "link/down",
-                 "link/sign", "link/verify", "route/deliver", "node/random", "timer/arm", "timer/clear"],
+                 "node/sign", "node/verify", "node/random", "timer/arm", "timer/clear"],
     },
   };
   const env = signManifest(sodium, authorA, forgedManifest);
@@ -202,7 +206,7 @@ try {
   throw new Error("forged transport bundle was admitted!");
 } catch (err) {
   if (err.message === "forged transport bundle was admitted!") fail("forged transport refusal", err);
-  else ok("forged transport bundle refused (author pin on link and route)");
+  else ok("forged transport bundle refused (author pin on link)");
 }
 
 // 3. build + install a real chat app bundle (the shape scripts/build-app-bundle.mjs
@@ -280,7 +284,7 @@ try {
   arg[32] = proto.length;
   arg.set(proto, 33);
   arg.set(chatBytes, 33 + proto.length);
-  await A.invoke(CHAT_OP_SEND, arg, chatKey);
+  await A.invoke(writeOp(CHAT_OP_SEND, arg), chatKey);
   // B's view of the answer arrives through the render relay: the chat app's guest
   // pushed the render bytes it produced for the inbound frame to B's `_render` claim.
   await until(() => inbound.render !== null, 4000, "rendered message");
