@@ -5,11 +5,10 @@
 // kernel change breaks chat, it broke a public export, which is the point.
 import sodium from "seedkernel-wasm/libsodium";
 // bootShell is the assembly itself (§12.9): platform members defaulted, the
-// transport bundle pinned to its own author, the channel adapter taken as the
-// instance below. Chat's admit is then ONLY its consent gate — who may be the
-// network is the assembly's, so nobody can lose it by forgetting it.
+// transport bundle pinned to its own author, the channel adapter built from the
+// `transport` options passed to it. Chat's admit is then ONLY its consent gate —
+// who may be the network is the assembly's, so nobody can lose it by forgetting it.
 import { bootShell } from "seedkernel-wasm/shell-core";
-import { TransportHost } from "seedkernel-wasm/transport-host";
 import { writeOp } from "seedkernel-wasm/op-frame";
 import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
@@ -151,15 +150,22 @@ let shell;
 // see ensureTransport() in the networking section.
 let net = null;
 let transportSecret = null;
-/** The channel adapter — built beside the shell, below, once the tab's identity exists. */
-let transportHost;
+/** The transport bundle is admitted once — lazily, at first relay connect — and stays
+ *  up for the tab's life: room-secret changes sever the LINKS (transport.reset()), never
+ *  the bundle. */
+let transportLoaded = false;
+/** The channel adapter — bootShell's, not ours: it is the platform's, built from the
+ *  options passed to bootShell below (identity comes from the top-level fields, and the
+ *  secret getter is the one bit that is ours), and returned off the same call. Handled to
+ *  the MediaRtcNetwork in ensureTransport(). */
+let transport;
 // The room's contact secret (see "Room secret" further down for the sharing UI). Must be
-// initialized before `transportHost` is constructed below: its `contactSecret` getter
-// closes over this binding, and the shell reads it on every transport-bundle load
-// (the `init` delivery: the host invokes the freshly stood link occupant once with the
-// node facts, `initialConfig()` — see seedkernel shell-core `initLinkSlot`) — well
-// before the module has run as far as any code that only sets a real value later.
-// A `let` declared after that first boot is a temporal-dead-zone throw on every load.
+// initialized before bootShell below references it: its `transport` options' `contactSecret`
+// getter closes over this binding, and the adapter RE-READS the getter every time it opens
+// a link — the accept gate is the current value, delivered per link, not a snapshot the
+// bundle got at install (§12.6.3) — well before the module has run as far as any code that
+// gives `roomSecret` a real value. A `let` declared after that first read is a
+// temporal-dead-zone throw on every accept.
 let roomSecret = null;
 
 // ─── per-tab Ed25519 identity ──────────────────────────────────────────
@@ -192,32 +198,26 @@ const myAuthorId = hybridAuthorId(sodium, myKeys.publicKey, myPqKeys.publicKey);
 
 shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 
-// The channel adapter: link ids, the address book, the handshake budgets. It is the
-// PLATFORM's — its raw-link events go to whichever admitted slot owns the `link`
-// binding, and `shell.close()` closes it, so there is one teardown rather than two.
-// This tab has no sockets of its own (no `channels`): every link arrives through
-// `openLink`, handed over by the MediaRtcNetwork in ensureTransport().
-//
-// `contactSecret` is a GETTER on purpose. The adapter re-reads it every time a fresh
-// transport load activates the binding (§12.6.3), so a room secret minted after boot
-// still gates this node's accepting side — that is exactly what makes the re-install
-// in ensureTransport() work. A captured value would freeze the open-room secret in
-// place for the tab's life.
-transportHost = new TransportHost({
-  identity: myKeys,
-  get contactSecret() { return roomSecret ?? undefined; },
-});
-
 // Assemble the shared shell now that the identity exists — via bootShell, the ONE
 // assembly (§12.9). The platform is a browser seam: sodium, our identity, a
 // WebAssembly-backed module builder, an in-memory freshness store — all defaulted by
-// bootShell — and the channel adapter above, which has no raw-link owner until a
-// bundle reaching `link` is admitted below.
+// bootShell — and the channel adapter, which bootShell CONSTRUCTS from the `transport`
+// options (identity taken from the top-level fields, never restated) and returns with
+// the shell. The adapter is the platform's: link ids, the address book, the handshake
+// budgets. Its raw-link events go to whichever admitted slot owns the `link` binding,
+// and `shell.close()` closes it, so there is one teardown rather than two. This tab
+// has no sockets of its own (no `channels`): every link arrives through `openLink`,
+// handed over by the MediaRtcNetwork in ensureTransport().
 //
-// The adapter is handed over as an INSTANCE (not an options object): chat owns its
-// transport-bundle load — ensureTransport loads lazily, and re-loads to change the
-// room secret — so bootShell neither loads it nor starts it. The transport author
-// pin is composed into the shell's admission by bootShell, from the blob itself.
+// Of the transport options, `contactSecret` is a GETTER on purpose, and it is all that
+// is ours. The adapter re-reads it every time it opens a link and delivers the value to
+// the link occupant per link (§12.6.3), so a room secret minted after boot still gates
+// this node's accepting side — and a RUNNING link is not torn down for the credential to
+// become effective, which is why changing the room secret is a sever, not a transport
+// re-load (see ensureTransport()).
+//
+// `transportLoad: false` keeps the transport-bundle LOAD ours — first relay connect —
+// while the adapter's construction is bootShell's: no instance, no import, no class.
 //
 // The realm engine every app's guest runs in — the transport bundle's, the offers
 // app's, and each chat app's — is bootShell's default (safe-js), imported lazily on
@@ -229,10 +229,13 @@ transportHost = new TransportHost({
 // offers boot bundle's author+app pin (below — the same kind of pin bootShell itself
 // ANDs on for the transport, not a consent prompt) and the user-consent gate for
 // everything else.
-shell = (await bootShell({
+const booted = await bootShell({
   sodium,
   identity: myKeys,
-  transport: transportHost,
+  transport: {
+    get contactSecret() { return roomSecret ?? undefined; },
+  },
+  transportLoad: false,
   admit(v, ctx) {
     // A bundle reaching a privilege is not an app: it would BE the network, and who may
     // be the network is the pin bootShell ANDed onto this gate — the kernel-shipped
@@ -253,7 +256,9 @@ shell = (await bootShell({
     pendingApprovals.delete(bytesHashHex);
     return true;
   },
-})).shell;
+});
+shell = booted.shell;
+transport = booted.transport;
 
 // ─── boot the offers app ────────────────────────────────────────────────
 //
@@ -1149,21 +1154,34 @@ const signaling = {
 // "Random"; the sharing machinery is further down, under "Room secret". Declared with
 // the other networking state near the top of the file, not here — see there for why.
 
-// Admit the kernel-shipped transport bundle (making it the raw-link binding's owner),
-// then put the WebRTC socket seam under it. Runs lazily on the first relay connect —
-// nothing needs a network before that — and re-runs whenever the room secret changed,
-// because the ACCEPTING-side gate is read when a fresh transport load ACTIVATES the
-// binding (§12.6.3): re-loading the bundle is a fresh activate, which is the
-// in-place replacement path the shell supports. The DIALING side stays fully dynamic
-// — `peerContactFor` is a hook the RtcNetwork reads afresh for every link.
+// Admit the kernel-shipped transport bundle ONCE, making it the raw-link binding's
+// owner — lazily, on the first relay connect, because nothing needs a network before
+// that. Changing the room secret does NOT re-load: the accepting-side gate is the
+// adapter's current contact secret, delivered to the link occupant PER LINK at open
+// time (transport-host.ts, §12.6.3) — never the snapshot the bundle got at install —
+// and the DIALING side was always dynamic (`peerContactFor` is read fresh for every
+// link). What a room switch does is SEVER: the driver's `reset()` closes every live
+// socket (a rotation is a rotation), the link occupant is left standing, and a fresh
+// network is built under the new secret. Re-loading the transport bundle is what a
+// TRANSPORT UPGRADE is for, which is why this one load is the only one.
 async function ensureTransport() {
   const secret = roomSecret ?? undefined;
   if (net && transportSecret === secret) return;
-  if (net) net = null; // links die with the outgoing binding's release below
-  await shell.loadBundleBlob(TRANSPORT_BYTES);
+  if (net) {
+    // Sever, not reload: links authenticated under the old secret die here, and the
+    // sockets are replaced. The occupant only sees the `linkClosed` events; its binding
+    // stays owned, and listeners + address book stay (they are the node's, not the
+    // room's).
+    transport.reset();
+    net = null;
+  }
   transportSecret = secret;
+  if (!transportLoaded) {
+    await shell.loadBundleBlob(TRANSPORT_BYTES);
+    transportLoaded = true;
+  }
   net = new MediaRtcNetwork({
-    driver: transportHost,
+    driver: transport,
     signaling,
     rtcConfig: RTC_CONFIG,
     peerContactFor: () => roomSecret ?? undefined,

@@ -49,12 +49,11 @@ kernel never reads either section. They live here because the reader lives here.
 
 ## The kernel surface chat uses
 
-The entire dependency is seven published entry points of `seedkernel-wasm`:
+The entire dependency is six published entry points of `seedkernel-wasm`:
 
 | Import | Used for |
 | --- | --- |
-| `seedkernel-wasm/shell-core` | `bootShell` — the ONE assembly (§12.9): platform members defaulted, the transport bundle pinned to its own author, the adapter taken as the instance below. Chat's `admit` composes two things of its own: the offers boot bundle's author+app pin (chat-shell.js, alongside `browser/offers-bundle.js`) and the consent gate for everything else. |
-| `seedkernel-wasm/transport-host` | `TransportHost` — the channel adapter the platform owns, whose raw-link events the shell binds to whichever admitted slot holds the `link` capability. Handed to `bootShell` as an instance, so chat owns its transport-bundle load. |
+| `seedkernel-wasm/shell-core` | `bootShell` — the ONE assembly (§12.9): platform members defaulted, the transport bundle pinned to its own author, the adapter built from the `transport` options passed to it (`transportLoad: false` keeps the bundle's boot moment chat's, at first relay connect). Chat's `admit` composes two things of its own: the offers boot bundle's author+app pin (chat-shell.js, alongside `browser/offers-bundle.js`) and the consent gate for everything else. |
 | `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` — the kernel-shipped transport bundle as raw bytes (§12.6) |
 | `seedkernel-wasm/bundle` | `verifyBundle` — the one call that unpacks and checks an offered bundle (`peekMeta`); `hybridAuthorKeysFromSeed`/`hybridAuthorId` derive this browser's own author id from its key seed. Authoring is offline (`scripts/build-app-bundle.mjs`, `scripts/build-offers-bundle.mjs`, `authorBundle`), the same API seedstore's build uses. `scripts/smoke.mjs` also reaches the module's lower-level primitives, to forge and tamper with bundles the verifier must reject — a test path, not the shell's |
 | `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC mesh, subclassed for calls in `browser/media-rtc.js` |
@@ -71,19 +70,25 @@ layer and request/response layer ship as a *signed transport bundle* that serves
 local service name `_net` — declared under the manifest's `services` claim, which is a
 co-resident guest's to reach and never a peer's (chosen by the composition that built
 it — no kernel semantics attach to the spelling), embedded in the host and
-reached as raw bytes through `seedkernel-wasm/transport-bundle`. What stays host-side
-is the `TransportHost` — link ids, the address book, the handshake budgets — which
-chat constructs itself and hands to `bootShell` as `transport` (an instance, so
-`bootShell` neither loads the bundle nor starts the listeners: chat loads at first
-relay connect and re-loads to change its room secret). The shell's whole part is
-binding the adapter's raw-link events to the slot that owns the `link` capability,
-and `shell.close()` closes it. Admission is the assembly's composition: **an implicit
-author pin** — only the exact artifact this host ships may reach the `link` and
-`route` privileges (raw links and attributed inbound delivery, both), derived from the
-blob itself so nobody can lose it by forgetting it — composed around chat's own gate.
-Chat rebuilds the `RtcNetwork` under the bundle whenever the room secret changes,
-because the accepting-side gate is re-read each time a fresh transport load activates
-the binding.
+reached as raw bytes through `seedkernel-wasm/transport-bundle`. The host side — link
+ids, the address book, the handshake budgets — is **bootShell's** channel adapter,
+built by the assembly from the `transport` options passed to it: identity taken from
+the top-level fields, plus the one option that is genuinely chat's, a `contactSecret`
+getter. The bundle LOAD stays chat's — `transportLoad: false` keeps bootShell from
+auto-loading, and chat admits the bundle at first relay connect — but there is no
+class to import and nothing to construct: chat receives the adapter off the same
+`bootShell` call it asks the shell from, and hands it to the `RtcNetwork`. The shell's
+whole part is binding the adapter's raw-link events to the slot that owns the `link`
+capability, and `shell.close()` closes it. Admission is the assembly's composition:
+**an implicit author pin** — only the exact artifact this host ships may reach the
+`link` and `route` privileges (raw links and attributed inbound delivery, both),
+derived from the blob itself so nobody can lose it by forgetting it — composed around
+chat's own gate. Changing the room secret is explicitly **not** a transport re-load:
+the adapter re-reads its contact secret at every link open and delivers the CURRENT
+value to the link occupant per link (seedkernel §12.6.3), so a room minted after boot
+gates new links immediately while the bundle stays up. A room switch is a **sever** —
+`transport.reset()` closes every live link, the occupant hears only `linkClosed`, and
+chat rebuilds the `RtcNetwork` under the new secret.
 
 **The offers app gets the same kind of pin, chat's own half of it.** `offer/v1`
 carries a signed bundle from one browser to another, and the app that would handle it

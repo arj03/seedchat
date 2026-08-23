@@ -22,11 +22,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 // what the browser shell's seedkernel-wasm/crypto-browser loadCrypto does.
 const { loadCrypto } = await import("seedkernel-wasm");
 const sodium = await loadCrypto();
-// bootShell is the assembly itself (§12.9): platform members defaulted, the
-// transport bundle pinned to its own author, the adapter taken as the instance
-// below. The shells' admit is then ONLY the consent gate.
+// bootShell is the assembly itself (§12.9): platform members defaulted, the transport
+// bundle pinned to its own author, the adapter built from the transport options passed
+// here. The shells' admit is then ONLY the consent gate.
 const { bootShell } = await import("seedkernel-wasm/shell-core");
-const { TransportHost } = await import("seedkernel-wasm/transport-host");
 const { transportBundleBytes } = await import("seedkernel-wasm/transport-bundle");
 const {
   signManifest, hybridAuthorId, hybridAuthorKeysFromSeed, packBundle, unpackBundle,
@@ -72,19 +71,6 @@ function admit(v, ctx) {
   if (!pendingApprovals.has(bytesHashHex)) return false;
   pendingApprovals.delete(bytesHashHex);
   return true;
-}
-
-/** The channel adapter — the PLATFORM's, exactly as chat-shell.js builds it: the shell
- *  only routes its raw-link events to whichever admitted slot owns the `link` binding.
- *  The `contactSecret` getter is how chat feeds the CURRENT room secret to the
- *  accepting side, re-read on every fresh transport load (§12.6.3), which is what makes
- *  re-loading the bundle a way to change it. Handed to bootShell as an instance, so the
- *  transport load stays where chat puts it. */
-function chatTransport(identity, contactSecret) {
-  return new TransportHost({
-    identity,
-    get contactSecret() { return contactSecret; },
-  });
 }
 
 // ── an instrumented channel pair (mirrors the kernel's wirePair) ──────────────
@@ -155,11 +141,20 @@ const CONTACT = new Uint8Array(32).fill(7); // a "room secret" both ends share
 // table to register a handler on; each load owns its own answer.
 const inbound = { render: null };
 
-const netA = chatTransport(identityA, CONTACT);
-const netB = chatTransport(identityB, CONTACT);
-
-const A = (await bootShell({ sodium, identity: identityA, transport: netA, admit })).shell;
-const B = (await bootShell({ sodium, identity: identityB, transport: netB, admit })).shell;
+// The adapter is bootShell's, exactly as chat-shell.js gets it: the platform answers
+// from options, and the one option that is chat's is the `contactSecret` GETTER — the
+// adapter re-reads it on every link open and delivers the CURRENT value to the link
+// occupant per link (§12.6.3), which is what makes a room switch a sever instead of a
+// transport re-load. `transportLoad: false` keeps the bundle load wherever the caller
+// puts it — here, side by side with the tests below.
+const { shell: A, transport: netA } = await bootShell({
+  sodium, identity: identityA,
+  transport: { get contactSecret() { return CONTACT; } }, transportLoad: false, admit,
+});
+const { shell: B, transport: netB } = await bootShell({
+  sodium, identity: identityB,
+  transport: { get contactSecret() { return CONTACT; } }, transportLoad: false, admit,
+});
 
 // 1. transport bundle admitted by author pin; the socket driver standing
 try {
