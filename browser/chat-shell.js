@@ -10,6 +10,7 @@ import sodium from "seedkernel-wasm/libsodium";
 // network is the assembly's, so nobody can lose it by forgetting it.
 import { bootShell } from "seedkernel-wasm/shell-core";
 import { TransportHost } from "seedkernel-wasm/transport-host";
+import { writeOp } from "seedkernel-wasm/op-frame";
 import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { hybridAuthorId, hybridAuthorKeysFromSeed,
@@ -493,7 +494,7 @@ async function applyAppBundle(bundleBytes) {
     /** The load's handle — the loopback `invoke` bound to this app, so no call site
      *  passes the key to `shell.invoke` (and "the only loaded app" is never something
      *  this node can mean). */
-    invoke: (op, arg) => loaded.invoke(op, arg),
+    invoke: (arg) => loaded.invoke(arg),
     /** The manifest's signed claim (§12.10) — what this app serves when nothing
      *  later has taken the id over. The app row reads it against `shell.resolve`. */
     protocols: peeked.protocols,
@@ -680,10 +681,11 @@ function dismissOffer(bytesHashHex) {
 // about is the app that speaks; for an Offer — a bundle in transit, on a reserved id no
 // app claims — it is the app being offered, which is by definition installed here.
 /** One local op into `rec`'s app: the record's handle loops back through `handle`,
- *  writing the host's caller id and the op envelope, and the op NAME is the app's own
- *  vocabulary (chat-app.js). Nothing is framed here — the envelope is the guest ABI's. */
+ *  with the host's caller id in front of THIS app's own op framing - composed by the
+ *  kernel's op-frame (content, never the ABI) and never read by it. The op NAME is
+ *  the app's vocabulary. */
 function appInvoke(rec, op, arg) {
-  return rec.invoke(op, arg);
+  return rec.invoke(writeOp(op, arg));
 }
 
 function sendFrame(sender, peerId, proto, payload) {

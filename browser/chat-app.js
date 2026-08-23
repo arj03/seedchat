@@ -5,8 +5,11 @@
 // once. Two hand-copies of signed source would be two things to keep in step, and
 // the one that drifts is the one an author's key vouches for.
 //
-// No imports: this is pure text and one regex, so it loads identically under the
-// browser's importmap and Node's resolver.
+// One import: the kernel's op-frame content block (core/op-frame.ts) - the app's own
+// loopback framing, inlined into the signed guest at build time. It loads identically
+// under the browser's importmap (chat-shell.html) and Node's resolver, and it is
+// CONTENT, never the guest preamble or the ABI.
+import { guestOpFraming } from "seedkernel-wasm/op-frame";
 
 /** A chat app's id, which is also its one module's manifest name. The §12.4 name
  *  grammar, applied HERE rather than trusted from the wasm: the id is read out of
@@ -133,7 +136,14 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *  is what keeps it a module name rather than a host name. */
 export function chatGuestSource(appId) {
     assertAppId(appId);
-    return `register("handle", async (arg) => {
+    // The kernel's inbound shape is `handle([caller 32][body …])`: attribution only.
+    // Everything after the 32-byte caller is THIS app's own format - the three
+    // spellings below are the app's own, and the kernel never reads any of it
+    // (seedkernel §12.2). The op is a NAME, never a tag byte.
+    return `
+${guestOpFraming()}
+
+async function handle(arg) {
   const { fromHost, body } = callerOf(arg);
   if (fromHost) {
     const { op, args: p } = readOp(body);
@@ -142,11 +152,11 @@ export function chatGuestSource(appId) {
       const proto = p.subarray(33, 33 + protoLen);
       const payload = p.subarray(33 + protoLen);
       // The send op's ARGUMENTS: [noReply u8][deadline u32] then three blobs. The op name
-      // and this app's caller id are framing, and framing is not ours to write.
+      // in front is the transport's own envelope - this app writes only its arguments.
       const args = new Uint8Array(1 + 4 + 4 + 32 + 4 + proto.length + 4 + payload.length);
       let o = 0;
-      args[o++] = 1;                   // noReply — a chat frame is not a round trip
-      o += 4;                          // deadline 0 — the node's own default
+      args[o++] = 1;                   // noReply - a chat frame is not a round trip
+      o += 4;                          // deadline 0 - the node's own default
       const u32 = (v) => { args[o] = v >>> 24; args[o + 1] = (v >>> 16) & 255; args[o + 2] = (v >>> 8) & 255; args[o + 3] = v & 255; o += 4; };
       u32(32); args.set(p.subarray(0, 32), o); o += 32;
       u32(proto.length); args.set(proto, o); o += proto.length;
@@ -159,12 +169,12 @@ export function chatGuestSource(appId) {
   const render = await host.call("${appId}", arg);
   // The render bytes are this app's answer to the frame, and their one consumer is
   // the shell's iframe. The seam has no push, so they go back through the shell's own
-  // name: the _render local service the shell answers itself, fire-and-forget — the
+  // name: the _render local service the shell answers itself, fire-and-forget - the
   // wire reply to a broadcast frame is skipped anyway, and an unclaimed name answers
   // empty rather than throwing.
   host.call("${RENDER_PROTO}", render).catch(() => {});
   return render;
-});`;
+}`;
 }
 
 /** Does a verified manifest describe a chat app this shell will run? The demo's apps are

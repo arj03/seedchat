@@ -34,6 +34,7 @@ const {
 } = await import("seedkernel-wasm/bundle");
 // The chat app shape the browser shell authors from — same guest source, same authority set.
 const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO, RENDER_PROTO } = await import("../browser/chat-app.js");
+const { writeOp } = await import("seedkernel-wasm/op-frame");
 
 // The exact transport bundle bytes the kernel embeds, reached through the export —
 // so the smoke test touches no non-published surface and never reads the dependency's
@@ -281,7 +282,7 @@ try {
   arg[32] = proto.length;
   arg.set(proto, 33);
   arg.set(chatBytes, 33 + proto.length);
-  await A.invoke(CHAT_OP_SEND, arg, chatKey);
+  await A.invoke(writeOp(CHAT_OP_SEND, arg), chatKey);
   // B's view of the answer arrives through the render relay: the chat app's guest
   // pushed the render bytes it produced for the inbound frame to B's `_render` claim.
   await until(() => inbound.render !== null, 4000, "rendered message");
