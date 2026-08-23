@@ -33,14 +33,7 @@ export function assertAppId(id) {
  *  transport bundle's own claim. */
 export const NET_PROTO = "_net";
 
-/** The chat shell's own local service name, the render relay (§12.10): a chat app
- *  serves an inbound frame by rendering it, and the shell's iframe needs those render
- *  bytes — but the seam has no push, so the app's guest relays them to this `_`-led
- *  name, which the shell answers itself. Local only: a peer can never reach it, and a
- *  bundle claiming it is refused (the platform holds it). */
-export const RENDER_PROTO = "_render";
-
-/** The whole authority a chat app holds (§12.2): the network, and the render relay.
+/** The whole authority a chat app holds (§12.2): the network, and nothing else.
  *
  *  Naming `_net` is not an indulgence but the whole of how an app sends. The host has
  *  no send: the socket driver holds descriptors and the
@@ -50,21 +43,20 @@ export const RENDER_PROTO = "_render";
  *  own to do the sending — the same authority, one indirection further from the thing
  *  that uses it.
  *
- *  `_render` is the second name, and the smallest it could be: the seam has no
- *  host-side tap on the routing's answer, so the app's guest relays the render bytes
- *  it produced for an inbound frame to the shell's own claim, and the shell draws them
- *  in the iframe. It reaches nothing the guest does not already hold — the bytes it
- *  just computed — so it is a pipe, not a privilege.
+ *  Its render bytes need no name of their own: they are the answer this guest returns
+ *  for an inbound frame, and the loader that mounted this app receives them straight
+ *  off that answer through `onInbound` (`LoadBundleOptions.onInbound`, seedkernel
+ *  §12.10) — the page's own load, not a second claim the guest has to push through.
  *
  *  It is still the strongest statement the consent row can make, because of what stays
- *  absent: no `node/sign`, no `fs/*`, no `link/*`. Neither name carries a privilege —
+ *  absent: no `node/sign`, no `fs/*`, no `link/*`. `_net` carries no privilege either —
  *  an operator is asked who may *be* the network (`link/*`), not who may talk over it —
  *  and a chat app's own module map is not a grant either (a bare `host.call` name is the
  *  bundle's own code, ungated like `crypto`, seedkernel §12.1).
  *
  *  Authored into every bundle this shell builds, and required of every bundle it
  *  accepts — see `peekMeta`. */
-export const CHAT_APP_REQUIRES = [NET_PROTO, RENDER_PROTO];
+export const CHAT_APP_REQUIRES = [NET_PROTO];
 
 /** The wire protocol every chat app speaks (§12.10) — one id, claimed by every
  *  bundle this shell authors and required of every bundle it accepts.
@@ -98,7 +90,12 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *
  *  `handle` is inbound: a peer's frame arrives as `senderPk ‖ body`, and the guest
  *  forwards it to the app's own module — named directly on the same `host.call` seam every
- *  other capability uses (§12.2) — and returns the render bytes. That has not changed.
+ *  other capability uses (§12.2) — and returns whatever the module answers: the render
+ *  bytes for that frame. That answer IS the return value of this call, and nothing here
+ *  pushes it anywhere: the loader that mounted this app is handed those same bytes through
+ *  `onInbound` (`LoadBundleOptions.onInbound`, seedkernel §12.10), once the answer settles.
+ *  There is no second name for it and no 32-byte comparison to make on the way in — the
+ *  loader already knows which app it mounted, because it is the one that mounted it.
  *
  *  Sending is a LOCAL op on the same `handle`. The host owns no send: a message reaches a
  *  peer by calling the id the transport claims, and only a guest can call it. The shell
@@ -109,11 +106,6 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *  `_net` is a cross-realm call, and since guest ABI 6 a bare module name (the app's
  *  own module) runs in its own worker, so its answer crosses an isolate. The await is
  *  what makes the returned render bytes real bytes rather than a pending promise.
- *
- *  An inbound frame is served by rendering it, and the render bytes have exactly one
- *  consumer: the shell's iframe. The seam has no push, so the guest relays them to the
- *  shell's own `_render` name on the way out — fire-and-forget, since the wire reply
- *  to a broadcast frame is skipped anyway and an unclaimed name answers empty.
  *
  *    send argument   `[to 32][protoLen u8][proto][payload]` — the shell's shape, chosen so a
  *                    caller writes what it knows (a peer, a protocol id, a body).
@@ -166,20 +158,16 @@ async function handle(arg) {
     if (op === ${JSON.stringify(CHAT_OP_RENDER)}) return await host.call("${appId}", p);
     return new Uint8Array(0);
   }
-  const render = await host.call("${appId}", arg);
-  // The render bytes are this app's answer to the frame, and their one consumer is
-  // the shell's iframe. The seam has no push, so they go back through the shell's own
-  // name: the _render local service the shell answers itself, fire-and-forget - the
-  // wire reply to a broadcast frame is skipped anyway, and an unclaimed name answers
-  // empty rather than throwing.
-  host.call("${RENDER_PROTO}", render).catch(() => {});
-  return render;
+  // A peer's frame, forwarded straight to this app's own module. The render bytes it
+  // returns ARE this call's answer — no relay hop, no second name: the loader that
+  // mounted this app reads them off its own load's onInbound (seedkernel §12.10).
+  return await host.call("${appId}", arg);
 }`;
 }
 
 /** Does a verified manifest describe a chat app this shell will run? The demo's apps are
  *  one module driven by the one-entrypoint guest, and — the load-bearing half — they hold
- *  EXACTLY `_net` and `_render` and nothing else.
+ *  EXACTLY `_net` and nothing else.
  *
  *  The requires check is not decoration, and it is an equality rather than a subset test
  *  for that reason. An Offer arrives from a peer and is installed on one click of a row

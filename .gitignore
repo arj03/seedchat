@@ -5,3 +5,4 @@ browser/vendor/
 *.key
 *.pem
 *.version
+browser/offers-bundle.js

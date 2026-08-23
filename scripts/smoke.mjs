@@ -3,8 +3,9 @@
 // Replays the boot path browser/chat-shell.js actually runs — the bootShell
 // assembly + its implicit transport-author pin + consent-gated chat install +
 // protocol dispatch — minus the browser-only WebRTC/DOM. Two shells link over
-// the transport's openLink seam (the shape RtcNetwork hands it), and a real
-// chat-app-v1.wasm round-trips a message. Run it after a kernel update:
+// the transport's openLink seam (the shape RtcNetwork hands it), a real
+// chat-app-v1.wasm round-trips a message, and the offers app (a second boot bundle,
+// browser/offers-app.js) round-trips an offer. Run it after a kernel update:
 //
 //   node scripts/smoke.mjs
 //
@@ -33,7 +34,13 @@ const {
   MANIFEST_FILE, GUEST_FILE, moduleFile,
 } = await import("seedkernel-wasm/bundle");
 // The chat app shape the browser shell authors from — same guest source, same authority set.
-const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO, RENDER_PROTO } = await import("../browser/chat-app.js");
+const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO } = await import("../browser/chat-app.js");
+// The offers app shape — same guest source scripts/build-offers-bundle.mjs signs into
+// bundle/offers.skb, read directly off disk below like chat-app-v1.wasm already is.
+const { OFFER_PROTO, OFFERS_KEY_PREFIX } = await import("../browser/offers-app.js");
+// The identity the page pins its offers boot bundle by, off the generated artifact the
+// page itself reads — so `admit` below is the browser's gate, not a stand-in for it.
+const { OFFERS_AUTHOR_HEX, OFFERS_APP } = await import("../browser/offers-bundle.js");
 const { writeOp } = await import("seedkernel-wasm/op-frame");
 
 // The exact transport bundle bytes the kernel embeds, reached through the export —
@@ -56,6 +63,11 @@ function admit(v, ctx) {
   // refuses a privilege it does not know rather than inheriting this `true`. Consent
   // is for apps.
   if (ctx.privileges.length > 0) return true;
+  // The offers boot bundle is pinned to the exact author and app this build produced,
+  // exactly as chat-shell.js pins it and as bootShell pins the transport: bytes the
+  // deployment shipped, loaded before any dialog could run, so there is nothing for a
+  // consent click to decide.
+  if (toHex(v.author) === OFFERS_AUTHOR_HEX && v.manifest.app === OFFERS_APP) return true;
   const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
   if (!pendingApprovals.has(bytesHashHex)) return false;
   pendingApprovals.delete(bytesHashHex);
@@ -137,33 +149,16 @@ const identityB = { publicKey: kpB.publicKey, privateKey: kpB.privateKey };
 const authorA = hybridAuthorKeysFromSeed(sodium, identityA.privateKey.slice(0, 32));
 const CONTACT = new Uint8Array(32).fill(7); // a "room secret" both ends share
 
-// What B's shell saw arrive, filled in by its `claims` handlers below — the shell's
-// own exact claims, the browser shell's in the same shape (§12.10).
-const inbound = { render: null, offers: 0 };
+// What B's own loaded slots answered, filled in by each load's onInbound (seedkernel
+// §12.10) below — the shell itself serves no name any more, so there is no claims
+// table to register a handler on; each load owns its own answer.
+const inbound = { render: null };
 
 const netA = chatTransport(identityA, CONTACT);
 const netB = chatTransport(identityB, CONTACT);
 
 const A = (await bootShell({ sodium, identity: identityA, transport: netA, admit })).shell;
-const B = (await bootShell({
-  sodium, identity: identityB, transport: netB, admit,
-  // The shell's own exact claims (§12.10), no wildcard and no fall-through, and one of
-  // each kind. `offer/v1` is an ordinary id because a PEER reaches it (the app that
-  // would handle it is the thing being offered); `_render` is `_`-led because only a
-  // co-resident guest may — the render relay a chat app pushes through when it serves
-  // an inbound frame, the receiving shell's own view of the answer since delivery is the
-  // link occupant's return convention rather than a host call an app could make.
-  claims: {
-    "offer/v1": (attribution, payload) => {
-      inbound.offers++;
-      return Promise.resolve(new Uint8Array(0));
-    },
-    [RENDER_PROTO]: (callerId, bytes) => {
-      inbound.render = new Uint8Array(bytes);
-      return Promise.resolve(new Uint8Array(0));
-    },
-  },
-})).shell;
+const B = (await bootShell({ sodium, identity: identityB, transport: netB, admit })).shell;
 
 // 1. transport bundle admitted by author pin; the socket driver standing
 try {
@@ -246,7 +241,11 @@ try {
   // — B would answer the same frames with a different author's chat app, as long as it
   // claimed the same protocol.
   pendingApprovals.add(moduleHash);
-  await B.loadBundleBlob(chatBundle);
+  // B's view of what its own chat app answered for an inbound frame is this load's own
+  // `onInbound` (seedkernel §12.10) — no second name for the guest to push through.
+  await B.loadBundleBlob(chatBundle, {
+    onInbound: (claim, from, answer) => { if (answer.length > 0) inbound.render = new Uint8Array(answer); },
+  });
   assert(B.resolve(CHAT_PROTO) === chatKey, `B routes "${CHAT_PROTO}" to the app it installed`);
   ok(`chat app installed on both shells under ${chatKey.slice(0, 24)}…`);
 } catch (err) { fail("chat app install", err); }
@@ -285,8 +284,9 @@ try {
   arg.set(proto, 33);
   arg.set(chatBytes, 33 + proto.length);
   await A.invoke(writeOp(CHAT_OP_SEND, arg), chatKey);
-  // B's view of the answer arrives through the render relay: the chat app's guest
-  // pushed the render bytes it produced for the inbound frame to B's `_render` claim.
+  // B's view of the answer is its own load's onInbound (seedkernel §12.10): the render
+  // bytes B's chat app's guest returned for the inbound frame ARE this call's answer,
+  // handed to the loader that mounted it — no second claim, no relay.
   await until(() => inbound.render !== null, 4000, "rendered message");
   const delivered = inbound.render;
   // chat v1 render: [type 1][pk_len 1][pk 32][body]
@@ -294,10 +294,53 @@ try {
   assert(delivered[1] === 32, "render pk_len");
   assert(toHex(delivered.slice(2, 34)) === toHex(identityA.publicKey), "render sender pk = A's key");
   assert(new TextDecoder().decode(delivered.slice(34)) === "hi there", "render body");
-  ok(`dispatch round-trip: A's app → _net → B's shell → B's chat app's guest → render relay → ${delivered.length} render bytes`);
+  ok(`dispatch round-trip: A's app → _net → B's shell → B's chat app's guest → onInbound → ${delivered.length} render bytes`);
 } catch (err) { fail("chat dispatch round-trip", err); }
 
-// 6. the appKey derivation chat uses for its registry. It leads with the AUTHOR ID —
+// 6. the offers app: a second boot bundle on both shells (browser/offers-app.js), and
+//    a real offer/v1 frame end to end. A's chat app sends an opaque blob under
+//    offer/v1 — the offers app's own claim, never the chat app's — B's offers app
+//    hashes it, stores `[from 32][blob]` under its own fs key, and answers with the
+//    hash; B's view of "a fresh offer arrived" is that answer, delivered through
+//    onInbound exactly like a chat render, with no shell-level claims table anywhere.
+const offersSkbBytes = new Uint8Array(readFileSync(resolve(here, "../bundle/offers.skb")));
+let bOffers = null;
+try {
+  // No consent entry for either load: the offers bundle is admitted by the author+app
+  // pin in `admit` above, which is the whole difference between a boot bundle and an
+  // app a user installs.
+  const aOffers = await A.loadBundleBlob(offersSkbBytes);
+  const offersInbound = { hash: null };
+  bOffers = await B.loadBundleBlob(offersSkbBytes, {
+    onInbound: (claim, from, answer) => { if (answer.length > 0) offersInbound.hash = new Uint8Array(answer); },
+  });
+  assert(A.resolve(OFFER_PROTO) === aOffers.key, `A routes "${OFFER_PROTO}" to the offers app`);
+  assert(B.resolve(OFFER_PROTO) === bOffers.key, `B routes "${OFFER_PROTO}" to the offers app`);
+
+  const offeredBlob = new TextEncoder().encode("a bundle blob, opaque to the offers app");
+  const offerProtoBytes = new TextEncoder().encode(OFFER_PROTO);
+  const offerArg = new Uint8Array(32 + 1 + offerProtoBytes.length + offeredBlob.length);
+  offerArg.set(netB.peerId ? Buffer.from(netB.peerId, "hex") : new Uint8Array(32), 0);
+  offerArg[32] = offerProtoBytes.length;
+  offerArg.set(offerProtoBytes, 33);
+  offerArg.set(offeredBlob, 33 + offerProtoBytes.length);
+  // Sent through A's CHAT app's guest, same as offerApp() in chat-shell.js: only a
+  // guest can call `_net` (§12.10), and offer/v1 is the offers bundle's claim now, not
+  // the sender's — the chat app is just the guest already holding the network.
+  await A.invoke(writeOp(CHAT_OP_SEND, offerArg), chatKey);
+
+  await until(() => offersInbound.hash !== null, 4000, "offer notification");
+  const hex = toHex(offersInbound.hash);
+  assert(toHex(sodium.crypto_generichash(32, offeredBlob)) === hex,
+    "the offer notification is the blake2b-256 hash of the blob");
+  const record = await bOffers.fs.get(OFFERS_KEY_PREFIX + hex);
+  assert(record !== null, `B's offers slot holds ${OFFERS_KEY_PREFIX}${hex.slice(0, 12)}…`);
+  assert(toHex(record.slice(0, 32)) === toHex(identityA.publicKey), "the record's sender is A's key");
+  assert(toHex(record.slice(32)) === toHex(offeredBlob), "the record's blob is the exact bytes A sent");
+  ok(`offer end-to-end: A's chat app → offer/v1 → B's offers app's guest → fs record ${OFFERS_KEY_PREFIX}${hex.slice(0, 12)}…`);
+} catch (err) { fail("offer end-to-end", err); }
+
+// 7. the appKey derivation chat uses for its registry. It leads with the AUTHOR ID —
 // the hash over the signing key set, not A's node key — which is what the app actually
 // landed under above.
 try {
@@ -310,11 +353,10 @@ try {
   ok("app key shape");
 } catch (err) { fail("app key", err); }
 
-// 7. the shape gate an Offer passes through (peekMeta → isChatApp). A peer's bundle
+// 8. the shape gate an Offer passes through (peekMeta → isChatApp). A peer's bundle
 // is installed on one click of a row showing a name and an author, so the requires it
-// declares are the whole of what that click grants — and a chat app's are exactly two
-// local names, `_net` and `_render`: the network it must reach to be a chat app at
-// all, and the pipe that brings its renders home. Nothing else.
+// declares are the whole of what that click grants — and a chat app's is exactly one
+// local name, `_net`: the network it must reach to be a chat app at all. Nothing else.
 try {
   const chatManifest = (requires, modules, protocols) => ({
     app: "chat", version: 1,
@@ -325,8 +367,7 @@ try {
   assert(isChatApp(chatManifest(CHAT_APP_REQUIRES)), "the shell's own app shape is accepted");
   assert(!isChatApp(chatManifest([...CHAT_APP_REQUIRES, "fs/get"])), "an offered app claiming fs beside the network is refused");
   assert(!isChatApp(chatManifest([...CHAT_APP_REQUIRES, "node/sign"])), "an offered app claiming a signing oracle is refused");
-  assert(!isChatApp(chatManifest([NET_PROTO])), "an app that cannot relay its renders is refused");
-  assert(!isChatApp(chatManifest([RENDER_PROTO])), "an app that cannot reach the network is refused");
+  assert(!isChatApp(chatManifest([])), "an app that cannot reach the network is refused");
   assert(!isChatApp(chatManifest(["link/open"])), "an offered app reaching for sockets is refused");
   assert(!isChatApp(chatManifest(["fs/get"])), "an offered app claiming fs instead of the network is refused");
   assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, [])), "a no-module app is refused");
@@ -336,7 +377,7 @@ try {
   assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined, [])), "an app claiming no protocol is refused");
   assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined, ["seedstore"])), "an app claiming another protocol is refused");
   assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined, [CHAT_PROTO, "seedstore"])), "an app claiming an extra protocol is refused");
-  ok("the offer shape gate admits only network-plus-render chat apps claiming the chat protocol");
+  ok("the offer shape gate admits only network-only chat apps claiming the chat protocol");
 } catch (err) { fail("offer shape gate", err); }
 
 try { B.close(); } catch {}

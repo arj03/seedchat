@@ -14,20 +14,16 @@ import { writeOp } from "seedkernel-wasm/op-frame";
 import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { hybridAuthorId, hybridAuthorKeysFromSeed,
-         genesisHash, verifyBundle }
+         verifyBundle }
   from "seedkernel-wasm/bundle";
 // Chat's own code. media-rtc.js is the call feature: the kernel's WebRTC seam is
 // raw I/O, so live audio/video is a subclass of it that lives here.
 import { MediaRtcNetwork } from "./media-rtc.js";
-import { isChatApp, CHAT_OP_SEND, CHAT_OP_RENDER, RENDER_PROTO } from "./chat-app.js";
-
-// The shell's own claims (§12.10) — exact names the shell answers itself, registered
-// at bootShell below, and one of each KIND. `offer/v1` is an ordinary id because it
-// is reached by a peer: a signed bundle arriving from another browser before either
-// has an app that could receive it. `_render` is `_`-led because it must never be —
-// the kernel refuses a reserved id on the inbound path whoever holds it, the platform
-// included, so the spelling is the whole of what decides reach.
-const OFFER_PROTO = "offer/v1";
+import { isChatApp, CHAT_OP_SEND, CHAT_OP_RENDER } from "./chat-app.js";
+// The offers app: a second boot bundle, loaded right below alongside the transport —
+// see "boot the offers app" further down for why a bundle rather than a page-held name.
+import { OFFER_PROTO, OFFERS_KEY_PREFIX } from "./offers-app.js";
+import { offersBundleBytes, OFFERS_AUTHOR_HEX, OFFERS_APP } from "./offers-bundle.js";
 
 const RTC_CONFIG = { iceServers: [{ urls: [
   "stun:stun.l.google.com:19302",
@@ -222,45 +218,20 @@ transportHost = new TransportHost({
 // room secret — so bootShell neither loads it nor starts it. The transport author
 // pin is composed into the shell's admission by bootShell, from the blob itself.
 //
-// The realm engine every app's guest runs in — the transport bundle's and each chat
-// app's — is bootShell's default (safe-js), imported lazily on the first realm.
+// The realm engine every app's guest runs in — the transport bundle's, the offers
+// app's, and each chat app's — is bootShell's default (safe-js), imported lazily on
+// the first realm.
 //
-// Admission is ONE predicate (§12.5), and the one branch that is actually chat's:
-// the user-consent gate. The transport author pin is the assembly's half.
+// The page serves no name of its own: dispatch is a single claim → bundle
+// slot map (seedkernel §12.10), and there is no owner but a signed bundle. `admit` is
+// ONE predicate (§12.5), and it composes two things that are actually the page's: the
+// offers boot bundle's author+app pin (below — the same kind of pin bootShell itself
+// ANDs on for the transport, not a consent prompt) and the user-consent gate for
+// everything else.
 shell = (await bootShell({
   sodium,
   identity: myKeys,
   transport: transportHost,
-  // The shell's own local claims (§12.10) — exact names, no wildcard and no
-  // fall-through; a bundle contesting one is refused at load like any other claimant.
-  // Two, and both are the shell speaking for itself.
-  //
-  // `offer/v1` carries a signed bundle from one browser to another, and the app that
-  // would handle it is the thing being offered — so there is nobody to route it to.
-  // An ordinary id, because a peer is exactly who reaches it; a chat app claims only
-  // `chat` (isChatApp), and a bundle contesting a platform claim is refused at load
-  // anyway, so the two can never contend.
-  //
-  // `_render` is the other half of the same seam, and `_`-led for the opposite reason.
-  // A chat app's guest relays the render bytes it produced for an inbound frame here —
-  // the seam has no host-side tap on the routing's answer — and the shell draws them
-  // only if the caller is the mounted app's key. That check is a comparison of 32
-  // bytes, so it holds only while the 32 bytes cannot be a PEER's: the kernel refuses a
-  // reserved id inbound before it consults the platform table, which is what keeps a
-  // peer from pushing renders into this iframe under an app key's place.
-  claims: {
-    [OFFER_PROTO]: (attribution, payload) => {
-      handleOffer(payload, bytesToHex(attribution)).catch(() => {});
-      return Promise.resolve(new Uint8Array(0));
-    },
-    [RENDER_PROTO]: (callerId, renderBytes) => {
-      if (activeAppKey && renderBytes.length > 0) {
-        const activeCaller = genesisHash(sodium, new TextEncoder().encode(activeAppKey));
-        if (bytesEqual(callerId, activeCaller)) deliverRender(new Uint8Array(renderBytes));
-      }
-      return Promise.resolve(new Uint8Array(0));
-    },
-  },
   admit(v, ctx) {
     // A bundle reaching a privilege is not an app: it would BE the network, and who may
     // be the network is the pin bootShell ANDed onto this gate — the kernel-shipped
@@ -268,12 +239,47 @@ shell = (await bootShell({
     // refuses a privilege it does not know rather than inheriting this `true`. My
     // consent is for apps.
     if (ctx.privileges.length > 0) return true;
+    // The offers app is pinned exactly like bootShell pins the transport: the exact
+    // author and app this PAGE was built with (browser/offers-bundle.js, generated by
+    // scripts/build-offers-bundle.mjs), read off the artifact rather than restated by
+    // hand. A boot bundle gets a pin rather than a consent prompt because it is loaded
+    // once below, before any dialog could run, under bytes this deployment shipped —
+    // there is nothing here for a click to actually decide, the same reasoning that
+    // keeps the transport off the consent path.
+    if (bytesToHex(v.author) === OFFERS_AUTHOR_HEX && v.manifest.app === OFFERS_APP) return true;
     const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
     if (!pendingApprovals.has(bytesHashHex)) return false;
     pendingApprovals.delete(bytesHashHex);
     return true;
   },
 })).shell;
+
+// ─── boot the offers app ────────────────────────────────────────────────
+//
+// `offer/v1` carries a signed bundle from one browser to another, and the app that
+// would handle it is the thing being offered — so until an offer is accepted there is
+// no app to route it to, and something already installed at boot has to own the name
+// (browser/offers-app.js). A second boot bundle, loaded here right beside the
+// transport: it needs no network, so there is no reason to defer it the way
+// ensureTransport defers the transport load until the first relay connect.
+//
+// `onInbound` is the one gap a single claim → bundle-slot map leaves open (seedkernel
+// §12.10): the wire consumes a delivery's answer on its way back out, so the page's own
+// view of "a fresh offer arrived" has no other path to it. A non-empty answer is the
+// offer's hash — the guest's own dedupe key (browser/offers-app.js) — so read the fs
+// record it just wrote and hand it to `handleOffer` (declared further down; a hoisted
+// function declaration, and never actually reached until the app registry below has
+// stood up the state it reads).
+const offersApp = await shell.loadBundleBlob(offersBundleBytes(), {
+  onInbound: (claim, from, answer) => {
+    if (answer.length === 0) return; // a duplicate the guest already had — nothing new
+    const key = OFFERS_KEY_PREFIX + bytesToHex(answer);
+    offersApp.fs.get(key).then((record) => {
+      if (!record) return;
+      handleOffer(record.subarray(32), bytesToHex(record.subarray(0, 32)), key).catch(() => {});
+    });
+  },
+});
 
 // ─── channel identity ──────────────────────────────────────────────────
 //
@@ -473,10 +479,24 @@ async function applyAppBundle(bundleBytes) {
   // saying about it is what changed.
   const heldBefore = new Map(peeked.protocols.map((p) => [p, shell.resolve(p)]));
 
-  const loaded = await shell.loadBundleBlob(bundleBytes);
+  // `key` is filled in the moment the load returns, just below — the onInbound closure
+  // only ever runs later, on a real inbound frame, so by then it already has it (the
+  // same pattern the offers app's own boot load uses for its self-referencing closure).
+  let key;
+  const loaded = await shell.loadBundleBlob(bundleBytes, {
+    // Protocol routing (seedkernel §12.10): the render bytes ARE this app's own answer
+    // to the frame it just served, and the loader that mounted it receives them right
+    // here, off its own load — no second claim, and no 32-byte comparison against a
+    // caller id. Painting them only when this load's app is the one currently shown in
+    // the iframe is a plain equality against `key` above, because the page already
+    // knows which app THIS load is.
+    onInbound: (claim, from, answer) => {
+      if (answer.length > 0 && key === activeAppKey) deliverRender(new Uint8Array(answer));
+    },
+  });
   // The load's handle carries the app key with the binding — the same derivation the
   // loader used, so the registry and the loopback never restate it.
-  const key = loaded.key;
+  key = loaded.key;
   // Installing IS the routing (§12.10): this bundle's claim points at it. Say so
   // when it took an id off another installed app — the displaced app is still here and
   // still intact, just idle, and removing this one hands the protocol straight back.
@@ -600,17 +620,25 @@ function unmountActiveApp() {
 
 // ── peer-to-peer app offers ────────────────────────────────────────────
 //
-// An offer is a packed app bundle forwarded over a data channel in an OFFER frame.
-// Any peer who holds the bundle can forward it (transitive offer) — the manifest
-// inside carries the original author's signature over the module hash, so the
-// recipient still authenticates against the author (peekAppBundle verifies it).
+// An offer is a packed app bundle forwarded over a data channel on `offer/v1`, the
+// offers app's own claim (browser/offers-app.js) — any peer who holds the bundle can
+// forward it (transitive offer), and the manifest inside carries the original
+// author's signature over the module hash, so the recipient still authenticates
+// against the author (peekMeta verifies it).
 //
-// The relaying peer is identified by the AKE channel (`_from`), not a signature —
-// the frame is unsigned; the bundle's own manifest signature is the load-bearing
-// authentication. Inbound OFFER frames are routed here from the network sink.
-const pendingOffers = new Map();   // bytesHashHex → { bundleBytes, peeked, fromPkHex }
+// The relaying peer is identified by the AKE channel, not a signature — the frame is
+// unsigned; the bundle's own manifest signature is the load-bearing authentication.
+// `handleOffer` is reached two ways: fresh, off the offers app's `onInbound` (above),
+// and replayed from its fs at boot (`restoreOffers`, below) — both hand it the exact
+// same three things, because both read them off the same kind of record.
+//
+// Keyed by the offers app's OWN record key (`OFFERS_KEY_PREFIX + hex`, the blake2b-256
+// of the whole blob) rather than the module hash: it is already the fs key the record
+// lives under, so accepting or dismissing an offer can delete it with no second
+// derivation.
+const pendingOffers = new Map();   // recordKey → { bundleBytes, peeked, fromPkHex }
 
-async function handleOffer(bundleBytes, fromPkHex) {
+async function handleOffer(bundleBytes, fromPkHex, recordKey) {
   const peeked = peekMeta(bundleBytes);
   if (!peeked) return;
   const { wasm, app: id, moduleHash, authorPk } = peeked;
@@ -624,16 +652,17 @@ async function handleOffer(bundleBytes, fromPkHex) {
   }
   meta = { ...meta, id };
 
-  const hex = bytesToHex(bytesHash);
   // Already running these exact bytes ⇒ nothing to offer. An update ships a new module
   // hash, so it still surfaces for consent (installs are consent-gated, §12.4); only a
   // redundant re-offer of what the user already has installed is dropped, so it never
-  // shows a pointless Install row.
+  // shows a pointless Install row. The record stays in the offers app's fs either way —
+  // the guest's own dedupe (browser/offers-app.js) already keeps it from growing on a
+  // repeat delivery of the identical bytes.
   for (const rec of installedApps.values()) {
-    if (rec.bytesHash && bytesToHex(rec.bytesHash) === hex) return;
+    if (rec.bytesHash && bytesToHex(rec.bytesHash) === moduleHash) return;
   }
-  if (pendingOffers.has(hex)) return;
-  pendingOffers.set(hex, {
+  if (pendingOffers.has(recordKey)) return;
+  pendingOffers.set(recordKey, {
     bundleBytes: bundleBytes.slice(),
     // Keep the fields buildOfferRow renders (author + module hash) plus the moduleHash
     // acceptOffer adds to pendingApprovals.
@@ -646,13 +675,28 @@ async function handleOffer(bundleBytes, fromPkHex) {
     `${fromPkHex.slice(0, 8)} offers app "${meta.name || meta.id}" — see the Apps tab.`, "sys");
 }
 
-async function acceptOffer(bytesHashHex) {
-  const offer = pendingOffers.get(bytesHashHex);
+/** Everything the offers app's fs already holds, replayed into the pending-offer list
+ *  at boot. The slot's fs IS the record — not a closure's Map — so this is what makes a
+ *  reload (on a backend that persists, unlike this demo's in-memory default) pick up an
+ *  offer that arrived and was never dismissed or accepted. */
+async function restoreOffers() {
+  for (const key of await offersApp.fs.list(OFFERS_KEY_PREFIX)) {
+    const record = await offersApp.fs.get(key);
+    if (!record) continue;
+    await handleOffer(record.subarray(32), bytesToHex(record.subarray(0, 32)), key);
+  }
+}
+
+async function acceptOffer(recordKey) {
+  const offer = pendingOffers.get(recordKey);
   if (!offer) return;
   pendingApprovals.add(offer.peeked.moduleHash);
   try {
     const rec = await applyAppBundle(offer.bundleBytes);
-    pendingOffers.delete(bytesHashHex);
+    pendingOffers.delete(recordKey);
+    // The page holds the offers slot's host-side scoped fs view, so it deletes the
+    // record directly — the guest never needed a delete capability of its own.
+    offersApp.fs.delete(recordKey).catch(() => {});
     renderOfferList();
     shellPrint(`Installed ${rec.name} ${rec.version} from offer.`, "sys");
     setActiveApp(rec.key);
@@ -663,8 +707,9 @@ async function acceptOffer(bytesHashHex) {
   }
 }
 
-function dismissOffer(bytesHashHex) {
-  pendingOffers.delete(bytesHashHex);
+function dismissOffer(recordKey) {
+  pendingOffers.delete(recordKey);
+  offersApp.fs.delete(recordKey).catch(() => {});
   renderOfferList();
 }
 
@@ -730,9 +775,11 @@ async function offerApp(key) {
   if (!rec) return;
   const linked = await linkedPeers();
   for (const peerId of linked) {
-    // The offered app carries its own offer: `offer/v1` is the SHELL's claim (the app
-    // that would handle it is the thing being offered), so there is no app to resolve
-    // it to — the one we know is installed is the one whose bytes are in the frame.
+    // The offered app carries its own offer: `offer/v1` is the OFFERS BUNDLE's claim
+    // (the app that would handle it is the thing being offered), so there is no app to
+    // resolve it to — the one we know is installed is the one whose bytes are in the
+    // frame. The sender is still the chat app regardless: the page has no send of its
+    // own, only a guest can call `_net` (§12.10), and this is the guest already on hand.
     try { await sendFrame(rec, peerId, OFFER_PROTO, rec.bundleBytes); }
     catch (err) { shellPrint(`offer to ${peerId.slice(0, 8)} failed: ${err.message}`, "err"); }
   }
@@ -886,12 +933,12 @@ function renderOfferList() {
     return;
   }
   offersSection.hidden = false;
-  for (const [hex, offer] of pendingOffers) {
-    offerListEl.appendChild(buildOfferRow(hex, offer));
+  for (const [key, offer] of pendingOffers) {
+    offerListEl.appendChild(buildOfferRow(key, offer));
   }
 }
 
-function buildOfferRow(hex, offer) {
+function buildOfferRow(key, offer) {
   const meta = offer.peeked.meta;
   const li = document.createElement("li");
   li.className = "app-row offer-row";
@@ -944,11 +991,11 @@ function buildOfferRow(hex, offer) {
   const ok = document.createElement("button");
   ok.className = "icon primary";
   ok.textContent = "Install";
-  ok.addEventListener("click", () => acceptOffer(hex));
+  ok.addEventListener("click", () => acceptOffer(key));
   const no = document.createElement("button");
   no.className = "icon";
   no.textContent = "Dismiss";
-  no.addEventListener("click", () => dismissOffer(hex));
+  no.addEventListener("click", () => dismissOffer(key));
   btns.appendChild(ok);
   btns.appendChild(no);
   li.appendChild(btns);
@@ -1157,11 +1204,16 @@ async function ensureTransport() {
 
 // Boot the app registry now that the shell exists: render the (empty) lists, then
 // pull back anything installed earlier this session so a transitive Offer works the
-// moment peers connect, from the saved signed bytes.
+// moment peers connect, from the saved signed bytes — and separately, replay whatever
+// the offers app's own fs already holds (restoreOffers, "peer-to-peer app offers"
+// above), since that record is the offer list's source of truth, not this session's
+// installedApps.
 renderAppList();
 renderOfferList();
 restoreInstalledApps().catch((err) =>
   shellPrint(`Restore failed: ${err.message}`, "err"));
+restoreOffers().catch((err) =>
+  shellPrint(`Could not replay stored offers: ${err.message}`, "err"));
 
 // ─── live audio/video calls ────────────────────────────────────────────
 //
