@@ -98,10 +98,12 @@ function wirePair() {
   return [a, b];
 }
 
+// The predicate is AWAITED: a promise object is truthy on the first tick, so an async
+// one polled by value would return immediately and make the whole wait a silent no-op.
 async function until(fn, ms = 4000, what = "condition") {
   const start = Date.now();
   for (;;) {
-    if (fn()) return;
+    if (await fn()) return;
     if (Date.now() - start > ms) throw new Error("timeout waiting for " + what);
     await new Promise((r) => setTimeout(r, 5));
   }
