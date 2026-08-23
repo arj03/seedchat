@@ -184,16 +184,17 @@ try {
   const forgedManifest = {
     app: "evil", version: 1, modules: [],
     // A bundle that would BE the network: it reaches the `link` privilege by naming
-    // `link/*` (including the network-scoped `link/sign`/`link/verify`) — the whole of
-    // what makes a bundle a transport, inbound delivery being that slot's own return
-    // convention rather than a second privilege to name (§12.5). Its `_net` claim is an
-    // ordinary service name, nothing malformed about the spelling: it is refused purely
-    // because an author the transport pin does not pin reached a privilege.
+    // `link/*` — the whole of what makes a bundle a transport, inbound delivery being
+    // that slot's own return convention rather than a second privilege to name (§12.5).
+    // `node/sign`/`node/verify` are the one sign pair, scoped to this slot's network key;
+    // there is no `link/sign` name anymore. Its `_net` claim is an ordinary service
+    // name, nothing malformed about the spelling: it is refused purely because an
+    // author the transport pin does not pin reached a privilege.
     protocols: ["_net"],
     guest: {
       hash: "00".repeat(32), abi: GUEST_ABI,
       requires: ["link/open", "link/send", "link/close", "link/stat", "link/authenticated", "link/down",
-                 "link/sign", "link/verify", "node/random", "timer/arm", "timer/clear"],
+                 "node/sign", "node/verify", "node/random", "timer/arm", "timer/clear"],
     },
   };
   const env = signManifest(sodium, authorA, forgedManifest);
