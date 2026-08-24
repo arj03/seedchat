@@ -8,7 +8,7 @@
 // One import: the kernel's op-frame content block (core/op-frame.ts) - the app's own
 // loopback framing, inlined into the signed guest at build time. It loads identically
 // under the browser's importmap (chat-shell.html) and Node's resolver, and it is
-// CONTENT, never the guest preamble or the ABI.
+// CONTENT, never the guest preamble or host seam.
 import { guestOpFraming } from "seedkernel-wasm/op-frame";
 
 /** A chat app's id, which is also its one module's manifest name. The §12.4 name
@@ -77,7 +77,7 @@ export const CHAT_PROTO = "chat";
  *  app registers a single entrypoint, `handle`; a peer's inbound frame carries
  *  `[peer 32][chatType ‖ body]`, and the host's own `invoke` loopback carries
  *  `[zero 32][opLen u8][op][args]` — the 32-byte caller id tells the two apart, and the
- *  guest splits both with the ABI's own `callerOf`/`readOp`.
+ *  guest splits both with the kernel framing's `callerOf`/`readOp`.
  *
  *  NAMES rather than bytes, and that is not cosmetic: an op byte is a number the shell
  *  and the guest source have to agree on, which is exactly what collapsing entrypoints
@@ -102,16 +102,16 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *  drives this with `invoke(CHAT_OP_SEND, …)`, and the local echo with
  *  `invoke(CHAT_OP_RENDER, …)`.
  *
- *  The handler is `async` and `await`s its `host.call`s because both names round-trip:
- *  `_net` is a cross-realm call, and since guest ABI 6 a bare module name (the app's
- *  own module) runs in its own worker, so its answer crosses an isolate. The await is
- *  what makes the returned render bytes real bytes rather than a pending promise.
+ *  The handler is `async` and `await`s every `host.call`: the seedkernel seam is
+ *  uniformly asynchronous, including local services, modules, primitives and host
+ *  services. The await is what makes the returned render bytes real bytes rather than
+ *  a pending Promise, regardless of which backend answers the name.
  *
  *    send argument   `[to 32][protoLen u8][proto][payload]` — the shell's shape, chosen so a
  *                    caller writes what it knows (a peer, a protocol id, a body).
  *    to `_net`       `writeOp("send", [noReply u8][deadline u32][to blob][proto blob][payload blob])`
  *                    — the transport's op wire, where a blob is `[len u32][bytes]`. The
- *                    envelope is the ABI's (`writeOp`, seedkernel core/op-frame.ts), so
+ *                    envelope comes from `writeOp` (seedkernel core/op-frame.ts), so
  *                    this guest writes the ARGUMENTS and never the framing. The host prepends
  *                    this app's own 32-byte key as the caller, exactly as it prepends the
  *                    sender's key inbound, so the transport can tell an app's request from the

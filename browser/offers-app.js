@@ -58,7 +58,9 @@ export const OFFERS_KEY_PREFIX = "offers.";
  *  non-empty answer is a fresh offer's hash, telling the page to go read the record it
  *  just wrote; an empty one is silence, because there is nothing new to show. There is no
  *  push from a guest to its loader on any other seam, so the answer doubling as the
- *  notification is the whole mechanism. */
+ *  notification is the whole mechanism. Every `host.call` is awaited, including the
+ *  hash: seedkernel's seam is uniformly asynchronous even when a backend computes its
+ *  answer inline. */
 export function offersGuestSource() {
   return `
 "use strict";

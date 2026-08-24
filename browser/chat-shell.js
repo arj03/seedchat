@@ -734,7 +734,7 @@ function dismissOffer(recordKey) {
 // installed here.
 /** One local op into `rec`'s app: the record's handle loops back through `handle`,
  *  with the host's caller id in front of THIS app's own op framing - composed by the
- *  kernel's op-frame (content, never the ABI) and never read by it. The op NAME is
+ *  kernel's op-frame (content, not host-seam metadata) and never read by it. The op NAME is
  *  the app's vocabulary. */
 function appInvoke(rec, op, arg) {
   return rec.invoke(writeOp(op, arg));

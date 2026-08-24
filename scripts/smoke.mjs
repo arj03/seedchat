@@ -117,10 +117,8 @@ const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 const transportManifest = verifyManifest(sodium, unpackBundle(TRANSPORT_BYTES)[MANIFEST_FILE]).manifest;
 assert((transportManifest.services ?? []).includes(NET_PROTO),
   `chat's net id ${JSON.stringify(NET_PROTO)} must be the transport bundle's services claim`);
-// The current host ABI, read off a real signed manifest rather than a client-facing
-// constant — the kernel no longer exposes GUEST_ABI_VERSION outside authorBundle,
-// since a caller can never meaningfully choose a different one.
-const GUEST_ABI = transportManifest.guest.abi;
+assert(!Object.hasOwn(transportManifest.guest, "abi"),
+  "the all-async guest seam has no manifest ABI field");
 let failed = 0;
 const ok = (name) => console.log(`  OK   ${name}`);
 const fail = (name, err) => { failed++; console.log(`  FAIL ${name}\n       ${err.message}`); };
@@ -187,7 +185,7 @@ try {
     // pin reached a privilege.
     services: ["_net"],
     guest: {
-      hash: "00".repeat(32), abi: GUEST_ABI,
+      hash: "00".repeat(32),
       requires: ["link", "node", "timer"],
     },
   };
@@ -219,7 +217,6 @@ try {
     modules: [{ name: "chat", hash: toHex(genesisHash(sodium, chatWasm)) }],
     guest: {
       hash: toHex(genesisHash(sodium, guestBytes)),
-      abi: GUEST_ABI,
       requires: CHAT_APP_REQUIRES,
     },
   };
@@ -358,7 +355,7 @@ try {
     app: "chat", version: 1,
     protocols: protocols ?? [CHAT_PROTO],
     modules: modules ?? [{ name: "chat", hash: "aa" }],
-    guest: { hash: "bb", abi: GUEST_ABI, requires },
+    guest: { hash: "bb", requires },
   });
   assert(isChatApp(chatManifest(CHAT_APP_REQUIRES)), "the shell's own app shape is accepted");
   assert(!isChatApp(chatManifest([...CHAT_APP_REQUIRES, "fs"])), "an offered app claiming fs beside the network is refused");
