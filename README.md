@@ -97,7 +97,7 @@ out here.
 
 ```sh
 # 1. build the kernel checkout it depends on (transport bundle + host + minified,
-#    browser libsodium, PQ wasm; needs clang for the PQ C → wasm step)
+#    browser core libsodium and PQ wasm; needs clang for the PQ C → wasm step)
 cd ../seedkernel/WASM && npm install && npm run build:browser
 
 # 2. build chat and vendor the runtime

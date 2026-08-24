@@ -113,8 +113,8 @@ function hexToBytes(hex) {
 }
 
 shellPrint("Starting the handler table...", "sys");
-// libsodium + ML-DSA-65 + ML-KEM-768, all mixed onto `sodium` before anything below
-// touches it — bootShell's verifyBundle needs the PQ half for ANY bundle, and
+// Core libsodium + ML-DSA-65, mixed onto `sodium` before anything below touches
+// it — bootShell's verifyBundle needs the PQ signature half for ANY bundle, and
 // verifyManifest is synchronous, so this can't be lazy (seedkernel's crypto-browser.ts).
 //
 // This shell SIGNS suite 0x02, the hybrid Ed25519 + ML-DSA-65 envelope (§12.4,

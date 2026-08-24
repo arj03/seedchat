@@ -124,15 +124,8 @@ for (const f of ["libsodium-wrappers.mjs", "libsodium-core.mjs", "libsodium.wasm
   cpSync(src, resolve(vendor, "mldsa65.wasm"));
 }
 
-// ML-KEM-768 rides along with ML-DSA-65 now that loadCrypto mixes both onto sodium.
-{
-  const src = resolve(pkgRoot, "browser/mlkem768.wasm");
-  if (!existsSync(src)) {
-    console.error("missing mlkem768.wasm — in the kernel checkout: cd WASM && npm run build:pq");
-    process.exit(2);
-  }
-  cpSync(src, resolve(vendor, "mlkem768.wasm"));
-}
+// ML-KEM-768 is private content of the signed transport bundle now; no loose
+// browser artifact is needed here.
 
 // ── vendor the QuickJS realm engine so chat runs offline ────────────────────
 // Two pieces, because that is how the kernel splits them: the ENGINE is the
