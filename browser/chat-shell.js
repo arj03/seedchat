@@ -517,9 +517,7 @@ async function applyAppBundle(bundleBytes) {
   const record = {
     id: peeked.app,
     key,
-    /** The load's handle — the loopback `invoke` bound to this app, so no call site
-     *  passes the key to `shell.invoke` (and "the only loaded app" is never something
-     *  this node can mean). */
+    /** The load's handle — the one loopback `invoke`, bound to this app's slot. */
     invoke: (arg) => loaded.invoke(arg),
     /** The manifest's signed claim (§12.10) — what this app serves when nothing
      *  later has taken the id over. The app row reads it against `shell.resolve`. */

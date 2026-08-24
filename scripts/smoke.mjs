@@ -202,6 +202,7 @@ try {
 //    now authors offline; this test still assembles its own inline so it exercises
 //    signManifest/packBundle directly rather than shelling out)
 const chatWasm = new Uint8Array(readFileSync(resolve(here, "../build/chat-app-v1.wasm")));
+let chatApp = null;
 let chatKey = "";
 try {
   // The ~5-line guest every chat app ships, from the same module the browser shell
@@ -224,8 +225,8 @@ try {
   const chatBundle = packBundle({ [MANIFEST_FILE]: manifestEnv, [moduleFile("chat")]: chatWasm, [GUEST_FILE]: guestBytes });
   const moduleHash = toHex(genesisHash(sodium, chatWasm));
   pendingApprovals.add(moduleHash);            // auto-approve like addAppFromWasm
-  const loaded = await A.loadBundleBlob(chatBundle);
-  chatKey = loaded.key;
+  chatApp = await A.loadBundleBlob(chatBundle);
+  chatKey = chatApp.key;
   // The app's module is private to its slot, so there is no table to ask what landed:
   // a load builds every module or none (§12.4), and what the shell exposes is the claim.
   assert(A.resolve(CHAT_PROTO) === chatKey, `A routes "${CHAT_PROTO}" to the app it installed`);
@@ -276,7 +277,7 @@ try {
   arg[32] = proto.length;
   arg.set(proto, 33);
   arg.set(chatBytes, 33 + proto.length);
-  await A.invoke(writeOp(CHAT_OP_SEND, arg), chatKey);
+  await chatApp.invoke(writeOp(CHAT_OP_SEND, arg));
   // B's view of the answer is its own load's onInbound (seedkernel §12.10): the render
   // bytes B's chat app's guest returned for the inbound frame ARE this call's answer,
   // handed to the loader that mounted it — no second claim, no relay.
@@ -320,7 +321,7 @@ try {
   // Sent through A's CHAT app's guest, same as offerApp() in chat-shell.js: only a
   // guest can call `_net` (§12.10), and offer/v1 is the offers bundle's claim now, not
   // the sender's — the chat app is just the guest already holding the network.
-  await A.invoke(writeOp(CHAT_OP_SEND, offerArg), chatKey);
+  await chatApp.invoke(writeOp(CHAT_OP_SEND, offerArg));
 
   await until(() => offersInbound.hash !== null, 4000, "offer notification");
   const hex = toHex(offersInbound.hash);
