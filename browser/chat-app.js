@@ -5,11 +5,9 @@
 // once. Two hand-copies of signed source would be two things to keep in step, and
 // the one that drifts is the one an author's key vouches for.
 //
-// One import: the kernel's op-frame content block (host/op-frame.ts) - the app's own
-// loopback framing, inlined into the signed guest at build time. It loads identically
-// under the browser's importmap (chat-shell.html) and Node's resolver, and it is
-// CONTENT, never the guest preamble or host seam.
-import { guestOpFraming } from "seedkernel-wasm/op-frame";
+// No runtime import: offline authors pass `guestOpFraming` from the kernel's
+// `/bundle-author` entry point into `chatGuestSource`, keeping that authoring module
+// out of the browser shell's vendored runtime artifact.
 
 /** A chat app's id, which is also its one module's manifest name. The §12.4 name
  *  grammar, applied HERE rather than trusted from the wasm: the id is read out of
@@ -126,7 +124,7 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *  Interpolating the id into a string literal is safe because `assertAppId` already held
  *  it to `[A-Za-z0-9_-]`: nothing to escape, no quote to break out of, and no `/`, which
  *  is what keeps it a module name rather than a host name. */
-export function chatGuestSource(appId) {
+export function chatGuestSource(appId, guestOpFraming) {
     assertAppId(appId);
     // The kernel's inbound shape is `handle([caller 32][body …])`: attribution only.
     // Everything after the 32-byte caller is THIS app's own format - the three

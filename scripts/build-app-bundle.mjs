@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadCrypto } from "seedkernel-wasm";
-import { authorBundle, hybridAuthorKeysFromSeed } from "seedkernel-wasm/bundle-author";
+import { authorBundle, guestOpFraming, hybridAuthorKeysFromSeed } from "seedkernel-wasm/bundle-author";
 import { assertAppId, chatGuestSource, CHAT_PROTO, CHAT_APP_REQUIRES } from "../browser/chat-app.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -99,7 +99,7 @@ const version = prevVersion + 1;
 
 const keys = hybridAuthorKeysFromSeed(sodium, sk.slice(0, 32));
 
-const guestSource = chatGuestSource(meta.id);
+const guestSource = chatGuestSource(meta.id, guestOpFraming);
 const { blob, manifest, author } = authorBundle(sodium, keys, {
   app: meta.id,
   version,

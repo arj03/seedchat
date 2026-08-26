@@ -32,7 +32,7 @@ const {
   hybridAuthorId, unpackBundle, verifyManifest, genesisHash,
   MANIFEST_FILE, GUEST_FILE, moduleFile,
 } = await import("seedkernel-wasm/bundle");
-const { signManifest, hybridAuthorKeysFromSeed, packBundle }
+const { signManifest, guestOpFraming, hybridAuthorKeysFromSeed, packBundle }
   = await import("seedkernel-wasm/bundle-author");
 // The chat app shape the offline builder authors — same guest source, same authority set.
 const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO } = await import("../browser/chat-app.js");
@@ -210,7 +210,7 @@ try {
   // The ~5-line guest every chat app ships, from the same module the browser shell
   // authors from (browser/chat-app.js) — signed source is written once, so this test
   // exercises the bytes the shell would actually sign rather than a copy of them.
-  const guestBytes = new TextEncoder().encode(chatGuestSource("chat"));
+  const guestBytes = new TextEncoder().encode(chatGuestSource("chat", guestOpFraming));
   const manifest = {
     app: "chat",
     version: 1,
