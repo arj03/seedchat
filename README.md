@@ -43,7 +43,7 @@ routing, signed bundles, the channel handshake — are documented in the kernel:
 | `scripts/build-offers-bundle.mjs` | Signs the offers app's guest-only bundle under the same key, its own freshness mark in `offers-author.version`. |
 | `scripts/vendor.mjs` | Copies the kernel's built host (`build-min`: `host/` + `core/`) into `browser/vendor/`, plus the browser libsodium and the QuickJS realm engine. Refuses a stale kernel build. |
 | `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips a message through a real chat-app-v1.wasm, and round-trips an offer through the offers app. Run it after a kernel update. |
-| `scripts/relay.mjs` | The WebSocket signaling rendezvous for the WebRTC mesh. App-neutral — seed store points at this file too. |
+| `seedrelay` (sibling dependency) | The app-neutral WebSocket rendezvous server and reconnectable signaling client shared with seedstore. `npm run relay` invokes its CLI. |
 | `scripts/clean.mjs` | Deletes `build/` and `browser/vendor/` when a rebuild isn't taking. |
 
 `ui` and `app_meta` are **chat-shell conventions, not runtime contracts** — the
@@ -62,6 +62,10 @@ Seven published entry points of `seedkernel-wasm`:
 | `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC mesh, subclassed for calls in `browser/media-rtc.js` |
 | `seedkernel-wasm/crypto-browser` | `loadCrypto` — the browser build of the same crypto seam Node's `loadCrypto` provides |
 | `seedkernel-wasm/libsodium` | the browser libsodium build |
+
+The JSON-over-WebSocket rendezvous is deliberately not another kernel entry point.
+`seedrelay` owns both its bounded server and reconnectable client adapter; chat owns
+only the selected URL, room, credential, and UI lifecycle.
 
 Plus one on the guest side: the app modules define their two memory-layout
 literals — `PK_LEN = 32` and `PRIV_USER_OFF = 0` — alongside their layout
@@ -139,7 +143,7 @@ Anyone wanting to install a custom app builds their own `.skb` with
 anymore, so admission trust is purely "did I consent to install this bundle",
 never "did I sign it as myself".
 
-The relay is partitioned into **rooms** (`ws://host:8080/<room>`, default
+The `seedrelay` server is partitioned into **rooms** (`ws://host:8080/<room>`, default
 `global`), set on the shell's **Network** tab. A room is *not* an authenticated
 channel — knowing the name is the only credential — but identity is bound
 in-channel by the transport bundle's HELLO/AUTH handshake, so a relay can observe

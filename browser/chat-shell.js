@@ -13,6 +13,7 @@ import { writeOp } from "seedkernel-wasm/op-frame";
 import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { verifyBundle } from "seedkernel-wasm/bundle";
+import { createRelaySignaling } from "seedrelay";
 // Chat's own code. media-rtc.js is the call feature: the kernel's WebRTC seam is
 // raw I/O, so live audio/video is a subclass of it that lives here.
 import { MediaRtcNetwork } from "./media-rtc.js";
@@ -1114,22 +1115,15 @@ window.addEventListener("message", async (ev) => {
 
 let lastSentNickBody = null;   // {proto, body} — replayed to peers that join mid-session
 
-// Reconnectable relay signaling. RtcNetwork takes a Signaling at construction;
-// we hand it one whose underlying WebSocket can be (re)pointed at a relay URL
-// at runtime. Dropping or swapping the relay leaves authenticated P2P links
-// untouched — the relay was only ever the initial rendezvous.
-let relayWs = null;
-let signalCb = () => {};
-const signalOutbox = [];
-const signaling = {
-  send(msg) {
-    const s = JSON.stringify(msg);
-    if (relayWs && relayWs.readyState === WebSocket.OPEN) relayWs.send(s);
-    else signalOutbox.push(s);   // queued until the relay is (re)connected
-  },
-  onMessage(fn) { signalCb = fn; },
-  close() { if (relayWs) { try { relayWs.close(); } catch {} } },
-};
+// RtcNetwork retains one stable Signaling while the app points its underlying
+// WebSocket at the selected URL/room. seedrelay owns serialization, queuing, and
+// stale-socket suppression; this page still owns every lifecycle and UI decision.
+let relayConnection = null; // { base, room, label, url } for the current attempt
+const relay = createRelaySignaling({
+  webSocketFactory: (url) => new WebSocket(url),
+  onStateChange: relayStateChanged,
+});
+const signaling = relay.signaling;
 
 // The room's contact secret: 32 bytes, or null for an open room — we answer anyone who
 // finds the room name. Set from the invite link's `#` fragment on load, or minted by
@@ -1396,7 +1390,7 @@ if (navigator.connection && typeof navigator.connection.addEventListener === "fu
   });
 }
 
-// Room names mirror the relay-side validation (see scripts/relay.mjs):
+// Room names mirror the relay-side validation (see seedrelay/server.mjs):
 // URL-safe identifier characters, length 1..128. Empty input is allowed
 // and means "use the default room".
 const ROOM_NAME_RE = /^[A-Za-z0-9._-]{1,128}$/;
@@ -1432,14 +1426,27 @@ function connectRelay() {
   // browser's own copy-URL) always describe the room we are actually joining.
   syncHash();
   updateRoomGateHint();
-  if (relayWs) { try { relayWs.close(); } catch {} }
   const label = room || DEFAULT_ROOM;
-  shellPrint(`Connecting to ${url} (room: ${label})...`, "sys");
-  relayStatus.textContent = "connecting...";
-  setRelayPill("connecting", `room ${label}`);
-  relayConnectBtn.disabled = true;
-  relayWs = new WebSocket(url);
-  relayWs.addEventListener("open", () => {
+  relayConnection = { base, room, label, url };
+  try { relay.connect(url); }
+  catch (err) {
+    relayStatus.textContent = "error";
+    setRelayPill("err", "relay error");
+    relayConnectBtn.disabled = false;
+    shellPrint(`Relay connection failed: ${err?.message ?? err}`, "err");
+  }
+}
+
+function relayStateChanged({ state }) {
+  const current = relayConnection;
+  if (!current) return;
+  const { base, room, label, url } = current;
+  if (state === "connecting") {
+    shellPrint(`Connecting to ${url} (room: ${label})...`, "sys");
+    relayStatus.textContent = "connecting...";
+    setRelayPill("connecting", `room ${label}`);
+    relayConnectBtn.disabled = true;
+  } else if (state === "connected") {
     shellPrint(`Relay connected — room ${label}, waiting for peers.`, "sys");
     relayStatus.textContent = `connected · room ${label}`;
     setRelayPill("ok", `room ${label}`);
@@ -1454,11 +1461,9 @@ function connectRelay() {
     // after moving to an open one.
     if (roomSecret) sessionStorage.setItem("chat.roomSecret", bytesToHex(roomSecret));
     else sessionStorage.removeItem("chat.roomSecret");
-    // Flush any signals RtcNetwork queued while the socket was down, then
-    // stand the transport up (first connect, or the room secret changed) and
-    // announce ourselves into the room so the WebRTC dance can begin.
-    for (const s of signalOutbox) relayWs.send(s);
-    signalOutbox.length = 0;
+    // seedrelay flushed queued signals before reporting "connected". Now stand
+    // the transport up (first connect, or room-secret change) and announce into
+    // the room so the WebRTC dance can begin.
     ensureTransport()
       .then(() => net.join())
       .catch((err) => {
@@ -1466,25 +1471,17 @@ function connectRelay() {
         relayStatus.textContent = "error";
         setRelayPill("err", "no transport");
       });
-  });
-  relayWs.addEventListener("message", (ev) => {
-    if (typeof ev.data !== "string") return;
-    let msg;
-    try { msg = JSON.parse(ev.data); } catch { return; }
-    signalCb(msg);   // hand it to RtcNetwork's signaling
-  });
-  relayWs.addEventListener("close", () => {
+  } else if (state === "disconnected") {
     relayStatus.textContent = "disconnected";
     setRelayPill("off", "no relay");
     relayConnectBtn.disabled = false;
     shellPrint("Relay disconnected. Existing P2P links unaffected.", "sys");
-  });
-  relayWs.addEventListener("error", () => {
+  } else if (state === "error") {
     relayStatus.textContent = "error";
     setRelayPill("err", "relay error");
     relayConnectBtn.disabled = false;
     shellPrint(`Relay error — is one running at ${url}?`, "err");
-  });
+  }
 }
 relayConnectBtn.addEventListener("click", connectRelay);
 relayUrlInput.addEventListener("keydown", (e) => {

@@ -185,7 +185,7 @@
       <code>#</code> fragment, which browsers never send to a server — so the relay forwards your
       signaling without being able to join the room itself. A peer that cannot produce the secret
       draws no response at all. Without one the room is open: anyone who learns its name can join.</p>
-    <p class="hint">Start a relay locally with <code>node scripts/relay.mjs</code>, or point at a
+    <p class="hint">Start a relay locally with <code>npm run relay</code>, or point at a
       public one your group trusts.</p>
   </div>
 
@@ -210,6 +210,7 @@
     "seedkernel-wasm/crypto-browser": "./vendor/host/crypto-browser.js",
     "seedkernel-wasm/libsodium":     "./vendor/libsodium-wrappers.mjs",
     "seedkernel-wasm/quickjs":       "./vendor/quickjs/variant.mjs",
+    "seedrelay":                     "./vendor/seedrelay/client.js",
     "quickjs-emscripten-core":       "./vendor/quickjs-emscripten-core/index.mjs",
     "@jitl/quickjs-ffi-types":       "./vendor/quickjs-ffi-types/index.mjs"
   }

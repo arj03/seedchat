@@ -9,13 +9,14 @@
     "build:chat-app-v2": "asc assembly/chat-app-v2/index.ts --config asconfig.chat-app-v2.json --target release && node scripts/embed-ui.mjs build/chat-app-v2.wasm assembly/chat-app-v2/ui.html build/chat-app-v2.wasm && node scripts/embed-meta.mjs build/chat-app-v2.wasm build/chat-app-v2.wasm \"{\\\"id\\\":\\\"chat\\\",\\\"name\\\":\\\"Chat\\\",\\\"version\\\":\\\"v2\\\",\\\"description\\\":\\\"text + image + nick\\\"}\" && node scripts/build-app-bundle.mjs build/chat-app-v2.wasm bundle/chat-app-v2.skb",
     "build:offers-bundle": "node scripts/build-offers-bundle.mjs",
     "build": "npm run build:chat-app-v1 && npm run build:chat-app-v2 && npm run build:offers-bundle && npm run vendor",
-    "relay": "node scripts/relay.mjs",
+    "relay": "seedrelay",
     "smoke": "node scripts/smoke.mjs",
     "serve": "npm run vendor && npx --yes http-server browser -p 3000 -c-1",
     "clean": "node scripts/clean.mjs"
   },
   "dependencies": {
-    "seedkernel-wasm": "file:../seedkernel/WASM"
+    "seedkernel-wasm": "file:../seedkernel/WASM",
+    "seedrelay": "file:../seedrelay"
   },
   "devDependencies": {
     "assemblyscript": "0.28.14"

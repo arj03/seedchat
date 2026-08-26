@@ -24,6 +24,15 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
+const relayRoot = resolve(root, "..", "seedrelay");
+
+if (!existsSync(resolve(relayRoot, "client.js"))) {
+  console.error(
+    `seedrelay not found at ${relayRoot}.\n` +
+    "  check it out beside seedchat and seedkernel, then run npm install"
+  );
+  process.exit(2);
+}
 
 // The kernel is a sibling checkout by declaration: package.json pins
 // `file:../seedkernel/WASM`, and the kernel is `private: true` and never published.
@@ -103,6 +112,15 @@ mkdirSync(vendor, { recursive: true });
 // browser/ dir and are copied separately, below.
 cpSync(hostSrc, vendor, { recursive: true });
 
+// The relay protocol is deployment infrastructure, not kernel surface. Vendor its
+// one browser module from the sibling package declared in package.json; the server
+// half is reached through that package's `seedrelay` CLI by `npm run relay`.
+{
+  const dstDir = resolve(vendor, "seedrelay");
+  mkdirSync(dstDir, { recursive: true });
+  copyFileSync(resolve(relayRoot, "client.js"), resolve(dstDir, "client.js"));
+}
+
 for (const f of ["libsodium-wrappers.mjs", "libsodium-core.mjs", "libsodium.wasm"]) {
   const src = resolve(pkgRoot, "browser", f);
   if (!existsSync(src)) {
@@ -181,7 +199,7 @@ for (const [pkg, sub, dest, files, allMjs] of VENDOR) {
   for (const n of names) copyFileSync(join(src, n), join(dstDir, n));
 }
 
-console.log("vendored seedkernel-wasm -> browser/vendor/");
+console.log("vendored seedkernel-wasm + seedrelay -> browser/vendor/");
 console.log("serve it:   npm run serve        (re-vendors + http-server with caching OFF)");
 console.log("  ── DO NOT use a plain `http-server` without -c-1: its default max-age=3600 makes");
 console.log("     the browser keep a STALE vendor/host after a rebuild → confusing errors.");
