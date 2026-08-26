@@ -29,11 +29,12 @@ const sodium = await loadCrypto();
 const { bootShell } = await import("seedkernel-wasm/shell-core");
 const { transportBundleBytes } = await import("seedkernel-wasm/transport-bundle");
 const {
-  signManifest, hybridAuthorId, hybridAuthorKeysFromSeed, packBundle, unpackBundle,
-  verifyManifest, genesisHash,
+  hybridAuthorId, unpackBundle, verifyManifest, genesisHash,
   MANIFEST_FILE, GUEST_FILE, moduleFile,
 } = await import("seedkernel-wasm/bundle");
-// The chat app shape the browser shell authors from — same guest source, same authority set.
+const { signManifest, hybridAuthorKeysFromSeed, packBundle }
+  = await import("seedkernel-wasm/bundle-author");
+// The chat app shape the offline builder authors — same guest source, same authority set.
 const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO } = await import("../browser/chat-app.js");
 // The offers app shape — same guest source scripts/build-offers-bundle.mjs signs into
 // bundle/offers.skb, read directly off disk below like chat-app-v1.wasm already is.

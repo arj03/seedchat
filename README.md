@@ -51,13 +51,14 @@ kernel never reads either section. They live here because the reader lives here.
 
 ## The kernel surface chat uses
 
-Six published entry points of `seedkernel-wasm`:
+Seven published entry points of `seedkernel-wasm`:
 
 | Import | Used for |
 | --- | --- |
 | `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.9): the transport bundle pinned to its own author, the adapter built from the `transport` options, the boot loads. Chat's `admit` composes the offers-pin and the consent gate. |
 | `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` — the kernel-shipped transport bundle as raw bytes (§12.6) |
-| `seedkernel-wasm/bundle` | `verifyBundle` — the one call that unpacks and checks an offered bundle (`peekMeta`); `hybridAuthorKeysFromSeed`/`hybridAuthorId` derive this browser's own author id from its key seed. Authoring is offline (`build-app-bundle.mjs`, `build-offers-bundle.mjs`, `authorBundle`), the same API seedstore's build uses. |
+| `seedkernel-wasm/bundle` | `verifyBundle` — the one call that unpacks and checks an offered bundle (`peekMeta`). The browser only verifies; peer attribution uses its node public key. |
+| `seedkernel-wasm/bundle-author` | `authorBundle` and `hybridAuthorKeysFromSeed` in the offline `build-app-bundle.mjs` and `build-offers-bundle.mjs` scripts. This entry point is never imported by the browser shell. |
 | `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC mesh, subclassed for calls in `browser/media-rtc.js` |
 | `seedkernel-wasm/crypto-browser` | `loadCrypto` — the browser build of the same crypto seam Node's `loadCrypto` provides |
 | `seedkernel-wasm/libsodium` | the browser libsodium build |

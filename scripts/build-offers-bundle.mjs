@@ -21,7 +21,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadCrypto } from "seedkernel-wasm";
-import { authorBundle, hybridAuthorKeysFromSeed } from "seedkernel-wasm/bundle";
+import { authorBundle, hybridAuthorKeysFromSeed } from "seedkernel-wasm/bundle-author";
 import { OFFER_PROTO, OFFERS_APP, OFFERS_REQUIRES, offersGuestSource } from "../browser/offers-app.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

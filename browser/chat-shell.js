@@ -12,9 +12,7 @@ import { bootShell } from "seedkernel-wasm/shell-core";
 import { writeOp } from "seedkernel-wasm/op-frame";
 import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
-import { hybridAuthorId, hybridAuthorKeysFromSeed,
-         verifyBundle }
-  from "seedkernel-wasm/bundle";
+import { verifyBundle } from "seedkernel-wasm/bundle";
 // Chat's own code. media-rtc.js is the call feature: the kernel's WebRTC seam is
 // raw I/O, so live audio/video is a subclass of it that lives here.
 import { MediaRtcNetwork } from "./media-rtc.js";
@@ -117,11 +115,9 @@ shellPrint("Starting the handler table...", "sys");
 // it — bootShell's verifyBundle needs the PQ signature half for ANY bundle, and
 // verifyManifest is synchronous, so this can't be lazy (seedkernel's crypto-browser.ts).
 //
-// This shell SIGNS suite 0x02, the hybrid Ed25519 + ML-DSA-65 envelope (§12.4,
-// §14.1) — every node had to be able to VERIFY a hybrid manifest before any node
-// produced one, and that gate is long closed, so the demo signs PQ by default like
-// every other author, and its author id is the key-set hash rather than the
-// Ed25519 key.
+// This runtime only VERIFIES suite 0x02 bundle envelopes (§12.4, §14.1). Bundle
+// authoring is offline and lives behind seedkernel-wasm/bundle-author, which is not
+// shipped in the browser runtime tree.
 await loadCrypto(sodium, new URL("./vendor/", import.meta.url));
 
 // The transport bundle — the kernel-shipped signed program that IS the network
@@ -187,14 +183,9 @@ if (stored) {
   }));
 }
 const myPkHex = bytesToHex(myKeys.publicKey);
-// This author's whole key set (§12.4): the Ed25519 half plus the ML-DSA-65 half derived
-// from the SAME seed, so the one stored identity is the whole key set. The kernel's own
-// derivation, not a copy of it — the id below is a hash over both keys, so a local
-// imitation that drifted would silently re-identify this tab's author.
-const myAuthorKeys = hybridAuthorKeysFromSeed(sodium, myKeys.privateKey.slice(0, 32));
-const myPqKeys = myAuthorKeys.mlDsa;
-// The hybrid author id: what this tab signs app bundles under, and what peers pin.
-const myAuthorId = hybridAuthorId(sodium, myKeys.publicKey, myPqKeys.publicKey);
+// Local rendering gets the same attribution shape as an inbound frame: the authenticated
+// peer identity, not a bundle-author id. This tab does not author bundles at runtime.
+const myPeerId = myKeys.publicKey;
 
 shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 
@@ -296,11 +287,6 @@ const offersApp = await shell.loadBundleBlob(offersBundleBytes(), {
 // Frames the driver hands us are already attributed to an authenticated peer, so
 // the sender pubkey (`_from`) is authoritative — we prepend it to the message
 // before running the app transform; there is no envelope signer to verify.
-function bytesEqual(a, b) {
-  if (!a || !b || a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}
 
 // ─── top-bar status updates ───────────────────────────────────────────
 identityPill.textContent = `id ${myPkHex.slice(0, 8)}`;
@@ -760,9 +746,9 @@ async function broadcastToPeers(proto, payload) {
 }
 
 async function renderLocal(rec, payload) {
-  const input = new Uint8Array(myAuthorId.length + payload.length);
-  input.set(myAuthorId, 0);
-  input.set(payload, myAuthorId.length);
+  const input = new Uint8Array(myPeerId.length + payload.length);
+  input.set(myPeerId, 0);
+  input.set(payload, myPeerId.length);
   // The local echo runs through the app's guest like an inbound frame does — the
   // guest `handle` forwards to the module by name (§12.2), under the
   // same seam a peer's request would take. Which means it can fail the same way,
@@ -840,7 +826,6 @@ function buildAppRow(rec) {
   const meta = document.createElement("div");
   meta.className = "app-row-meta";
   const authorHex = bytesToHex(rec.authorPk);
-  const isMine = bytesEqual(rec.authorPk, myAuthorId);
   {
     const bId = document.createElement("b");
     bId.textContent = "id";
@@ -850,8 +835,7 @@ function buildAppRow(rec) {
     const bAu = document.createElement("b");
     bAu.textContent = "author";
     meta.appendChild(bAu);
-    const vAu = document.createTextNode(
-      ` ${authorHex.slice(0, 8)}` + (isMine ? " (you)" : "") + ` · `);
+    const vAu = document.createTextNode(` ${authorHex.slice(0, 8)} · `);
     meta.appendChild(vAu);
     const bWa = document.createElement("b");
     bWa.textContent = "wasm";
