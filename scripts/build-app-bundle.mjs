@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadCrypto } from "seedkernel-wasm";
-import { authorBundle, hybridAuthorKeysFromSeed } from "seedkernel-wasm/bundle";
+import { authorBundle, hybridAuthorKeysFromSeed } from "seedkernel-wasm/bundle-author";
 import { assertAppId, chatGuestSource, CHAT_PROTO, CHAT_APP_REQUIRES } from "../browser/chat-app.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
