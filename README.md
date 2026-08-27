@@ -76,9 +76,10 @@ Three properties serve as the summary; the details live in the kernel docs:
 - **The protocol is a bundle; the sockets are the platform's.** The channel AKE,
   record layer and request/response layer ship as a signed transport bundle
   serving the local service name `_net`, embedded in the host and reached as raw
-  bytes through `transport-bundle`. The host side — link ids, the address book,
-  the handshake budgets — is `bootShell`'s channel adapter, built by the assembly
-  from the `transport` options (§12.6, [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)).
+  bytes through `transport-bundle`. The host side — link ids, sockets and the
+  address book — is `bootShell`'s channel adapter, built by the assembly from the
+  `transport` options; transport policy and its defaults belong to the signed bundle
+  (§12.6, [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)).
 - **The offers app gets a pin, chat's own half of it.** `offer/v1` carries a
   signed bundle for an app that does not exist yet, so something already
   installed at boot owns the name and `admit` allows exactly the author and app

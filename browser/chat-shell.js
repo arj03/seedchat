@@ -195,8 +195,9 @@ shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 // WebAssembly-backed module builder, an in-memory freshness store — all defaulted by
 // bootShell — and the channel adapter, which bootShell CONSTRUCTS from the `transport`
 // options (identity taken from the top-level fields, never restated) and returns with
-// the shell. The adapter is the platform's: link ids, the address book, the handshake
-// budgets. Its raw-link events go to whichever admitted slot owns the `link` binding,
+// the shell. The adapter is the platform's: link ids, sockets and the address book;
+// transport policy belongs to the signed bundle. Its raw-link events go to whichever
+// admitted slot owns the `link` binding,
 // and `shell.close()` closes it, so there is one teardown rather than two. This tab
 // has no sockets of its own (no `channels`): every link arrives through `openLink`,
 // handed over by the MediaRtcNetwork in ensureTransport().
