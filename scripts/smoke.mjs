@@ -2,8 +2,8 @@
 //
 // Replays the boot path browser/chat-shell.js actually runs — the bootShell
 // assembly + its implicit transport-author pin + consent-gated chat install +
-// protocol dispatch — minus the browser-only WebRTC/DOM. Two shells link over
-// the transport's openLink seam (the shape RtcNetwork hands it), a real
+// protocol dispatch — minus the browser-only WebRTC/DOM. Two shells link through
+// injected ChannelFactory sinks (the shape RtcNetwork implements), a real
 // chat-app-v1.wasm round-trips a message, and the offers app (a second boot bundle,
 // browser/offers-app.js) round-trips an offer. Run it after a kernel update:
 //
@@ -98,6 +98,27 @@ function wirePair() {
   return [a, b];
 }
 
+// An accept-only ChannelFactory, matching RtcNetwork's side of the platform seam. The
+// transport registers its sink during boot; a test then hands each end of wirePair to the
+// appropriate host with the same metadata an RtcChannel carries.
+class InjectedChannels {
+  #onAccept = null;
+
+  async listen(_tcp, _ws, onAccept) {
+    this.#onAccept = onAccept;
+    return { port: 0, wsPort: 0 };
+  }
+
+  give(channel, { weDialed = false, expectPeerId } = {}) {
+    if (!this.#onAccept) throw new Error("channel factory has no transport sink");
+    channel.weDialed = weDialed;
+    if (expectPeerId) channel.expectPeerId = expectPeerId;
+    this.#onAccept(channel);
+  }
+
+  close() { this.#onAccept = null; }
+}
+
 // The predicate is AWAITED: a promise object is truthy on the first tick, so an async
 // one polled by value would return immediately and make the whole wait a silent no-op.
 async function until(fn, ms = 4000, what = "condition") {
@@ -141,25 +162,23 @@ const CONTACT = new Uint8Array(32).fill(7); // a "room secret" both ends share
 // table to register a handler on; each load owns its own answer.
 const inbound = { render: null };
 
-// The adapter is bootShell's, exactly as chat-shell.js gets it: the platform answers
-// from options, and the one option that is chat's is the `contactSecret` GETTER — the
-// adapter re-reads it on every link open and delivers the CURRENT value to the link
-// occupant per link (§12.6.3), which is what makes a room switch a sever instead of a
-// transport re-load. `transportLoad: false` keeps the bundle load wherever the caller
-// puts it — here, side by side with the tests below.
+// The adapter is bootShell's, exactly as chat-shell.js gets it: the factory exists first
+// and is passed as `transport.channels`; boot loads the pinned transport and registers
+// each factory's accept sink. `contactSecret` stays a live getter, re-read for each channel
+// announcement (§12.6.3), which makes a room rotation a sever rather than a reload.
+const channelsA = new InjectedChannels();
+const channelsB = new InjectedChannels();
 const { shell: A, transport: netA } = await bootShell({
   sodium, identity: identityA,
-  transport: { get contactSecret() { return CONTACT; } }, transportLoad: false, admit,
+  transport: { get contactSecret() { return CONTACT; }, channels: channelsA }, admit,
 });
 const { shell: B, transport: netB } = await bootShell({
   sodium, identity: identityB,
-  transport: { get contactSecret() { return CONTACT; } }, transportLoad: false, admit,
+  transport: { get contactSecret() { return CONTACT; }, channels: channelsB }, admit,
 });
 
 // 1. transport bundle admitted by author pin; the socket driver standing
 try {
-  await A.loadBundleBlob(TRANSPORT_BYTES);
-  await B.loadBundleBlob(TRANSPORT_BYTES);
   // The adapter carries the host's half of the network: sockets, the address book,
   // listeners. `send` is deliberately NOT there — an app sends by calling the local
   // service name the transport serves (§12.10) — so asserting its absence is asserting
@@ -167,7 +186,7 @@ try {
   // whole part is having bound the raw-link capability to the bundle just admitted.
   assert(A.transport === undefined, "the shell exposes no transport — the adapter is the platform's");
   assert(A.resolve(NET_PROTO) !== null, `the admitted bundle serves ${NET_PROTO}`);
-  assert(typeof netA.openLink === "function", "the adapter takes channels");
+  assert(netA.openLink === undefined, "the removed per-link injection seam stays absent");
   assert(typeof netA.linkedPeers === "function", "the adapter answers the transport's peer set");
   assert(netA.send === undefined, "the adapter has no request facade — sending is an app's");
   ok("transport bundle admitted by author pin; the channel adapter has a raw-link owner");
@@ -246,21 +265,15 @@ try {
   ok(`chat app installed on both shells under ${chatKey.slice(0, 24)}…`);
 } catch (err) { fail("chat app install", err); }
 
-// 4. link A and B over the transport (the WebRTC seam's openLink shape)
-const st = { a: { authed: false }, b: { authed: false } };
+// 4. link A and B through the ChannelFactory sinks registered during boot
 try {
   const [chA, chB] = wirePair();
-  const aLink = netA.openLink({
-    channel: chA, weDialed: true, expectPeerId: netB.peerId,
-    contactSecret: CONTACT, source: chA.remoteAddr,
-    onAuth: () => { st.a.authed = true; },
-  });
-  const bLink = netB.openLink({
-    channel: chB, weDialed: false, source: chB.remoteAddr,
-    onAuth: () => { st.b.authed = true; },
-  });
-  await until(() => st.a.authed && st.b.authed, 4000, "handshake");
-  assert(aLink.linkId > 0 && bLink.linkId > 0, "link ids minted");
+  channelsA.give(chA, { weDialed: true, expectPeerId: netB.peerId });
+  channelsB.give(chB);
+  await until(async () => {
+    const [aPeers, bPeers] = await Promise.all([netA.linkedPeers(), netB.linkedPeers()]);
+    return aPeers.includes(netB.peerId) && bPeers.includes(netA.peerId);
+  }, 4000, "handshake");
   ok("two transport ends authenticated over the channel seam");
 } catch (err) { fail("transport handshake", err); }
 

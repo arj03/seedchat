@@ -51,15 +51,17 @@ kernel never reads either section. They live here because the reader lives here.
 
 ## The kernel surface chat uses
 
-Seven published entry points of `seedkernel-wasm`:
+Nine published entry points of `seedkernel-wasm` across the browser and build/smoke scripts:
 
 | Import | Used for |
 | --- | --- |
-| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.9): the transport bundle pinned to its own author, the adapter built from the `transport` options, the boot loads. Chat's `admit` composes the offers-pin and the consent gate. |
-| `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` — the kernel-shipped transport bundle as raw bytes (§12.6) |
+| `seedkernel-wasm` | Node `loadCrypto()` in the headless smoke test. |
+| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.9): the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. Chat's `admit` composes the offers-pin and the consent gate. |
+| `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` — the kernel-shipped transport bundle as raw bytes used by the headless smoke assertions (§12.6); browser boot gets the same artifact through `bootShell`. |
 | `seedkernel-wasm/bundle` | `verifyBundle` — the one call that unpacks and checks an offered bundle (`peekMeta`). The browser only verifies; peer attribution uses its node public key. |
 | `seedkernel-wasm/bundle-author` | `authorBundle` and `hybridAuthorKeysFromSeed` in the offline `build-app-bundle.mjs` and `build-offers-bundle.mjs` scripts. This entry point is never imported by the browser shell. |
-| `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC mesh, subclassed for calls in `browser/media-rtc.js` |
+| `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC `ChannelFactory`, constructed before `bootShell` and subclassed for calls in `browser/media-rtc.js`. |
+| `seedkernel-wasm/op-frame` | `writeOp` — the signed apps' own operation framing for local guest invocations. |
 | `seedkernel-wasm/crypto-browser` | `loadCrypto` — the browser build of the same crypto seam Node's `loadCrypto` provides |
 | `seedkernel-wasm/libsodium` | the browser libsodium build |
 
@@ -77,8 +79,9 @@ Three properties serve as the summary; the details live in the kernel docs:
   record layer and request/response layer ship as a signed transport bundle
   serving the local service name `_net`, embedded in the host and reached as raw
   bytes through `transport-bundle`. The host side — link ids, sockets and the
-  address book — is `bootShell`'s channel adapter, built by the assembly from the
-  `transport` options; transport policy and its defaults belong to the signed bundle
+  address book — is `bootShell`'s channel adapter, built around the platform's
+  `RtcNetwork` ChannelFactory supplied as `transport.channels`; transport policy
+  and its defaults belong to the signed bundle
   (§12.6, [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)).
 - **The offers app gets a pin, chat's own half of it.** `offer/v1` carries a
   signed bundle for an app that does not exist yet, so something already
@@ -91,7 +94,7 @@ Three properties serve as the summary; the details live in the kernel docs:
   chat app's guest returns for an inbound frame are that call's answer, read off
   the load's own `onInbound` (§12.10) — no second claim, no host-side tap.
 
-The JS entry points are declared in exactly two places: the imports at the top of
+The browser JS entry points are declared in exactly two places: the imports at the top of
 `chat-shell.js`, and the inline import map in `chat-shell.html`. The CSP allows
 inline scripts (`'unsafe-inline'`) because app UIs run in a sandboxed `blob:`
 iframe that inherits this page's policy — the iframe sandbox is the actual
