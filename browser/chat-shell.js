@@ -9,14 +9,16 @@ import sodium from "seedkernel-wasm/libsodium";
 // `transport` options passed to it. Chat's admit is then ONLY its consent gate —
 // who may be the network is the assembly's, so nobody can lose it by forgetting it.
 import { bootShell } from "seedkernel-wasm/shell-core";
-import { writeOp } from "seedkernel-wasm/op-frame";
+// `writeOp` frames an app's own local op; `OpArgs` writes the transport bundle's op
+// arguments, which is what the host's own door into the network takes (see linkedPeers).
+import { writeOp, OpArgs } from "seedkernel-wasm/op-frame";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { verifyBundle } from "seedkernel-wasm/bundle";
 import { createRelaySignaling } from "seedrelay";
 // Chat's own code. media-rtc.js is the call feature: the kernel's WebRTC seam is
 // raw I/O, so live audio/video is a subclass of it that lives here.
 import { MediaRtcNetwork } from "./media-rtc.js";
-import { isChatApp, CHAT_OP_SEND, CHAT_OP_RENDER } from "./chat-app.js";
+import { isChatApp, CHAT_OP_SEND, CHAT_OP_RENDER, NET_PROTO } from "./chat-app.js";
 // The offers app: a second boot bundle, loaded right below alongside the transport —
 // see "boot the offers app" further down for why a bundle rather than a page-held name.
 import { OFFER_PROTO, OFFERS_KEY_PREFIX } from "./offers-app.js";
@@ -130,8 +132,10 @@ await loadCrypto(sodium, new URL("./vendor/", import.meta.url));
 // open policy, so consent — not a static author allow-list — is this shell's gate.
 const pendingApprovals = new Set();
 let shell;
-/** The channel adapter bootShell constructs and returns. The signed transport guest owns
- *  authenticated link state; the page asks this object for linkedPeers() when it needs it. */
+/** The channel adapter bootShell constructs and returns — the sockets, and nothing that
+ *  knows what a peer is. What the page still needs it for is `reset()`, a room rotation's
+ *  sever. Anything peer-shaped is a question for the transport GUEST instead, asked through
+ *  the shell (see linkedPeers). */
 let transport;
 // Room/rendezvous rotations sever the existing transport links and physical peer
 // connections while retaining the one ChannelFactory registered at boot.
@@ -320,13 +324,22 @@ function setRelayPill(state, label) {
   relayPillText.textContent = label;
 }
 
-// The linked set is the TRANSPORT's answer, not a field on the driver: links are the
-// transport guest's, so asking costs a round trip through its realm and this is async.
-// A node with no transport standing has nothing to ask — read that as no peers rather
-// than letting a rejection escape into a status-bar update.
+// The linked set is the TRANSPORT GUEST's answer: links are its own, so asking costs a
+// round trip through its realm and this is async. The page asks through `shell.call` — the
+// host's door into a co-resident guest's `services` claim (seedkernel §12.10), the same one
+// the kernel's CLI uses for a cohort — and composes the op with the kernel's own `OpArgs`,
+// so the argument writer and the transport's reader move in one artifact. `null` is "nothing
+// claims that id": a node with no transport standing, which is no peers rather than an
+// error, exactly like a rejection from a realm that is going down.
 async function linkedPeers() {
-  if (!transport) return [];
-  try { return await transport.linkedPeers(); }
+  const answer = shell.call(NET_PROTO, new OpArgs("peers").build());
+  if (!answer) return [];
+  try {
+    const bytes = await answer;
+    const out = [];
+    for (let off = 0; off + 32 <= bytes.length; off += 32) out.push(bytesToHex(bytes.subarray(off, off + 32)));
+    return out;
+  }
   catch { return []; }
 }
 

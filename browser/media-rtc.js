@@ -27,7 +27,7 @@ export class MediaRtcNetwork extends RtcNetwork {
    *  `onTrack(peerId, track)` — a remote peer is sending us media;
    *  `onPeerConnectionClosed(peerId)` — that peer's physical media connection ended.
    *  Neither callback reports transport authentication; that state belongs to the
-   *  transport guest and is queried through TransportHost.linkedPeers(). */
+   *  transport guest and is asked of it directly (chat-shell.js `linkedPeers`). */
   constructor(opts) {
     super(opts);
     this.onRemoteTrack = opts.onTrack;

@@ -34,8 +34,8 @@ routing, signed bundles, the channel handshake — are documented in the kernel:
 | `assembly/chat-app-v1/` | v1 handler — text only. `index.ts` is the pure transform, `ui.html` is the iframe UI embedded into the module as a custom section. |
 | `assembly/chat-app-v2/` | v2 handler — text + image + nick. Same shape; upgrading v1→v2 is a re-admit at the same name under the same key. |
 | `browser/chat-shell.*` | The browser shell: identity, admission policy, the transport-bundle and offers-bundle boot loads, a WebRTC mesh, the sandboxed iframe. The inline import map in `chat-shell.html` names the kernel surface. |
-| `browser/chat-app.js` | The chat app *shape*, in one place: the guest's source, the `chat` protocol id grammar, and its one-service authority (`_net`). The shell authors bundles from it and gates received Offers against it; `scripts/smoke.mjs` imports the same file. |
-| `browser/offers-app.js` | The offers app *shape*: the `offer/v1` id, the app id `offers`, its one-service authority (`fs`), and its guest source — a keyspace and a claim, no module. `scripts/build-offers-bundle.mjs` signs it into the boot bundle. |
+| `browser/chat-app.js` | The chat app *shape*, in one place: the guest's source, the `chat` protocol id grammar, and its reach — no host service at all (`guest.requires` is empty) and one co-resident guest, the network (`guest.calls` is `_net`). The shell authors bundles from it and gates received Offers against it; `scripts/smoke.mjs` imports the same file. |
+| `browser/offers-app.js` | The offers app *shape*: the `offer/v1` id, the app id `offers`, its one-service authority (`fs` — a host service, so it really is a `guest.requires` entry), and its guest source — a keyspace and a claim, no module. `scripts/build-offers-bundle.mjs` signs it into the boot bundle. |
 | `browser/media-rtc.js` | The call feature: `MediaRtcNetwork`, a subclass of the kernel's `RtcNetwork` that publishes camera/mic over the peer connections the data channel already uses. Live media is chat's own — the kernel seam is raw I/O only. |
 | `scripts/embed-ui.mjs` | Appends a `ui` custom section to a built `.wasm`. |
 | `scripts/embed-meta.mjs` | Appends an `app_meta` JSON custom section (id, name, version). |
@@ -56,12 +56,12 @@ Nine published entry points of `seedkernel-wasm` across the browser and build/sm
 | Import | Used for |
 | --- | --- |
 | `seedkernel-wasm` | Node `loadCrypto()` in the headless smoke test. |
-| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.9): the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. Chat's `admit` composes the offers-pin and the consent gate. |
-| `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` — the kernel-shipped transport bundle as raw bytes used by the headless smoke assertions (§12.6); browser boot gets the same artifact through `bootShell`. |
+| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.9): the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. Chat's `admit` composes the offers-pin and the consent gate. Its `Shell.call` is the host's own door into a co-resident guest's `services` claim, which is how the peer pill asks the transport who is linked. |
+| `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` and `TRANSPORT_SERVICE` — the kernel-shipped transport bundle as raw bytes, and the local service id it claims, used by the headless smoke assertions (§12.6); browser boot gets the same artifact through `bootShell`. |
 | `seedkernel-wasm/bundle` | `verifyBundle` — the one call that unpacks and checks an offered bundle (`peekMeta`). The browser only verifies; peer attribution uses its node public key. |
 | `seedkernel-wasm/bundle-author` | `authorBundle` and `hybridAuthorKeysFromSeed` in the offline `build-app-bundle.mjs` and `build-offers-bundle.mjs` scripts. This entry point is never imported by the browser shell. |
 | `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC `ChannelFactory`, constructed before `bootShell` and subclassed for calls in `browser/media-rtc.js`. |
-| `seedkernel-wasm/op-frame` | `writeOp` — the signed apps' own operation framing for local guest invocations. |
+| `seedkernel-wasm/op-frame` | `writeOp` — the signed apps' own operation framing for local guest invocations — and `OpArgs`, the transport bundle's argument writer, paired with its reader so a host-side call cannot drift from what the guest parses. |
 | `seedkernel-wasm/crypto-browser` | `loadCrypto` — the browser build of the same crypto seam Node's `loadCrypto` provides |
 | `seedkernel-wasm/libsodium` | the browser libsodium build |
 
@@ -95,7 +95,10 @@ Three properties serve as the summary; the details live in the kernel docs:
   an inbound frame reaches the shell as the link occupant's own delivery return,
   and an outbound frame leaves by an app *calling* `_net`. The render bytes a
   chat app's guest returns for an inbound frame are that call's answer, read off
-  the load's own `onInbound` (§12.10) — no second claim, no host-side tap.
+  the load's own `onInbound` (§12.10) — no second claim, no host-side tap. The
+  page's own questions go the same way: "who is linked" is a call on `_net`
+  through `Shell.call`, not a field on the adapter, because links are the
+  transport guest's and the adapter knows only sockets.
 
 The browser JS entry points are declared in exactly two places: the imports at the top of
 `chat-shell.js`, and the inline import map in `chat-shell.html`. The CSP allows
@@ -141,9 +144,11 @@ how you upgrade it. Peers hand each other the same bundles in an `OFFER` frame;
 the recipient re-verifies the original author's manifest signature. An Offer is
 installed on one click, so the recipient also checks its *shape* before showing
 that click: one module, and a guest whose reach is exactly `_net` and nothing
-else. A signature says who wrote a bundle, not what it may reach —
-`guest.requires` is where that is written down, and this shell will not install
-an app claiming reach it did not ask for.
+else. A signature says who wrote a bundle, not what it may reach — two signed
+lists are where that is written down, `guest.requires` for the host services an
+operator grants (a chat app holds none) and `guest.calls` for the co-resident
+guests it may reach (the network, and only that) — and this shell checks both,
+so it will not install an app claiming reach it did not ask for.
 
 Anyone wanting to install a custom app builds their own `.skb` with
 `scripts/build-app-bundle.mjs` — there is no per-browser-session self-signing

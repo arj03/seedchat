@@ -27,7 +27,10 @@ const sodium = await loadCrypto();
 // bundle pinned to its own author, the adapter built from the transport options passed
 // here. The shells' admit is then ONLY the consent gate.
 const { bootShell } = await import("seedkernel-wasm/shell-core");
-const { transportBundleBytes } = await import("seedkernel-wasm/transport-bundle");
+// `TRANSPORT_SERVICE` is emitted beside the blob it belongs to, not known to the loader:
+// a replacement transport may spell its claim differently, and then THAT spelling is the
+// one the host reaches. Chat runs the shipped one, so this is the id chat must agree with.
+const { transportBundleBytes, TRANSPORT_SERVICE } = await import("seedkernel-wasm/transport-bundle");
 const {
   hybridAuthorId, unpackBundle, verifyManifest, genesisHash,
   MANIFEST_FILE, GUEST_FILE, moduleFile,
@@ -35,14 +38,16 @@ const {
 const { signManifest, guestOpFraming, hybridAuthorKeysFromSeed, packBundle }
   = await import("seedkernel-wasm/bundle-author");
 // The chat app shape the offline builder authors — same guest source, same authority set.
-const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO } = await import("../browser/chat-app.js");
+const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_APP_CALLS, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO } = await import("../browser/chat-app.js");
 // The offers app shape — same guest source scripts/build-offers-bundle.mjs signs into
 // bundle/offers.skb, read directly off disk below like chat-app-v1.wasm already is.
 const { OFFER_PROTO, OFFERS_KEY_PREFIX } = await import("../browser/offers-app.js");
 // The identity the page pins its offers boot bundle by, off the generated artifact the
 // page itself reads — so `admit` below is the browser's gate, not a stand-in for it.
 const { OFFERS_AUTHOR_HEX, OFFERS_APP } = await import("../browser/offers-bundle.js");
-const { writeOp } = await import("seedkernel-wasm/op-frame");
+// `writeOp` frames an app's own local op; `OpArgs` writes the transport bundle's op
+// arguments, which is what the host's own door into the network takes (`peersOf` below).
+const { writeOp, OpArgs } = await import("seedkernel-wasm/op-frame");
 
 // The exact transport bundle bytes the kernel embeds, reached through the export —
 // so the smoke test touches no non-published surface and never reads the dependency's
@@ -131,6 +136,21 @@ async function until(fn, ms = 4000, what = "condition") {
 }
 
 const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+
+/** The peers a node holds an authenticated link to. Asked of the transport GUEST, through
+ *  the host's own door into a co-resident `services` claim (`Shell.call`, seedkernel
+ *  §12.10) — the same call the kernel's CLI makes for a cohort, and the same one
+ *  chat-shell.js's `linkedPeers` makes for its peer pill. The driver answers nothing
+ *  peer-shaped: links are the guest's, so this is a round trip through its realm.
+ *  `null` is "nothing claims that id" — a node with no transport standing. */
+async function peersOf(shell) {
+  const answer = shell.call(NET_PROTO, new OpArgs("peers").build());
+  if (!answer) return [];
+  const bytes = await answer;
+  const out = [];
+  for (let off = 0; off + 32 <= bytes.length; off += 32) out.push(toHex(bytes.slice(off, off + 32)));
+  return out;
+}
 // The one string in the kernel's vocabulary chat spells by hand (chat-app.js keeps a
 // no-imports shape) must be the transport bundle's own claim, or the guest calls
 // nothing. The kernel reserves no name for it: the claim is an ordinary LOCAL service
@@ -140,6 +160,9 @@ const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 const transportManifest = verifyManifest(sodium, unpackBundle(TRANSPORT_BYTES)[MANIFEST_FILE]).manifest;
 assert((transportManifest.services ?? []).includes(NET_PROTO),
   `chat's net id ${JSON.stringify(NET_PROTO)} must be the transport bundle's services claim`);
+assert(NET_PROTO === TRANSPORT_SERVICE,
+  `chat's net id ${JSON.stringify(NET_PROTO)} must be the id the shipped transport publishes `
+  + `(${JSON.stringify(TRANSPORT_SERVICE)}) — that is the one a host-side call reaches`);
 assert(!Object.hasOwn(transportManifest.guest, "abi"),
   "the all-async guest seam has no manifest ABI field");
 let failed = 0;
@@ -180,25 +203,38 @@ const { shell: A, transport: netA } = await bootShell({
   sodium, identity: identityA,
   transport: { get contactSecret() { return CONTACT; }, channels: channelsA }, admit,
 });
-const { shell: B, transport: netB } = await bootShell({
+// B keeps no handle on its adapter: the assertions below are about what a driver no
+// longer carries, one node says that once, and everything B is actually asked for — its
+// peer set — goes through its shell like A's does.
+const { shell: B } = await bootShell({
   sodium, identity: identityB,
   transport: { get contactSecret() { return CONTACT; }, channels: channelsB }, admit,
 });
 
 // 1. transport bundle admitted by author pin; the socket driver standing
 try {
-  // The adapter carries the host's half of the network: sockets and listeners, and NOT the
-  // address book, which is the transport guest's own (§12.10). `send` is deliberately not
-  // there either — an app sends by calling the local service name the transport serves
-  // (§12.10) — so asserting its absence is asserting the seam. Nor is the adapter on the SHELL: it is the platform's, and the shell's
-  // whole part is having bound the raw-link capability to the bundle just admitted.
+  // The adapter carries the host's half of the network and nothing else: sockets and
+  // listeners, three link events out, and NOTHING peer-shaped — no address book, no
+  // cohort, no peer set, all of which are the transport guest's own (§12.10). `send` is
+  // deliberately absent too: an app sends by calling the local service name the transport
+  // serves, so asserting these absences is asserting the seam. Nor is the adapter on the
+  // SHELL: it is the platform's, and the shell's whole part is having bound the raw-link
+  // capability to the bundle just admitted.
   assert(A.transport === undefined, "the shell exposes no transport — the adapter is the platform's");
   assert(A.resolve(NET_PROTO) !== null, `the admitted bundle serves ${NET_PROTO}`);
   assert(netA.openLink === undefined, "the removed per-link injection seam stays absent");
   assert(netA.peerId === undefined, "the adapter names no peer — identity reaches the guest as LOCAL config");
-  assert(netA.addPeerAddr === undefined, "the address book left the driver for the transport guest");
-  assert(typeof netA.linkedPeers === "function", "the adapter answers the transport's peer set");
+  assert(netA.addPeerAddr === undefined && netA.addr === undefined,
+    "the address book left the driver for the transport guest");
+  assert(netA.linkedPeers === undefined && netA.ready === undefined,
+    "cohorts and the peer set left the driver too — they are claim calls now");
   assert(netA.send === undefined, "the adapter has no request facade — sending is an app's");
+  // What replaced all three: the host's own door into the claim the transport serves,
+  // which is the call chat-shell.js's peer pill makes. Not yet linked to anyone, so the
+  // answer is an empty peer set rather than a refusal.
+  assert((await peersOf(A)).length === 0, `${NET_PROTO} answers a host-side call, with no peers yet`);
+  assert(A.call("no.such.service", new OpArgs("peers").build()) === null,
+    "a claim nothing serves answers null rather than a promise nobody settles");
   ok("transport bundle admitted by author pin; the channel adapter has a raw-link owner");
 } catch (err) { fail("transport bundle admission", err); }
 
@@ -249,7 +285,10 @@ try {
     modules: [{ name: "chat", hash: toHex(genesisHash(sodium, chatWasm)) }],
     guest: {
       hash: toHex(genesisHash(sodium, guestBytes)),
+      // The two signed reach lists (§12.2, §12.10): no host service at all, and one
+      // co-resident guest — the network.
       requires: CHAT_APP_REQUIRES,
+      calls: CHAT_APP_CALLS,
     },
   };
   const manifestEnv = signManifest(sodium, authorA, manifest);
@@ -281,7 +320,7 @@ try {
   channelsA.give(chA, { weDialed: true, expectPeerId: peerB });
   channelsB.give(chB);
   await until(async () => {
-    const [aPeers, bPeers] = await Promise.all([netA.linkedPeers(), netB.linkedPeers()]);
+    const [aPeers, bPeers] = await Promise.all([peersOf(A), peersOf(B)]);
     return aPeers.includes(peerB) && bPeers.includes(peerA);
   }, 4000, "handshake");
   ok("two transport ends authenticated over the channel seam");
@@ -373,29 +412,35 @@ try {
 } catch (err) { fail("app key", err); }
 
 // 8. the shape gate an Offer passes through (peekMeta → isChatApp). A peer's bundle
-// is installed on one click of a row showing a name and an author, so the requires it
-// declares are the whole of what that click grants — and a chat app's is exactly one
-// local name, `_net`: the network it must reach to be a chat app at all. Nothing else.
+// is installed on one click of a row showing a name and an author, so the reach it
+// declares is the whole of what that click grants — and a chat app's is exactly one
+// local name, `_net`: the network it must reach to be a chat app at all, and no host
+// service whatsoever. Two signed lists now, so the gate is checked on both.
 try {
-  const chatManifest = (requires, modules, protocols) => ({
+  const chatManifest = (requires, calls, modules, protocols) => ({
     app: "chat", version: 1,
     protocols: protocols ?? [CHAT_PROTO],
     modules: modules ?? [{ name: "chat", hash: "aa" }],
-    guest: { hash: "bb", requires },
+    guest: { hash: "bb", requires, ...(calls === undefined ? {} : { calls }) },
   });
-  assert(isChatApp(chatManifest(CHAT_APP_REQUIRES)), "the shell's own app shape is accepted");
-  assert(!isChatApp(chatManifest([...CHAT_APP_REQUIRES, "fs"])), "an offered app claiming fs beside the network is refused");
-  assert(!isChatApp(chatManifest([...CHAT_APP_REQUIRES, "node"])), "an offered app claiming a signing oracle is refused");
-  assert(!isChatApp(chatManifest([])), "an app that cannot reach the network is refused");
-  assert(!isChatApp(chatManifest(["link"])), "an offered app reaching for sockets is refused");
-  assert(!isChatApp(chatManifest(["fs"])), "an offered app claiming fs instead of the network is refused");
-  assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, [])), "a no-module app is refused");
+  const shape = (over = {}) => chatManifest(
+    over.requires ?? CHAT_APP_REQUIRES, over.calls ?? CHAT_APP_CALLS, over.modules, over.protocols);
+  assert(isChatApp(shape()), "the shell's own app shape is accepted");
+  assert(!isChatApp(shape({ requires: ["fs"] })), "an offered app claiming fs beside the network is refused");
+  assert(!isChatApp(shape({ requires: ["node"] })), "an offered app claiming a signing oracle is refused");
+  assert(!isChatApp(shape({ requires: ["link"] })), "an offered app reaching for sockets is refused");
+  assert(!isChatApp(shape({ calls: [] })), "an app that cannot reach the network is refused");
+  // `calls` absent ≡ none (§12.10), which is the same refusal as an empty list — the
+  // gate must not read a missing field as "whatever the default is".
+  assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined)), "an app declaring no calls at all is refused");
+  assert(!isChatApp(shape({ calls: [...CHAT_APP_CALLS, "_store"] })), "an app calling a second guest beside the network is refused");
+  assert(!isChatApp(shape({ modules: [] })), "a no-module app is refused");
   // The claim is part of what one click grants (§12.10): installing an offered
   // bundle routes every id it claims to it, so a bundle claiming something other than
   // the chat protocol — or nothing, or extra ids beside it — is not a chat app.
-  assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined, [])), "an app claiming no protocol is refused");
-  assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined, ["seedstore"])), "an app claiming another protocol is refused");
-  assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined, [CHAT_PROTO, "seedstore"])), "an app claiming an extra protocol is refused");
+  assert(!isChatApp(shape({ protocols: [] })), "an app claiming no protocol is refused");
+  assert(!isChatApp(shape({ protocols: ["seedstore"] })), "an app claiming another protocol is refused");
+  assert(!isChatApp(shape({ protocols: [CHAT_PROTO, "seedstore"] })), "an app claiming an extra protocol is refused");
   ok("the offer shape gate admits only network-only chat apps claiming the chat protocol");
 } catch (err) { fail("offer shape gate", err); }
 
