@@ -78,10 +78,13 @@ Three properties serve as the summary; the details live in the kernel docs:
 - **The protocol is a bundle; the sockets are the platform's.** The channel AKE,
   record layer and request/response layer ship as a signed transport bundle
   serving the local service name `_net`, embedded in the host and reached as raw
-  bytes through `transport-bundle`. The host side — link ids, sockets and the
-  address book — is `bootShell`'s channel adapter, built around the platform's
-  `RtcNetwork` ChannelFactory supplied as `transport.channels`; transport policy
-  and its defaults belong to the signed bundle
+  bytes through `transport-bundle`. The host side — link ids and sockets — is
+  `bootShell`'s channel adapter, built around the platform's `RtcNetwork`
+  ChannelFactory supplied as `transport.channels`; transport policy and its
+  defaults belong to the signed bundle, and so does the address book, which lives
+  in that bundle's own realm rather than under the adapter. Chat never writes to
+  it: an RTC peer arrives as an accepted link the signaling already named, not as
+  an address something dialed
   (§12.6, [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)).
 - **The offers app gets a pin, chat's own half of it.** `offer/v1` carries a
   signed bundle for an app that does not exist yet, so something already

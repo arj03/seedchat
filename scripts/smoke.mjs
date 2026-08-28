@@ -150,6 +150,14 @@ const kpA = sodium.crypto_sign_keypair();
 const identityA = { publicKey: kpA.publicKey, privateKey: kpA.privateKey };
 const kpB = sodium.crypto_sign_keypair();
 const identityB = { publicKey: kpB.publicKey, privateKey: kpB.privateKey };
+// WHO each node is on the wire, derived here rather than read back off the adapter. A peer
+// id is the node identity's public key in hex — the host folds exactly this into the
+// transport's LOCAL config — and the adapter stopped carrying a copy when the address book
+// moved into the transport guest's own realm (seedkernel §12.10). Nothing between that
+// guest and a socket deals in peers any more, so the only thing still naming one is a test
+// choosing a destination, and it can say it from the keypair it just made.
+const peerA = toHex(identityA.publicKey);
+const peerB = toHex(identityB.publicKey);
 // A's AUTHOR key set, which is not its node identity: a manifest is signed by both an
 // Ed25519 and an ML-DSA-65 key (seedkernel §12.4), and the author id is the hash over
 // the pair. Through the kernel's own seed→key-set derivation, the same call the browser
@@ -179,14 +187,16 @@ const { shell: B, transport: netB } = await bootShell({
 
 // 1. transport bundle admitted by author pin; the socket driver standing
 try {
-  // The adapter carries the host's half of the network: sockets, the address book,
-  // listeners. `send` is deliberately NOT there — an app sends by calling the local
-  // service name the transport serves (§12.10) — so asserting its absence is asserting
-  // the seam. Nor is the adapter on the SHELL: it is the platform's, and the shell's
+  // The adapter carries the host's half of the network: sockets and listeners, and NOT the
+  // address book, which is the transport guest's own (§12.10). `send` is deliberately not
+  // there either — an app sends by calling the local service name the transport serves
+  // (§12.10) — so asserting its absence is asserting the seam. Nor is the adapter on the SHELL: it is the platform's, and the shell's
   // whole part is having bound the raw-link capability to the bundle just admitted.
   assert(A.transport === undefined, "the shell exposes no transport — the adapter is the platform's");
   assert(A.resolve(NET_PROTO) !== null, `the admitted bundle serves ${NET_PROTO}`);
   assert(netA.openLink === undefined, "the removed per-link injection seam stays absent");
+  assert(netA.peerId === undefined, "the adapter names no peer — identity reaches the guest as LOCAL config");
+  assert(netA.addPeerAddr === undefined, "the address book left the driver for the transport guest");
   assert(typeof netA.linkedPeers === "function", "the adapter answers the transport's peer set");
   assert(netA.send === undefined, "the adapter has no request facade — sending is an app's");
   ok("transport bundle admitted by author pin; the channel adapter has a raw-link owner");
@@ -268,11 +278,11 @@ try {
 // 4. link A and B through the ChannelFactory sinks registered during boot
 try {
   const [chA, chB] = wirePair();
-  channelsA.give(chA, { weDialed: true, expectPeerId: netB.peerId });
+  channelsA.give(chA, { weDialed: true, expectPeerId: peerB });
   channelsB.give(chB);
   await until(async () => {
     const [aPeers, bPeers] = await Promise.all([netA.linkedPeers(), netB.linkedPeers()]);
-    return aPeers.includes(netB.peerId) && bPeers.includes(netA.peerId);
+    return aPeers.includes(peerB) && bPeers.includes(peerA);
   }, 4000, "handshake");
   ok("two transport ends authenticated over the channel seam");
 } catch (err) { fail("transport handshake", err); }
@@ -288,7 +298,7 @@ try {
   // `send` op. Same argument shape the browser shell builds (`sendFrame` in chat-shell.js).
   const proto = new TextEncoder().encode(CHAT_PROTO);
   const arg = new Uint8Array(32 + 1 + proto.length + chatBytes.length);
-  arg.set(netB.peerId ? Buffer.from(netB.peerId, "hex") : new Uint8Array(32), 0);
+  arg.set(identityB.publicKey, 0);
   arg[32] = proto.length;
   arg.set(proto, 33);
   arg.set(chatBytes, 33 + proto.length);
@@ -329,7 +339,7 @@ try {
   const offeredBlob = new TextEncoder().encode("a bundle blob, opaque to the offers app");
   const offerProtoBytes = new TextEncoder().encode(OFFER_PROTO);
   const offerArg = new Uint8Array(32 + 1 + offerProtoBytes.length + offeredBlob.length);
-  offerArg.set(netB.peerId ? Buffer.from(netB.peerId, "hex") : new Uint8Array(32), 0);
+  offerArg.set(identityB.publicKey, 0);
   offerArg[32] = offerProtoBytes.length;
   offerArg.set(offerProtoBytes, 33);
   offerArg.set(offeredBlob, 33 + offerProtoBytes.length);

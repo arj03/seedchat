@@ -204,11 +204,14 @@ const net = new MediaRtcNetwork({
 // WebAssembly-backed module builder, an in-memory freshness store — all defaulted by
 // bootShell — and the channel adapter, which bootShell CONSTRUCTS from the `transport`
 // options (identity taken from the top-level fields, never restated) and returns with
-// the shell. The adapter is the platform's: link ids, sockets and the address book;
-// transport policy belongs to the signed bundle. MediaRtcNetwork is the platform's
-// ChannelFactory, constructed above and passed in as `channels`; bootShell registers its
-// accept sink while starting the transport. Raw-link events then go only to whichever
-// admitted slot owns the `link` binding, and `shell.close()` closes the whole stack.
+// the shell. The adapter is the platform's: link ids and sockets. Transport policy belongs
+// to the signed bundle, and so does the address book — it lives in that bundle's own realm
+// now (§12.10), and chat writes nothing to it, because a peer here arrives as an accepted
+// RTC link the signaling already named rather than as an address to dial.
+// MediaRtcNetwork is the platform's ChannelFactory, constructed above and passed in as
+// `channels`; bootShell registers its accept sink while starting the transport. Raw-link
+// events then go only to whichever admitted slot owns the `link` binding, and
+// `shell.close()` closes the whole stack.
 //
 // `contactSecret` is a GETTER on purpose. TransportHost re-reads it when it announces each
 // platform-chosen RTC channel; same-room RTC links use this node's current room secret at
