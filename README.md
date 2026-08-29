@@ -81,10 +81,11 @@ Three properties serve as the summary; the details live in the kernel docs:
   bytes through `transport-bundle`. The host side — link ids and sockets — is
   `bootShell`'s channel adapter, built around the platform's `RtcNetwork`
   ChannelFactory supplied as `transport.channels`; transport policy and its
-  defaults belong to the signed bundle, and so does the address book, which lives
-  in that bundle's own realm rather than under the adapter. Chat never writes to
-  it: an RTC peer arrives as an accepted link the signaling already named, not as
-  an address something dialed
+  defaults belong to the signed bundle, as do the address book and contact gate,
+  which live in that bundle's own realm rather than under the adapter. Chat rotates
+  the gate with the transport's local `contact` operation before opening signaling;
+  it never writes an address because an RTC peer arrives as an accepted link the
+  signaling already named, not as an address something dialed
   (§12.6, [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)).
 - **The offers app gets a pin, chat's own half of it.** `offer/v1` carries a
   signed bundle for an app that does not exist yet, so something already

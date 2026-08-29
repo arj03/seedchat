@@ -141,13 +141,8 @@ let transport;
 // connections while retaining the one ChannelFactory registered at boot.
 let transportSecret;
 let transportRoomUrl;
-// The room's contact secret (see "Room secret" further down for the sharing UI). Must be
-// initialized before bootShell below references it: its `transport` options' `contactSecret`
-// getter closes over this binding, and the adapter RE-READS the getter every time it opens
-// a link — the accept gate is the current value, delivered per link, not a snapshot the
-// bundle got at install (§12.6.3) — well before the module has run as far as any code that
-// gives `roomSecret` a real value. A `let` declared after that first read is a
-// temporal-dead-zone throw on every accept.
+// The room's contact secret (see "Room secret" further down for the sharing UI).
+// It is applied to the transport guest before signaling starts (§12.6.3).
 let roomSecret = null;
 
 // ─── per-tab Ed25519 identity ──────────────────────────────────────────
@@ -217,10 +212,9 @@ const net = new MediaRtcNetwork({
 // events then go only to whichever admitted slot owns the `link` binding, and
 // `shell.close()` closes the whole stack.
 //
-// `contactSecret` is a GETTER on purpose. TransportHost re-reads it when it announces each
-// platform-chosen RTC channel; same-room RTC links use this node's current room secret at
-// both ends (§12.6.3). A running link is not retroactively re-keyed, which is why changing
-// the room or secret is a sever in joinRtcRoom(), not a transport reload.
+// Contact policy belongs to the signed transport guest. `connectRelay()` rotates its
+// `contact` setting before signaling begins; changing rooms still deliberately severs
+// existing links in `joinRtcRoom()`, without reloading the transport.
 //
 // bootShell loads the kernel-shipped transport bundle under its implicit author pin and
 // starts the ChannelFactory before returning. Connecting to a relay merely announces the
@@ -240,7 +234,6 @@ const booted = await bootShell({
   sodium,
   identity: myKeys,
   transport: {
-    get contactSecret() { return roomSecret ?? undefined; },
     channels: net,
   },
   admit(v, ctx) {
@@ -341,6 +334,15 @@ async function linkedPeers() {
     return out;
   }
   catch { return []; }
+}
+
+/** Rotate the transport guest's inbound contact gate. Empty means open (§12.6.3). */
+async function setTransportContact(secret) {
+  const answer = shell.call(NET_PROTO, new OpArgs("contact")
+    .blob(secret ?? new Uint8Array(0))
+    .build());
+  if (!answer) throw new Error(`nothing claims ${NET_PROTO}`);
+  await answer;
 }
 
 function updatePeerPill(open) {
@@ -1189,10 +1191,10 @@ function pruneNickTold(peers) {
 // the other networking state near the top of the file, not here — see there for why.
 
 // Changing the rendezvous room or contact secret does NOT reload the transport bundle or
-// replace its ChannelFactory. The live getter supplies the current secret when TransportHost
-// announces each platform-chosen RTC channel. A rotation instead severs authenticated links
-// and closes their physical peer connections, leaving the transport guest, factory sink,
-// and signaling adapter standing. Reconnecting to the same room simply sends another hello.
+// replace its ChannelFactory. `connectRelay` rotates the guest-owned gate before signaling.
+// A room change then severs authenticated links and closes their physical peer connections,
+// leaving the transport guest, factory sink, and signaling adapter standing. Reconnecting
+// to the same room simply sends another hello.
 function joinRtcRoom(url) {
   const secret = roomSecret ?? undefined;
   if (transportRoomUrl !== undefined && (transportRoomUrl !== url || transportSecret !== secret)) {
@@ -1415,7 +1417,7 @@ function buildRelayUrl(base, room) {
   return u.toString();
 }
 
-function connectRelay() {
+async function connectRelay() {
   const base = relayUrlInput.value.trim();
   if (!base) { shellPrint("Enter a relay URL.", "err"); return; }
   const room = relayRoomInput.value.trim();
@@ -1430,8 +1432,13 @@ function connectRelay() {
   syncHash();
   updateRoomGateHint();
   const label = room || DEFAULT_ROOM;
-  relayConnection = { base, room, label, url };
-  try { relay.connect(url); }
+  try {
+    // Apply the gate before opening signaling: no platform-chosen RTC channel can
+    // arrive under the previous room's credential.
+    await setTransportContact(roomSecret);
+    relayConnection = { base, room, label, url };
+    relay.connect(url);
+  }
   catch (err) {
     relayStatus.textContent = "error";
     setRelayPill("err", "relay error");
@@ -1547,12 +1554,14 @@ function updateRoomGateHint() {
 // to keep two rooms from colliding; the secret is a full 32 bytes because it is the
 // actual credential and is never guessed at, only pasted. Lowercase hex throughout so
 // both round-trip through case-insensitive copy paths (URLs, chat clients) unchanged.
-relayNewRoomBtn.addEventListener("click", () => {
+relayNewRoomBtn.addEventListener("click", async () => {
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
   relayRoomInput.value = bytesToHex(bytes);
   roomSecret = new Uint8Array(32);
   crypto.getRandomValues(roomSecret);
+  try { await setTransportContact(roomSecret); }
+  catch (err) { shellPrint(`Could not rotate room secret: ${err.message}`, "err"); }
   syncHash();
   updateRoomGateHint();
   shellPrint("New private room + secret minted — use \"Copy invite link\" to share both.", "sys");

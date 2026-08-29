@@ -84,10 +84,8 @@ function admit(v, ctx) {
 function wirePair() {
   const mk = (name, remoteAddr) => ({
     name, remoteAddr, sent: [], dead: false, inFlight: 0, msg: null, cls: null, peer: null,
-    // FRAMING.PLATFORM (socket-seam.ts): one send is one delivery, so the transport
-    // bundle frames nothing — the same thing an RTCDataChannel says, which is what the
-    // browser shell puts under the driver.
-    framing: 0,
+    // One send is one delivery, so `stream` stays absent and the transport bundle
+    // frames nothing — the same shape as an RTCDataChannel.
     send(bytes) {
       if (this.dead) return;
       this.sent.push(Buffer.from(bytes).toString("hex"));
@@ -105,7 +103,7 @@ function wirePair() {
 
 // An accept-only ChannelFactory, matching RtcNetwork's side of the platform seam. The
 // transport registers its sink during boot; a test then hands each end of wirePair to the
-// appropriate host with the same metadata an RtcChannel carries.
+// appropriate host with the same arrival metadata RtcNetwork reports beside a channel.
 class InjectedChannels {
   #onAccept = null;
 
@@ -114,11 +112,9 @@ class InjectedChannels {
     return { port: 0, wsPort: 0 };
   }
 
-  give(channel, { weDialed = false, expectPeerId } = {}) {
+  give(channel, arrival = {}) {
     if (!this.#onAccept) throw new Error("channel factory has no transport sink");
-    channel.weDialed = weDialed;
-    if (expectPeerId) channel.expectPeerId = expectPeerId;
-    this.#onAccept(channel);
+    this.#onAccept(channel, arrival);
   }
 
   close() { this.#onAccept = null; }
@@ -151,6 +147,15 @@ async function peersOf(shell) {
   for (let off = 0; off + 32 <= bytes.length; off += 32) out.push(toHex(bytes.slice(off, off + 32)));
   return out;
 }
+
+/** Set the transport guest's inbound contact gate. Empty means open (§12.6.3). */
+async function setContactSecret(shell, secret) {
+  const answer = shell.call(NET_PROTO, new OpArgs("contact")
+    .blob(secret ?? new Uint8Array(0))
+    .build());
+  if (!answer) throw new Error(`nothing claims ${NET_PROTO}`);
+  await answer;
+}
 // The one string in the kernel's vocabulary chat spells by hand (chat-app.js keeps a
 // no-imports shape) must be the transport bundle's own claim, or the guest calls
 // nothing. The kernel reserves no name for it: the claim is an ordinary LOCAL service
@@ -174,10 +179,10 @@ const identityA = { publicKey: kpA.publicKey, privateKey: kpA.privateKey };
 const kpB = sodium.crypto_sign_keypair();
 const identityB = { publicKey: kpB.publicKey, privateKey: kpB.privateKey };
 // WHO each node is on the wire, derived here rather than read back off the adapter. A peer
-// id is the node identity's public key in hex — the host folds exactly this into the
-// transport's LOCAL config — and the adapter stopped carrying a copy when the address book
-// moved into the transport guest's own realm (seedkernel §12.10). Nothing between that
-// guest and a socket deals in peers any more, so the only thing still naming one is a test
+// id is the node identity's public key in hex — the transport reads it through
+// `node/identity` — and the adapter stopped carrying a copy when the address book moved
+// into the transport guest's own realm (seedkernel §12.10). Nothing between that guest
+// and a socket deals in peers any more, so the only thing still naming one is a test
 // choosing a destination, and it can say it from the keypair it just made.
 const peerA = toHex(identityA.publicKey);
 const peerB = toHex(identityB.publicKey);
@@ -195,20 +200,19 @@ const inbound = { render: null };
 
 // The adapter is bootShell's, exactly as chat-shell.js gets it: the factory exists first
 // and is passed as `transport.channels`; boot loads the pinned transport and registers
-// each factory's accept sink. `contactSecret` stays a live getter, re-read for each channel
-// announcement (§12.6.3), which makes a room rotation a sever rather than a reload.
+// each factory's accept sink. Contact policy is installation-local transport GUEST config.
 const channelsA = new InjectedChannels();
 const channelsB = new InjectedChannels();
 const { shell: A, transport: netA } = await bootShell({
   sodium, identity: identityA,
-  transport: { get contactSecret() { return CONTACT; }, channels: channelsA }, admit,
+  transport: { channels: channelsA, config: { contactSecret: toHex(CONTACT) } }, admit,
 });
 // B keeps no handle on its adapter: the assertions below are about what a driver no
 // longer carries, one node says that once, and everything B is actually asked for — its
 // peer set — goes through its shell like A's does.
 const { shell: B } = await bootShell({
   sodium, identity: identityB,
-  transport: { get contactSecret() { return CONTACT; }, channels: channelsB }, admit,
+  transport: { channels: channelsB, config: { contactSecret: toHex(CONTACT) } }, admit,
 });
 
 // 1. transport bundle admitted by author pin; the socket driver standing
@@ -223,7 +227,7 @@ try {
   assert(A.transport === undefined, "the shell exposes no transport — the adapter is the platform's");
   assert(A.resolve(NET_PROTO) !== null, `the admitted bundle serves ${NET_PROTO}`);
   assert(netA.openLink === undefined, "the removed per-link injection seam stays absent");
-  assert(netA.peerId === undefined, "the adapter names no peer — identity reaches the guest as LOCAL config");
+  assert(netA.peerId === undefined, "the adapter names no peer — the guest asks node/identity");
   assert(netA.addPeerAddr === undefined && netA.addr === undefined,
     "the address book left the driver for the transport guest");
   assert(netA.linkedPeers === undefined && netA.ready === undefined,
@@ -324,6 +328,13 @@ try {
     return aPeers.includes(peerB) && bPeers.includes(peerA);
   }, 4000, "handshake");
   ok("two transport ends authenticated over the channel seam");
+
+  const rotated = new Uint8Array(32).fill(9);
+  await Promise.all([setContactSecret(A, rotated), setContactSecret(B, rotated)]);
+  const [aPeers, bPeers] = await Promise.all([peersOf(A), peersOf(B)]);
+  assert(aPeers.includes(peerB) && bPeers.includes(peerA),
+    "rotating the guest-owned contact gate must preserve existing links");
+  ok("contact secret rotated in the transport guest without a reload");
 } catch (err) { fail("transport handshake", err); }
 
 // 5. dispatch: A's chat app sends a message, B renders it via its bound app's guest
