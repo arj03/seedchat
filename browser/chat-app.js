@@ -31,12 +31,25 @@ export function assertAppId(id) {
  *  transport bundle's own `services` claim. */
 export const NET_PROTO = "_net";
 
-/** The whole authority a chat app holds (§12.2): the network, and nothing else.
+/** The HOST services a chat app holds (`manifest.guest.requires`, §12.2): NONE.
+ *
+ *  Empty is the strongest statement the consent row can make, and it is empty rather
+ *  than one entry long because reaching a peer is not a host service. `requires` is the
+ *  list an operator grants — `node`, `fs`, `link` — and a chat app names none of them;
+ *  the network it does reach is a co-resident guest, which the manifest signs under its
+ *  own list (`CHAT_APP_CALLS`).
+ *
+ *  Authored into every bundle this shell builds, and required of every bundle it
+ *  accepts — see `peekMeta`. */
+export const CHAT_APP_REQUIRES = [];
+
+/** The local service ids a chat app CALLS (`manifest.guest.calls`, §12.10): the network,
+ *  and nothing else.
  *
  *  Naming `_net` is not an indulgence but the whole of how an app sends. The host has
  *  no send: the socket driver holds descriptors and the
  *  transport is a guest that serves the local service name `_net`, so a message reaches
- *  a peer by an app CALLING that id (§12.10). A chat app that could not name `_net`
+ *  a peer by an app CALLING that id. A chat app that could not name `_net`
  *  could receive chat and never send it, and the shell would need a second app of its
  *  own to do the sending — the same authority, one indirection further from the thing
  *  that uses it.
@@ -46,15 +59,13 @@ export const NET_PROTO = "_net";
  *  off that answer through `onInbound` (`LoadBundleOptions.onInbound`, seedkernel
  *  §12.10) — the page's own load, not a second claim the guest has to push through.
  *
- *  It is still the strongest statement the consent row can make, because of what stays
- *  absent: no `node`, no `fs`, no `link`. `_net` carries no privilege either —
- *  an operator is asked who may *be* the network (`link`), not who may talk over it —
- *  and a chat app's own module map is not a grant either (a bare `host.call` name is the
- *  bundle's own code, ungated like `crypto`, seedkernel §12.1).
- *
- *  Authored into every bundle this shell builds, and required of every bundle it
- *  accepts — see `peekMeta`. */
-export const CHAT_APP_REQUIRES = [NET_PROTO];
+ *  A call edge is a separate list from `requires` because it carries no privilege: an
+ *  operator is asked who may *be* the network (`link`), not who may talk over it. It is
+ *  still a name the consent row must read, since an id nobody would recognise is reach
+ *  this shell did not ask for — and it is what tells a bare `host.call` from one of the
+ *  bundle's own modules, which stay ungated like `crypto` (seedkernel §12.1) and appear
+ *  in no signed list at all. */
+export const CHAT_APP_CALLS = [NET_PROTO];
 
 /** The wire protocol every chat app speaks (§12.10) — one id, claimed by every
  *  bundle this shell authors and required of every bundle it accepts.
@@ -164,15 +175,17 @@ async function handle(arg) {
 }
 
 /** Does a verified manifest describe a chat app this shell will run? The demo's apps are
- *  one module driven by the one-entrypoint guest, and — the load-bearing half — they hold
+ *  one module driven by the one-entrypoint guest, and — the load-bearing half — they reach
  *  EXACTLY `_net` and nothing else.
  *
- *  The requires check is not decoration, and it is an equality rather than a subset test
- *  for that reason. An Offer arrives from a peer and is installed on one click of a row
- *  showing a name, a version and an author; the manifest's `guest.requires` are the only
- *  place the bundle's authority is written down, and nothing else on this path reads
- *  them. Without this, a peer could offer an app whose guest holds `node`, `fs` or
- *  `link` and the consent prompt would look exactly the same. */
+ *  The reach check is not decoration, and it is an equality on BOTH signed lists rather
+ *  than a subset test for that reason. An Offer arrives from a peer and is installed on
+ *  one click of a row showing a name, a version and an author; `guest.requires` and
+ *  `guest.calls` are the only places the bundle's reach is written down, and nothing else
+ *  on this path reads them. Checking only the host half would pass an app that calls a
+ *  co-resident guest this shell never heard of; checking only the call half would pass one
+ *  whose guest holds `node`, `fs` or `link`. Either way the consent prompt would look
+ *  exactly the same. */
 export function isChatApp(manifest) {
     if (manifest.modules.length !== 1)
         return false;
@@ -183,7 +196,9 @@ export function isChatApp(manifest) {
     const protocols = manifest.protocols ?? [];
     if (protocols.length !== 1 || protocols[0] !== CHAT_PROTO)
         return false;
-    const requires = manifest.guest.requires;
-    return requires.length === CHAT_APP_REQUIRES.length
-        && requires.every((r) => CHAT_APP_REQUIRES.includes(r));
+    // Absent `calls` ≡ none (seedkernel §12.10), which is a real answer here rather than a
+    // missing field: an app that names no local service reaches no network.
+    const sameSet = (got, want) => got.length === want.length && got.every((n) => want.includes(n));
+    return sameSet(manifest.guest.requires, CHAT_APP_REQUIRES)
+        && sameSet(manifest.guest.calls ?? [], CHAT_APP_CALLS);
 }

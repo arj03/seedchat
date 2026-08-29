@@ -2,15 +2,16 @@
 //
 // `RtcNetwork` (seedkernel `host/net-rtc.ts`, §12.7) is raw I/O only: peer
 // connections, signaling, and one data channel per peer handed to the transport
-// driver. Media is not the runtime's business, so it lives here — a subclass that
-// re-attaches the call feature to the very same `RTCPeerConnection`s the data
-// channel already uses. addTrack triggers `negotiationneeded`, and the offer it
-// produces flows through the kernel's perfect-negotiation path like any other,
-// so a call needs no signaling of its own.
+// host through its ChannelFactory sink. Media is not the runtime's business, so it
+// lives here — a subclass that re-attaches the call feature to the very same
+// `RTCPeerConnection`s the data channel already uses. addTrack triggers
+// `negotiationneeded`, and the offer it produces flows through the kernel's
+// perfect-negotiation path like any other, so a call needs no signaling of its own.
 //
-// The only seam it needs is the one the kernel publishes: the `peers` map (each
-// entry's `pc`) and `ensurePeer`, overridden to wire our per-connection listeners
-// at the moment a peer entry is created.
+// The seams it needs are the ones the kernel publishes: the `peers` map (each entry's
+// `pc`), `ensurePeer`, overridden to wire our per-connection listeners at the moment a
+// peer entry is created, and `forget`, overridden because every teardown path — the
+// kernel's own included — goes through it.
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 
 export class MediaRtcNetwork extends RtcNetwork {
@@ -20,13 +21,17 @@ export class MediaRtcNetwork extends RtcNetwork {
   // peerId -> the senders we created on that peer's pc, so a hang-up can remove
   // exactly what we added. Kept here rather than on the kernel's PeerEntry.
   #callSenders = new Map();
+  #onPeerConnectionClosed;
 
-  /** Same options as RtcNetwork, plus:
-   *  `onTrack(peerId, track)` — a remote peer is sending us media. An app that
-   *  only moves bytes omits it and never sees a track. */
+  /** Same options as RtcNetwork, plus media-only observations:
+   *  `onTrack(peerId, track)` — a remote peer is sending us media;
+   *  `onPeerConnectionClosed(peerId)` — that peer's physical media connection ended.
+   *  Neither callback reports transport authentication; that state belongs to the
+   *  transport guest and is asked of it directly (chat-shell.js `linkedPeers`). */
   constructor(opts) {
     super(opts);
     this.onRemoteTrack = opts.onTrack;
+    this.#onPeerConnectionClosed = opts.onPeerConnectionClosed;
   }
 
   ensurePeer(peerId) {
@@ -36,17 +41,31 @@ export class MediaRtcNetwork extends RtcNetwork {
     // A remote track means the peer is sending us media; hand it to the app.
     e.pc.addEventListener("track", (ev) => this.onRemoteTrack?.(peerId, ev.track));
     e.pc.addEventListener("connectionstatechange", () => {
-      const s = e.pc.connectionState;
-      if (s === "connected") {
-        // Publish any in-progress call tracks to a peer that just finished its
-        // handshake. Doing it here (not at ensurePeer time) keeps clear of the
-        // perfect-negotiation window — the renegotiation offer rides cleanly.
-        this.#addLocalTracksTo(peerId, e);
-      } else if (s === "failed" || s === "closed") {
-        this.#callSenders.delete(peerId);   // the kernel forgets the entry itself
-      }
+      // Publish any in-progress call tracks to a peer that just finished its
+      // handshake. Doing it here (not at ensurePeer time) keeps clear of the
+      // perfect-negotiation window — the renegotiation offer rides cleanly.
+      //
+      // The terminal states are deliberately NOT handled here: the base class turns
+      // them into forget(), which is where the teardown is reported from — see below.
+      if (e.pc.connectionState === "connected") this.#addLocalTracksTo(peerId, e);
     });
     return e;
+  }
+
+  /** Every teardown path funnels through here — the base class calls it for a failed
+   *  connection, for a data channel that closed or errored, and resetPeers() calls it
+   *  directly — which makes it the only honest place to report one. A listener cannot
+   *  do the job: pc.close() sets connectionState to "closed" WITHOUT firing
+   *  connectionstatechange, so everything but a spontaneous "failed" would go unseen
+   *  and the peer's tile would sit on screen for the tab's life. Idempotent, keyed on
+   *  the entry still being present, so the base class's own failed → forget and a
+   *  channel-close → forget racing it report exactly once between them. */
+  forget(peerId) {
+    const had = this.peers.has(peerId);
+    super.forget(peerId);
+    if (!had) return;
+    this.#callSenders.delete(peerId);
+    this.#onPeerConnectionClosed?.(peerId);
   }
 
   /** Publish a local track to every connected peer, and to any peer that connects
@@ -69,6 +88,13 @@ export class MediaRtcNetwork extends RtcNetwork {
       }
       this.#callSenders.delete(peerId);
     }
+  }
+
+  /** Close the room's physical peer connections while retaining this ChannelFactory,
+   *  its signaling adapter, and any local call tracks for peers in the next room. The
+   *  TransportHost severs its own links separately; this method owns only WebRTC state. */
+  resetPeers() {
+    for (const peerId of [...this.peers.keys()]) this.forget(peerId);
   }
 
   /** Kick an ICE restart on every peer. Call on a network-change event (the browser

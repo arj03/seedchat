@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 
 import { loadCrypto } from "seedkernel-wasm";
 import { authorBundle, guestOpFraming, hybridAuthorKeysFromSeed } from "seedkernel-wasm/bundle-author";
-import { assertAppId, chatGuestSource, CHAT_PROTO, CHAT_APP_REQUIRES } from "../browser/chat-app.js";
+import { assertAppId, chatGuestSource, CHAT_PROTO, CHAT_APP_REQUIRES, CHAT_APP_CALLS } from "../browser/chat-app.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
@@ -109,7 +109,11 @@ const { blob, manifest, author } = authorBundle(sodium, keys, {
   protocols: [CHAT_PROTO],
   modules: [{ name: meta.id, wasm: wasmBytes }],
   guestSource,
+  // The two signed reach lists (§12.2, §12.10), kept apart because they are different
+  // decisions: `requires` is the host services an operator grants (a chat app holds
+  // none), `calls` the co-resident guests it may reach (the network, and nothing else).
   guestRequires: CHAT_APP_REQUIRES,
+  guestCalls: CHAT_APP_CALLS,
 });
 
 // Record the new high-water mark beside the key, so the next build counts on from
