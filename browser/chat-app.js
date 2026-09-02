@@ -118,7 +118,7 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *
  *    send argument   `[to 32][protoLen u8][proto][payload]` — the shell's shape, chosen so a
  *                    caller writes what it knows (a peer, a protocol id, a body).
- *    to `_net`       `writeOp("send", [noReply u8][deadline u32][to blob][proto blob][payload blob])`
+ *    to `_net`       `writeOp("send", [noReply u8][to blob][proto blob][payload blob])`
  *                    — the transport's op wire, where a blob is `[len u32][bytes]`. The
  *                    envelope comes from `writeOp` (seedkernel host/op-frame.ts), so
  *                    this guest writes the ARGUMENTS and never the framing. The host prepends
@@ -129,8 +129,9 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *  `noReply` is 1: chat is a broadcast, not a round trip. The frame is handed to the wire
  *  and the call answers `[1]` without waiting for the far end, which is what the shell's
  *  fire-and-forget send is. The choice is written down in the frame rather than implied
- *  by which host method was called. A deadline of 0 means the node's own default, which
- *  is the only place that number should live.
+ *  by which host method was called. There is no deadline field: the kernel carries the
+ *  invocation's own remaining segment across every handoff, so a caller naming its own
+ *  would be minting time (seedkernel §12.3).
  *
  *  Interpolating the id into a string literal is safe because `assertAppId` already held
  *  it to `[A-Za-z0-9_-]`: nothing to escape, no quote to break out of, and no `/`, which
@@ -152,12 +153,11 @@ async function handle(arg) {
       const protoLen = p[32];
       const proto = p.subarray(33, 33 + protoLen);
       const payload = p.subarray(33 + protoLen);
-      // The send op's ARGUMENTS: [noReply u8][deadline u32] then three blobs. The op name
-      // in front is the transport's own envelope - this app writes only its arguments.
-      const args = new Uint8Array(1 + 4 + 4 + 32 + 4 + proto.length + 4 + payload.length);
+      // The send op's ARGUMENTS: [noReply u8] then three blobs. The op name in front is
+      // the transport's own envelope - this app writes only its arguments.
+      const args = new Uint8Array(1 + 4 + 32 + 4 + proto.length + 4 + payload.length);
       let o = 0;
       args[o++] = 1;                   // noReply - a chat frame is not a round trip
-      o += 4;                          // deadline 0 - the node's own default
       const u32 = (v) => { args[o] = v >>> 24; args[o + 1] = (v >>> 16) & 255; args[o + 2] = (v >>> 8) & 255; args[o + 3] = v & 255; o += 4; };
       u32(32); args.set(p.subarray(0, 32), o); o += 32;
       u32(proto.length); args.set(proto, o); o += proto.length;
