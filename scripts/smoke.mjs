@@ -249,7 +249,7 @@ try {
     // A bundle that would BE the network: it reaches the `link` privilege by naming
     // `link` — the whole of what makes a bundle a transport, inbound delivery being
     // that slot's own return convention rather than a second privilege to name (§12.5).
-    // `node` is the one sign pair, scoped to this slot's network key; there is no
+    // `node` is the one sign pair, scoped to this slot's link domain; there is no
     // `link/sign` name anymore. Its `_net` claim is an ordinary local service name —
     // declare it under `services`, never `protocols`, which is what a peer reaches —
     // and even then it is refused purely because an author the transport pin does not
