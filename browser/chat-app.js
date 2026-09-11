@@ -120,7 +120,7 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *                    caller writes what it knows (a peer, a protocol id, a body).
  *    to `_net`       `writeOp("send", [noReply u8][to blob][proto blob][payload blob])`
  *                    — the transport's op wire, where a blob is `[len u32][bytes]`. The
- *                    envelope comes from `writeOp` (seedkernel host/op-frame.ts), so
+ *                    envelope comes from `writeOp` (seedkernel core/op-frame.ts), so
  *                    this guest writes the ARGUMENTS and never the framing. The host prepends
  *                    this app's own 32-byte key as the caller, exactly as it prepends the
  *                    sender's key inbound, so the transport can tell an app's request from the
