@@ -1,7 +1,7 @@
 // Headless smoke test: does chat still work on the kernel it depends on?
 //
 // Replays the boot path browser/chat-shell.js actually runs — the bootShell
-// assembly + its implicit transport-author pin + consent-gated chat install +
+// assembly + its boot-selected transport + consent-gated chat install +
 // protocol dispatch — minus the browser-only WebRTC/DOM. Two shells link through
 // injected ChannelFactory sinks (the shape RtcNetwork implements), a real
 // chat-app-v1.wasm round-trips a message, and the offers app (a second boot bundle,
@@ -23,8 +23,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 // private to the signed transport bundle.
 const { loadCrypto } = await import("seedkernel-wasm");
 const sodium = await loadCrypto();
-// bootShell is the assembly itself (§12.9): platform members defaulted, the transport
-// bundle pinned to its own author, the adapter built from the transport options passed
+// bootShell is the assembly itself (§12.9): platform members defaulted, the selected
+// transport bundle installed at boot, the adapter built from the transport options passed
 // here. The shells' admit is then ONLY the consent gate.
 const { bootShell } = await import("seedkernel-wasm/shell-core");
 // `TRANSPORT_SERVICE` is emitted beside the blob it belongs to, not known to the loader:
@@ -58,21 +58,14 @@ const toHex = (b) => Buffer.from(b).toString("hex");
 
 // ── the chat-shell admit gate, in shape ────────────────────────────────────────
 // ONE admission predicate (§12.5), and the one branch that is actually chat's: the
-// consent gate. The transport author pin is the assembly's half (`bootShell` composes
-// it from the blob itself), so the FORGED-transport check below exercises the pin the
-// browser shell actually runs under rather than a copy of it.
+// consent gate. The transport never reaches it — bootShell installs the selected blob
+// at boot, and ordinary loading cannot acquire `link` — so the FORGED-transport check
+// below exercises the rule the browser shell actually runs under.
 const pendingApprovals = new Set();
-function admit(v, ctx) {
-  // A bundle reaching a privilege is not an app: it would BE the network, and who may
-  // be the network is the pin bootShell ANDed onto this gate — the kernel-shipped
-  // transport author, and no other. Deferring is safe in both directions: the pin
-  // refuses a privilege it does not know rather than inheriting this `true`. Consent
-  // is for apps.
-  if (ctx.privileges.length > 0) return true;
+function admit(v) {
   // The offers boot bundle is pinned to the exact author and app this build produced,
-  // exactly as chat-shell.js pins it and as bootShell pins the transport: bytes the
-  // deployment shipped, loaded before any dialog could run, so there is nothing for a
-  // consent click to decide.
+  // exactly as chat-shell.js pins it: bytes the deployment shipped, loaded before any
+  // dialog could run, so there is nothing for a consent click to decide.
   if (toHex(v.author) === OFFERS_AUTHOR_HEX && v.manifest.app === OFFERS_APP) return true;
   const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
   if (!pendingApprovals.has(bytesHashHex)) return false;
@@ -199,7 +192,7 @@ const CONTACT = new Uint8Array(32).fill(7); // a "room secret" both ends share
 const inbound = { render: null };
 
 // The adapter is bootShell's, exactly as chat-shell.js gets it: the factory exists first
-// and is passed as `transport.channels`; boot loads the pinned transport and registers
+// and is passed as `transport.channels`; boot installs the selected transport and registers
 // each factory's accept sink. Contact policy is installation-local transport GUEST config.
 const channelsA = new InjectedChannels();
 const channelsB = new InjectedChannels();
@@ -215,7 +208,7 @@ const { shell: B } = await bootShell({
   transport: { channels: channelsB, config: { contactSecret: toHex(CONTACT) } }, admit,
 });
 
-// 1. transport bundle admitted by author pin; the socket driver standing
+// 1. transport bundle installed at boot; the socket driver standing
 try {
   // The adapter carries the host's half of the network and nothing else: sockets and
   // listeners, three link events out, and NOTHING peer-shaped — no address book, no
@@ -239,34 +232,33 @@ try {
   assert((await peersOf(A)).length === 0, `${NET_PROTO} answers a host-side call, with no peers yet`);
   assert(A.call("no.such.service", new OpArgs("peers").build()) === null,
     "a claim nothing serves answers null rather than a promise nobody settles");
-  ok("transport bundle admitted by author pin; the channel adapter has a raw-link owner");
+  ok("transport bundle installed at boot; the channel adapter has a raw-link owner");
 } catch (err) { fail("transport bundle admission", err); }
 
-// 2. a FORGED bundle reaching the transport privileges must be refused
+// 2. a FORGED bundle reaching `link` must be refused
 try {
+  // Well-formed and correctly signed, so the refusal below is the link rule's rather than
+  // an integrity failure. It would BE the network by naming `link` — the whole of what
+  // makes a bundle a transport, inbound delivery being that slot's own return convention
+  // (§12.5). Its `_net` claim is an ordinary local service name — declared under
+  // `services`, never `protocols`, which is what a peer reaches.
+  const forgedGuest = new TextEncoder().encode("function handle() { return new Uint8Array(); }");
   const forgedManifest = {
     app: "evil", version: 1, modules: [],
-    // A bundle that would BE the network: it reaches the `link` privilege by naming
-    // `link` — the whole of what makes a bundle a transport, inbound delivery being
-    // that slot's own return convention rather than a second privilege to name (§12.5).
-    // `node` is the one sign pair, scoped to this slot's link domain; there is no
-    // `link/sign` name anymore. Its `_net` claim is an ordinary local service name —
-    // declare it under `services`, never `protocols`, which is what a peer reaches —
-    // and even then it is refused purely because an author the transport pin does not
-    // pin reached a privilege.
     services: ["_net"],
     guest: {
-      hash: "00".repeat(32),
+      hash: toHex(genesisHash(sodium, forgedGuest)),
       requires: ["link", "node", "timer"],
     },
   };
   const env = signManifest(sodium, authorA, forgedManifest);
-  const blob = packBundle({ [MANIFEST_FILE]: env, [GUEST_FILE]: new Uint8Array(0) });
+  const blob = packBundle({ [MANIFEST_FILE]: env, [GUEST_FILE]: forgedGuest });
   await A.loadBundleBlob(blob);
   throw new Error("forged transport bundle was admitted!");
 } catch (err) {
-  if (err.message === "forged transport bundle was admitted!") fail("forged transport refusal", err);
-  else ok("forged transport bundle refused (author pin on link)");
+  // Ordinary loading cannot acquire `link`; only replacing the current link owner can.
+  if (/explicit replacement/.test(err.message)) ok("forged transport bundle refused: ordinary loading cannot acquire link");
+  else fail("forged transport refusal", err);
 }
 
 // 3. build + install a real chat app bundle (the shape scripts/build-app-bundle.mjs
