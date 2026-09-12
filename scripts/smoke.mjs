@@ -253,11 +253,12 @@ try {
   };
   const env = signManifest(sodium, authorA, forgedManifest);
   const blob = packBundle({ [MANIFEST_FILE]: env, [GUEST_FILE]: forgedGuest });
-  await A.loadBundleBlob(blob);
+  await A.install(blob);
   throw new Error("forged transport bundle was admitted!");
 } catch (err) {
-  // Ordinary loading cannot acquire `link`; only replacing the current link owner can.
-  if (/explicit replacement/.test(err.message)) ok("forged transport bundle refused: ordinary loading cannot acquire link");
+  // An install that names no predecessor cannot acquire `link`; only one replacing the
+  // current link owner can.
+  if (/an install replacing/.test(err.message)) ok("forged transport bundle refused: an ordinary install cannot acquire link");
   else fail("forged transport refusal", err);
 }
 
@@ -291,7 +292,7 @@ try {
   const chatBundle = packBundle({ [MANIFEST_FILE]: manifestEnv, [moduleFile("chat")]: chatWasm, [GUEST_FILE]: guestBytes });
   const moduleHash = toHex(genesisHash(sodium, chatWasm));
   pendingApprovals.add(moduleHash);            // auto-approve like addAppFromWasm
-  chatApp = await A.loadBundleBlob(chatBundle);
+  chatApp = await A.install(chatBundle);
   chatKey = chatApp.key;
   // The app's module is private to its slot, so there is no table to ask what landed:
   // a load builds every module or none (§12.4), and what the shell exposes is the claim.
@@ -303,7 +304,7 @@ try {
   pendingApprovals.add(moduleHash);
   // B's view of what its own chat app answered for an inbound frame is this load's own
   // `onInbound` (seedkernel §12.10) — no second name for the guest to push through.
-  await B.loadBundleBlob(chatBundle, {
+  await B.install(chatBundle, {
     onInbound: (claim, from, answer) => { if (answer.length > 0) inbound.render = new Uint8Array(answer); },
   });
   assert(B.resolve(CHAT_PROTO) === chatKey, `B routes "${CHAT_PROTO}" to the app it installed`);
@@ -370,9 +371,9 @@ try {
   // No consent entry for either load: the offers bundle is admitted by the author+app
   // pin in `admit` above, which is the whole difference between a boot bundle and an
   // app a user installs.
-  const aOffers = await A.loadBundleBlob(offersSkbBytes);
+  const aOffers = await A.install(offersSkbBytes);
   const offersInbound = { hash: null };
-  bOffers = await B.loadBundleBlob(offersSkbBytes, {
+  bOffers = await B.install(offersSkbBytes, {
     onInbound: (claim, from, answer) => { if (answer.length > 0) offersInbound.hash = new Uint8Array(answer); },
   });
   assert(A.resolve(OFFER_PROTO) === aOffers.key, `A routes "${OFFER_PROTO}" to the offers app`);

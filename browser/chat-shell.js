@@ -13,7 +13,7 @@ import { bootShell } from "seedkernel-wasm/shell-core";
 // arguments, which is what the host's own door into the network takes (see linkedPeers).
 import { writeOp, OpArgs } from "seedkernel-wasm/op-frame";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
-import { verifyBundle } from "seedkernel-wasm/bundle";
+import { appKeyFor, verifyBundle } from "seedkernel-wasm/bundle";
 import { createRelaySignaling } from "seedrelay";
 // Chat's own code. media-rtc.js is the call feature: the kernel's WebRTC seam is
 // raw I/O, so live audio/video is a subclass of it that lives here.
@@ -269,7 +269,7 @@ transport = booted.transport;
 // record it just wrote and hand it to `handleOffer` (declared further down; a hoisted
 // function declaration, and never actually reached until the app registry below has
 // stood up the state it reads).
-const offersApp = await shell.loadBundleBlob(offersBundleBytes(), {
+const offersApp = await shell.install(offersBundleBytes(), {
   onInbound: (claim, from, answer) => {
     if (answer.length === 0) return; // a duplicate the guest already had — nothing new
     const key = OFFERS_KEY_PREFIX + bytesToHex(answer);
@@ -350,7 +350,7 @@ function updatePeerPill(open) {
 // IS the bundle format — the same bytes seedstore's flagship deployment loads from
 // disk, so a chat app is just a guest that calls its one module and needs no
 // chat-specific install format, domain, or peek/unwrap code. The shell's
-// `loadBundleBlob` (the shared §12.4 loader) authenticates the author's signature
+// `install` (the shared §12.4 loader) authenticates the author's signature
 // over the manifest, which commits to the guest's and module's genesisHash, so the
 // blob survives any number of transitive relays and still authenticates against its
 // original author — exactly the store-and-forward property an Offer needs. The local
@@ -468,55 +468,42 @@ function peekMeta(bundleBytes) {
   };
 }
 
-// Admit a bundle the user has already consented to. Calls the shared
-// §12.4 loadBundleBlob which verifies the manifest signature, checks the
-// admit gate, and installs the module. Returns the UI AppRecord.
+// Admit a bundle the user has already consented to. Calls the shared §12.4 installer,
+// which verifies the manifest signature, checks the admit gate, and stands the slot.
+// Returns the UI AppRecord.
 async function applyAppBundle(bundleBytes) {
   // Pre-peek metadata for the UI record: app_meta, ui, handler name, app key.
   const peeked = peekMeta(bundleBytes);
   if (!peeked) throw new Error("not a valid app bundle");
   const { meta, uiHtml } = await readWasmSections(peeked.wasm);
   if (!meta) throw new Error("bundle module has no app_meta");
+  // The identity this bundle installs under, derived the way the loader derives it
+  // (§12.4) — a fact of the signed manifest, so the page has it BEFORE the install, and
+  // the onInbound closure below just closes over it rather than waiting for a handle to
+  // fill it in.
+  const key = appKeyFor(peeked.authorPk, peeked.app);
 
-  // The protocols this app was serving before the load, so the takeover this install
-  // may have just performed can be named in the log line below. Read here rather than
-  // remembered anywhere: the routing is the shell's projection, and the only thing worth
-  // saying about it is what changed.
-  const heldBefore = new Map(peeked.protocols.map((p) => [p, shell.resolve(p)]));
-
-  // `key` is filled in the moment the load returns, just below — the onInbound closure
-  // only ever runs later, on a real inbound frame, so by then it already has it (the
-  // same pattern the offers app's own boot load uses for its self-referencing closure).
-  let key;
-  const loaded = await shell.loadBundleBlob(bundleBytes, {
+  const loaded = await shell.install(bundleBytes, {
+    // Naming no predecessor takes a FREE identity and refuses a standing one (§12.4), so
+    // an app's own next version — chat v1 → v2, same author and app — says which slot it
+    // retires. The user's app row IS that question, and it is all that separates a first
+    // install here from an upgrade.
+    replaces: installedApps.has(key) ? key : undefined,
     // Protocol routing (seedkernel §12.10): the render bytes ARE this app's own answer
-    // to the frame it just served, and the loader that mounted it receives them right
-    // here, off its own load — no second claim, and no 32-byte comparison against a
-    // caller id. Painting them only when this load's app is the one currently shown in
-    // the iframe is a plain equality against `key` above, because the page already
-    // knows which app THIS load is.
+    // to the frame it just served, and the installer that mounted it receives them right
+    // here, off its own install — no second claim, and no 32-byte comparison against a
+    // caller id. Painting them only when this app is the one currently shown in the
+    // iframe is a plain equality against `key` above, because the page already knows
+    // which app THIS install is.
     onInbound: (claim, from, answer) => {
       if (answer.length > 0 && key === activeAppKey) deliverRender(new Uint8Array(answer));
     },
   });
-  // The load's handle carries the app key with the binding — the same derivation the
-  // loader used, so the registry and the loopback never restate it.
-  key = loaded.key;
-  // Installing IS the routing (§12.10): this bundle's claim points at it. Say so
-  // when it took an id off another installed app — the displaced app is still here and
-  // still intact, just idle, and removing this one hands the protocol straight back.
-  for (const [proto, before] of heldBefore) {
-    if (shell.resolve(proto) === key && before && before !== key) {
-      const prev = installedApps.get(before);
-      shellPrint(`“${proto}” is now served by ${meta.name || peeked.app} ${meta.version || ""}`
-        + (prev ? ` — ${prev.name} ${prev.version} stays installed, idle.` : "."), "sys");
-    }
-  }
 
   const record = {
     id: peeked.app,
     key,
-    /** The load's handle — the one loopback `invoke`, bound to this app's slot. */
+    /** The install's handle — the one loopback `invoke`, bound to this app's slot. */
     invoke: (arg) => loaded.invoke(arg),
     /** The manifest's signed claim (§12.10) — what this app serves when nothing
      *  later has taken the id over. The app row reads it against `shell.resolve`. */
@@ -563,10 +550,11 @@ async function restoreInstalledApps() {
   try { arr = JSON.parse(sessionStorage.getItem(STORE + ".bundles") || "[]"); }
   catch { return; }
   if (!Array.isArray(arr)) return;
-  // Load order is restore order, and that decides who ends up serving `chat` when two
-  // installed apps claim it (§12.10) — the last one wins, here as at install time. So
-  // replaying the bundles in the order they were stored reproduces the routing exactly,
-  // and there is nothing else to restore.
+  // Replaying the bundles in the order they were stored reproduces the routing exactly:
+  // each one lands on its own identity and claims exactly what its manifest names, and a
+  // contest with an already-restored app is refused rather than resolved by order
+  // (§12.10). So there is nothing else to restore, and no order-dependent outcome to
+  // reproduce beyond the list itself.
   for (const raw of arr) {
     try {
       const bundleBytes = new Uint8Array(raw);
