@@ -32,10 +32,9 @@ const { bootShell } = await import("seedkernel-wasm/shell-core");
 // one the host reaches. Chat runs the shipped one, so this is the id chat must agree with.
 const { transportBundleBytes, TRANSPORT_SERVICE } = await import("seedkernel-wasm/transport-bundle");
 const {
-  hybridAuthorId, unpackBundle, verifyManifest, genesisHash,
-  MANIFEST_FILE, GUEST_FILE, moduleFile,
+  hybridAuthorId, verifyBundle, genesisHash,
 } = await import("seedkernel-wasm/bundle");
-const { signManifest, guestOpFraming, hybridAuthorKeysFromSeed, packBundle }
+const { signBundle, guestOpFraming, hybridAuthorKeysFromSeed }
   = await import("seedkernel-wasm/bundle-author");
 // The chat app shape the offline builder authors — same guest source, same authority set.
 const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_APP_CALLS, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO } = await import("../browser/chat-app.js");
@@ -67,7 +66,7 @@ function admit(v) {
   // exactly as chat-shell.js pins it: bytes the deployment shipped, loaded before any
   // dialog could run, so there is nothing for a consent click to decide.
   if (toHex(v.author) === OFFERS_AUTHOR_HEX && v.manifest.app === OFFERS_APP) return true;
-  const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
+  const bytesHashHex = v.modules.length > 0 ? toHex(genesisHash(sodium, v.modules[0].wasm)) : "";
   if (!pendingApprovals.has(bytesHashHex)) return false;
   pendingApprovals.delete(bytesHashHex);
   return true;
@@ -155,7 +154,7 @@ async function setContactSecret(shell, secret) {
 // name (§12.10) — the transport's manifest declares it under `services`, never under
 // `protocols`, so a peer frame naming it is refused by the routing — and the bundle
 // itself is the ground truth.
-const transportManifest = verifyManifest(sodium, unpackBundle(TRANSPORT_BYTES)[MANIFEST_FILE]).manifest;
+const transportManifest = verifyBundle(sodium, TRANSPORT_BYTES).manifest;
 assert((transportManifest.services ?? []).includes(NET_PROTO),
   `chat's net id ${JSON.stringify(NET_PROTO)} must be the transport bundle's services claim`);
 assert(NET_PROTO === TRANSPORT_SERVICE,
@@ -247,12 +246,10 @@ try {
     app: "evil", version: 1, modules: [],
     services: ["_net"],
     guest: {
-      hash: toHex(genesisHash(sodium, forgedGuest)),
       requires: ["link", "node", "timer"],
     },
   };
-  const env = signManifest(sodium, authorA, forgedManifest);
-  const blob = packBundle({ [MANIFEST_FILE]: env, [GUEST_FILE]: forgedGuest });
+  const blob = signBundle(sodium, authorA, forgedManifest, forgedGuest, []);
   await A.install(blob);
   throw new Error("forged transport bundle was admitted!");
 } catch (err) {
@@ -264,7 +261,7 @@ try {
 
 // 3. build + install a real chat app bundle (the shape scripts/build-app-bundle.mjs
 //    now authors offline; this test still assembles its own inline so it exercises
-//    signManifest/packBundle directly rather than shelling out)
+//    signBundle directly rather than shelling out)
 const chatWasm = new Uint8Array(readFileSync(resolve(here, "../build/chat-app-v1.wasm")));
 let chatApp = null;
 let chatKey = "";
@@ -279,17 +276,15 @@ try {
     // The claim (§12.10) — every chat app declares the one chat protocol, and the load
     // is what routes it. Same constant the browser shell signs into its bundles.
     protocols: [CHAT_PROTO],
-    modules: [{ name: "chat", hash: toHex(genesisHash(sodium, chatWasm)) }],
+    modules: [{ name: "chat" }],
     guest: {
-      hash: toHex(genesisHash(sodium, guestBytes)),
       // The two signed reach lists (§12.2, §12.10): no host service at all, and one
       // co-resident guest — the network.
       requires: CHAT_APP_REQUIRES,
       calls: CHAT_APP_CALLS,
     },
   };
-  const manifestEnv = signManifest(sodium, authorA, manifest);
-  const chatBundle = packBundle({ [MANIFEST_FILE]: manifestEnv, [moduleFile("chat")]: chatWasm, [GUEST_FILE]: guestBytes });
+  const chatBundle = signBundle(sodium, authorA, manifest, guestBytes, [chatWasm]);
   const moduleHash = toHex(genesisHash(sodium, chatWasm));
   pendingApprovals.add(moduleHash);            // auto-approve like addAppFromWasm
   chatApp = await A.install(chatBundle);

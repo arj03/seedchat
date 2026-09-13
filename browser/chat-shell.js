@@ -13,7 +13,7 @@ import { bootShell } from "seedkernel-wasm/shell-core";
 // arguments, which is what the host's own door into the network takes (see linkedPeers).
 import { writeOp, OpArgs } from "seedkernel-wasm/op-frame";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
-import { appKeyFor, verifyBundle } from "seedkernel-wasm/bundle";
+import { appKeyFor, verifyBundle, genesisHash } from "seedkernel-wasm/bundle";
 import { createRelaySignaling } from "seedrelay";
 // Chat's own code. media-rtc.js is the call feature: the kernel's WebRTC seam is
 // raw I/O, so live audio/video is a subclass of it that lives here.
@@ -115,7 +115,7 @@ function hexToBytes(hex) {
 shellPrint("Starting the handler table...", "sys");
 // Core libsodium + ML-DSA-65, mixed onto `sodium` before anything below touches
 // it — bootShell's verifyBundle needs the PQ signature half for ANY bundle, and
-// verifyManifest is synchronous, so this can't be lazy (seedkernel's crypto-browser.ts).
+// verifyBundle is synchronous, so this can't be lazy (seedkernel's crypto-browser.ts).
 //
 // This runtime only VERIFIES suite 0x02 bundle envelopes (§12.4, §14.1). Bundle
 // authoring is offline and lives behind seedkernel-wasm/bundle-author, which is not
@@ -244,7 +244,7 @@ const booted = await bootShell({
     // bytes this deployment shipped — there is nothing here for a click to actually
     // decide, the same reasoning that keeps the transport off the consent path.
     if (bytesToHex(v.author) === OFFERS_AUTHOR_HEX && v.manifest.app === OFFERS_APP) return true;
-    const bytesHashHex = v.modules.length > 0 ? v.modules[0].mod.hash : "";
+    const bytesHashHex = v.modules.length > 0 ? bytesToHex(genesisHash(sodium, v.modules[0].wasm)) : "";
     if (!pendingApprovals.has(bytesHashHex)) return false;
     pendingApprovals.delete(bytesHashHex);
     return true;
@@ -441,10 +441,8 @@ async function readWasmSections(wasmBytes) {
 // ── extract metadata from a bundle blob ──────────────────────────────────
 //
 // Read app + module metadata off a bundle for the UI and the approval gate, through
-// the SHARED §12.4 verify path (bundle.ts verifyBundle): one call unpacks the
-// container, verifies the author signature, and checks every module's and the
-// guest's content hash against what the manifest commits to — so a peek here
-// already rejects a signature-valid-but-tampered bundle, not just at install.
+// the shared §12.4 verify path: both signatures authenticate the entire body before
+// its manifest, guest, or modules are read.
 // Returns null on anything malformed, unauthentic, or not the demo's one-module
 // app shape.
 function peekMeta(bundleBytes) {
@@ -463,13 +461,13 @@ function peekMeta(bundleBytes) {
   // (§12.10) — the same manifest read that gates the install answers "and what does it
   // take over", so the UI never re-parses the envelope to find out.
   return {
-    app: v.manifest.app, moduleName: mod.name, moduleHash: mod.hash, wasm, authorPk: v.author,
+    app: v.manifest.app, moduleName: mod.name, moduleHash: bytesToHex(genesisHash(sodium, wasm)), wasm, authorPk: v.author,
     protocols: v.manifest.protocols ?? [],
   };
 }
 
 // Admit a bundle the user has already consented to. Calls the shared §12.4 installer,
-// which verifies the manifest signature, checks the admit gate, and stands the slot.
+// which verifies the bundle signatures, checks the admit gate, and stands the slot.
 // Returns the UI AppRecord.
 async function applyAppBundle(bundleBytes) {
   // Pre-peek metadata for the UI record: app_meta, ui, handler name, app key.
