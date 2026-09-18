@@ -171,8 +171,8 @@ const identityA = { publicKey: kpA.publicKey, privateKey: kpA.privateKey };
 const kpB = sodium.crypto_sign_keypair();
 const identityB = { publicKey: kpB.publicKey, privateKey: kpB.privateKey };
 // WHO each node is on the wire, derived here rather than read back off the adapter. A peer
-// id is the node identity's public key in hex — the transport reads it through
-// `node/identity` — and the adapter stopped carrying a copy when the address book moved
+// id is the node identity's public key in hex — the transport reads it from
+// `HOST.identity` — and the adapter stopped carrying a copy when the address book moved
 // into the transport guest's own realm (seedkernel §12.10). Nothing between that guest
 // and a socket deals in peers any more, so the only thing still naming one is a test
 // choosing a destination, and it can say it from the keypair it just made.
@@ -219,7 +219,7 @@ try {
   assert(A.transport === undefined, "the shell exposes no transport — the adapter is the platform's");
   assert(A.resolve(NET_PROTO) !== null, `the admitted bundle serves ${NET_PROTO}`);
   assert(netA.openLink === undefined, "the removed per-link injection seam stays absent");
-  assert(netA.peerId === undefined, "the adapter names no peer — the guest asks node/identity");
+  assert(netA.peerId === undefined, "the adapter names no peer — the guest reads HOST.identity");
   assert(netA.addPeerAddr === undefined && netA.addr === undefined,
     "the address book left the driver for the transport guest");
   assert(netA.linkedPeers === undefined && netA.ready === undefined,
