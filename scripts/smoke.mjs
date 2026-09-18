@@ -32,7 +32,7 @@ const { bootShell } = await import("seedkernel-wasm/shell-core");
 // one the host reaches. Chat runs the shipped one, so this is the id chat must agree with.
 const { transportBundleBytes, TRANSPORT_SERVICE } = await import("seedkernel-wasm/transport-bundle");
 const {
-  hybridAuthorId, verifyBundle, genesisHash,
+  verifyBundle, genesisHash,
 } = await import("seedkernel-wasm/bundle");
 const { signBundle, guestOpFraming, hybridAuthorKeysFromSeed }
   = await import("seedkernel-wasm/bundle-author");
@@ -288,7 +288,7 @@ try {
   const moduleHash = toHex(genesisHash(sodium, chatWasm));
   pendingApprovals.add(moduleHash);            // auto-approve like addAppFromWasm
   chatApp = await A.install(chatBundle);
-  chatKey = chatApp.key;
+  chatKey = chatApp.manifest.app;
   // The app's module is private to its slot, so there is no table to ask what landed:
   // a load builds every module or none (§12.4), and what the shell exposes is the claim.
   assert(A.resolve(CHAT_PROTO) === chatKey, `A routes "${CHAT_PROTO}" to the app it installed`);
@@ -303,7 +303,7 @@ try {
     onInbound: (claim, from, answer) => { if (answer.length > 0) inbound.render = new Uint8Array(answer); },
   });
   assert(B.resolve(CHAT_PROTO) === chatKey, `B routes "${CHAT_PROTO}" to the app it installed`);
-  ok(`chat app installed on both shells under ${chatKey.slice(0, 24)}…`);
+  ok(`chat app installed on both shells under '${chatKey}'`);
 } catch (err) { fail("chat app install", err); }
 
 // 4. link A and B through the ChannelFactory sinks registered during boot
@@ -371,8 +371,8 @@ try {
   bOffers = await B.install(offersSkbBytes, {
     onInbound: (claim, from, answer) => { if (answer.length > 0) offersInbound.hash = new Uint8Array(answer); },
   });
-  assert(A.resolve(OFFER_PROTO) === aOffers.key, `A routes "${OFFER_PROTO}" to the offers app`);
-  assert(B.resolve(OFFER_PROTO) === bOffers.key, `B routes "${OFFER_PROTO}" to the offers app`);
+  assert(A.resolve(OFFER_PROTO) === aOffers.manifest.app, `A routes "${OFFER_PROTO}" to the offers app`);
+  assert(B.resolve(OFFER_PROTO) === bOffers.manifest.app, `B routes "${OFFER_PROTO}" to the offers app`);
 
   const offeredBlob = new TextEncoder().encode("a bundle blob, opaque to the offers app");
   const offerProtoBytes = new TextEncoder().encode(OFFER_PROTO);
@@ -397,20 +397,7 @@ try {
   ok(`offer end-to-end: A's chat app → offer/v1 → B's offers app's guest → fs record ${OFFERS_KEY_PREFIX}${hex.slice(0, 12)}…`);
 } catch (err) { fail("offer end-to-end", err); }
 
-// 7. the appKey derivation chat uses for its registry. It leads with the AUTHOR ID —
-// the hash over the signing key set, not A's node key — which is what the app actually
-// landed under above.
-try {
-  const authorId = hybridAuthorId(sodium, authorA.ed.publicKey, authorA.mlDsa.publicKey);
-  // The app key the load bound under is `<author hex>:<app>` (§5.1) — the shape the
-  // handle carries, which this test pins rather than re-derives.
-  const key = toHex(authorId) + ":chat";
-  assert(key === chatKey, "the handle's key is the load's own derivation");
-  assert(chatKey.startsWith(toHex(authorId).slice(0, 8)), "appKey shape");
-  ok("app key shape");
-} catch (err) { fail("app key", err); }
-
-// 8. the shape gate an Offer passes through (peekMeta → isChatApp). A peer's bundle
+// 7. the shape gate an Offer passes through (peekMeta → isChatApp). A peer's bundle
 // is installed on one click of a row showing a name and an author, so the reach it
 // declares is the whole of what that click grants — and a chat app's is exactly one
 // local name, `_net`: the network it must reach to be a chat app at all, and no host

@@ -13,7 +13,7 @@ import { bootShell } from "seedkernel-wasm/shell-core";
 // arguments, which is what the host's own door into the network takes (see linkedPeers).
 import { writeOp, OpArgs } from "seedkernel-wasm/op-frame";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
-import { appKeyFor, verifyBundle, genesisHash } from "seedkernel-wasm/bundle";
+import { verifyBundle, genesisHash } from "seedkernel-wasm/bundle";
 import { createRelaySignaling } from "seedrelay";
 // Chat's own code. media-rtc.js is the call feature: the kernel's WebRTC seam is
 // raw I/O, so live audio/video is a subclass of it that lives here.
@@ -358,10 +358,9 @@ function updatePeerPill(open) {
 //
 // The module's WASM carries two embedded custom sections the runtime ignores but
 // this shell reads: "app_meta" (JSON — id, name, version) and "ui" (HTML rendered
-// in the sandboxed iframe). The signed manifest's `app` is the id; the load's
-// handle carries the key the app landed under — `<author hex>:<app>` (§5.1) — so
-// the registry binds the module's record to the same derivation the loader used,
-// with no second copy of it here.
+// in the sandboxed iframe). The signed manifest's `app` is the id, and it is also the
+// key the app lands under (seedkernel §12.4): one slot per label on a node, whoever
+// authored it.
 //
 // The key is node-local. Two peers need not agree on it: a CHAT frame carries a
 // *protocol id*, and each side resolves that to whichever app it installed that claims
@@ -381,18 +380,18 @@ function updatePeerPill(open) {
 // signed bundle blob — the author's manifest signature intact — and is what every
 // "Offer" hands to a peer). Apps received via Offer keep the original author's
 // manifest signature: we never re-sign a bundle.
-// Keyed by APP KEY — `"<author hex>:<app>"` (§12.4), the same key the loader's freshness
-// marks use. Not by the bare app id: two authors may both ship a "chat", and under
-// derived names (§5.1) they coexist rather than contend, so the id alone is not an
-// identity. `rec.id` remains the display/manifest name.
-const installedApps = new Map();   // appKey → AppRecord
+// Keyed by the app label — the key the kernel installs a slot under (§12.4). A node
+// holds one slot per label, so two authors' "chat" apps contend for it: the second
+// lands only by replacing the first.
+const installedApps = new Map();   // app label → AppRecord
 let activeAppKey = null;
 
 // Protocol routing (§12.10) — there is no table here and no bind button. Every chat
 // bundle's manifest CLAIMS the chat protocol (CHAT_PROTO, chat-app.js), and the load
 // that admits it is what routes the id to it: installing an app is what makes it the
-// one this node chats with, and installing another takes the id over. `shell.resolve`
-// answers who holds it; the Apps panel below reads that rather than storing anything.
+// one this node chats with, and a claim has one holder, so another chat app lands only
+// by replacing it. `shell.resolve` answers who holds it; the Apps panel below reads that
+// rather than storing anything.
 
 const STORE = "apps.v2";
 
@@ -470,23 +469,31 @@ function peekMeta(bundleBytes) {
 // which verifies the bundle signatures, checks the admit gate, and stands the slot.
 // Returns the UI AppRecord.
 async function applyAppBundle(bundleBytes) {
-  // Pre-peek metadata for the UI record: app_meta, ui, handler name, app key.
+  // Pre-peek metadata for the UI record: app_meta, ui, handler name, app label.
   const peeked = peekMeta(bundleBytes);
   if (!peeked) throw new Error("not a valid app bundle");
   const { meta, uiHtml } = await readWasmSections(peeked.wasm);
   if (!meta) throw new Error("bundle module has no app_meta");
-  // The identity this bundle installs under, derived the way the loader derives it
-  // (§12.4) — a fact of the signed manifest, so the page has it BEFORE the install, and
-  // the onInbound closure below just closes over it rather than waiting for a handle to
-  // fill it in.
-  const key = appKeyFor(peeked.authorPk, peeked.app);
+  // The label this bundle installs under (§12.4) — a fact of the signed manifest, so the
+  // page has it BEFORE the install, and the onInbound closure below just closes over it
+  // rather than waiting for a handle to fill it in.
+  const key = peeked.app;
+  // Taking a standing label over takes its data and signing scope with it. The app's own
+  // author shipping its next version is the one-click upgrade; a different author's
+  // bundle under the same label is asked about by name.
+  const standing = installedApps.get(key);
+  if (standing && bytesToHex(standing.authorPk) !== bytesToHex(peeked.authorPk)
+      && !confirm(`Replace ${standing.name} ${standing.version} with ${meta.name || peeked.app} ${meta.version || ""} ` +
+        `by a different author (${bytesToHex(peeked.authorPk).slice(0, 12)}…)?`)) {
+    throw new Error("replacing an app from a different author was declined");
+  }
 
   const loaded = await shell.install(bundleBytes, {
-    // Naming no predecessor takes a FREE identity and refuses a standing one (§12.4), so
-    // an app's own next version — chat v1 → v2, same author and app — says which slot it
-    // retires. The user's app row IS that question, and it is all that separates a first
-    // install here from an upgrade.
-    replaces: installedApps.has(key) ? key : undefined,
+    // Naming no predecessor takes a FREE label and refuses a standing one (§12.4), so a
+    // bundle under a label already here — chat v1 → v2, or another author's chat — says
+    // which slot it retires. The user's app row IS that question, and it is all that
+    // separates a first install here from an upgrade.
+    replaces: standing ? key : undefined,
     // Protocol routing (seedkernel §12.10): the render bytes ARE this app's own answer
     // to the frame it just served, and the installer that mounted it receives them right
     // here, off its own install — no second claim, and no 32-byte comparison against a
@@ -549,7 +556,7 @@ async function restoreInstalledApps() {
   catch { return; }
   if (!Array.isArray(arr)) return;
   // Replaying the bundles in the order they were stored reproduces the routing exactly:
-  // each one lands on its own identity and claims exactly what its manifest names, and a
+  // each one lands on its own label and claims exactly what its manifest names, and a
   // contest with an already-restored app is refused rather than resolved by order
   // (§12.10). So there is nothing else to restore, and no order-dependent outcome to
   // reproduce beyond the list itself.
@@ -867,10 +874,9 @@ function buildAppRow(rec) {
 
   // What this app SERVES (§12.10) — read, never set. The protocols are the manifest's
   // signed claim and the routing is the projection of every installed manifest, so this
-  // row has nothing to offer the user but the truth: which ids this bundle claimed, and
-  // for each, whether this app is the one holding it. A claim it does not hold means a
-  // later-installed app took the id over — the app stays installed and intact, and gets
-  // it back the moment that one is removed, which is the whole of "rebinding".
+  // row has nothing to offer the user but the truth: which ids this bundle claimed. An
+  // installed app holds every one of them, because a claim changes hands only with the
+  // slot.
   const protos = document.createElement("div");
   protos.className = "app-row-meta";
   const claimed = rec.protocols;
@@ -880,15 +886,12 @@ function buildAppRow(rec) {
     protos.appendChild(none);
   }
   for (const proto of claimed) {
-    const serving = shell.resolve(proto) === rec.key;
     const span = document.createElement("span");
     span.className = "app-row-proto";
     const b = document.createElement("b");
-    b.textContent = serving ? "serves" : "claims";
+    b.textContent = "serves";
     span.appendChild(b);
-    const holder = serving ? null : installedApps.get(shell.resolve(proto));
-    span.appendChild(document.createTextNode(
-      ` “${proto}”` + (serving ? "" : ` — taken over by ${holder ? `${holder.name} ${holder.version}` : "another app"}`)));
+    span.appendChild(document.createTextNode(` “${proto}”`));
     protos.appendChild(span);
   }
   li.appendChild(protos);
@@ -926,8 +929,8 @@ function removeApp(key) {
   const rec = installedApps.get(key);
   if (!rec) return;
   if (!confirm(`Remove ${rec.name} ${rec.version}? The kernel handler will be uninstalled.`)) return;
-  // Revocation (§12.5): uninstall removes every kernel handler derived from the app key,
-  // drops the protocols it claimed, and disposes the guest realm if this was the loaded app.
+  // Revocation (§12.5): uninstall drops the slot this label names — the protocols it
+  // claimed and its guest realm.
   shell.uninstall(key);
   installedApps.delete(key);
   if (activeAppKey === key) unmountActiveApp();

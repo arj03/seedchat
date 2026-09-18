@@ -77,9 +77,10 @@ export const CHAT_APP_CALLS = [NET_PROTO];
  *  claimed its own id would be a chat app nobody else could talk to.
  *
  *  Claiming it is what routes it: the load that admits a chat bundle makes it this
- *  node's `chat` app, and installing another one takes the id over (§12.10) — which
- *  is exactly the swap this demo exists to show, and is why the Apps panel reads the
- *  claim off the manifest instead of offering a bind button. */
+ *  node's `chat` app, and the claim has one holder, so another chat app lands only by
+ *  replacing it under the same label (§12.10) — which is exactly the swap this demo
+ *  exists to show, and is why the Apps panel reads the claim off the manifest instead
+ *  of offering a bind button. */
 export const CHAT_PROTO = "chat";
 
 /** The chat guest's LOCAL op names — its one-vocabulary fold (seedkernel §12.2). A chat

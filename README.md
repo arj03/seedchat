@@ -168,8 +168,10 @@ A chat frame carries a *protocol id*, not an app name. Every chat app's signed
 manifest claims the one id `chat` (`CHAT_PROTO`, `browser/chat-app.js`), and
 installing an app is what routes it — so two peers running different authors'
 chat apps interoperate as long as both speak the protocol, and neither had to
-point anything at anything. Installing a second chat app therefore **takes
-`chat` over**: accept a peer's Offer and their app becomes the one this node
-chats with. The displaced app stays installed and intact — the Apps panel shows
-it as *claims “chat” — taken over by …* — and gets the protocol back the moment
-the newcomer is removed. That is the whole of rebinding (§12.10).
+point anything at anything. A claim has one holder, so a node runs one chat app
+at a time. A second one under the same `app` label **replaces** the first:
+accept a peer's Offer and their app becomes the one this node chats with. The
+author's own next version upgrades in one click; a different author's app asks
+first, because it takes over the label's data and signing scope along with the
+slot (seedkernel §12.4). One under a different label is refused while the first
+holds `chat` — remove the first to install it.
