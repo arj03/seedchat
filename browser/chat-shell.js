@@ -448,8 +448,8 @@ function peekMeta(bundleBytes) {
   let v;
   try { v = verifyBundle(sodium, bundleBytes); }
   catch { return null; }
-  // One module, and a guest holding no authority at all (chat-app.js). The
-  // requires half is what keeps an Offer from installing authority behind a consent
+  // One module, and a guest reaching the network and nothing else (chat-app.js). The
+  // requires check is what keeps an Offer from installing authority behind a consent
   // row that only shows a name: `guest.requires` is where a bundle's reach is
   // written down, and this is the one place on the install path that reads it.
   if (!isChatApp(v.manifest)) return null;

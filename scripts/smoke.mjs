@@ -37,7 +37,7 @@ const {
 const { signBundle, guestOpFraming, hybridAuthorKeysFromSeed }
   = await import("seedkernel-wasm/bundle-author");
 // The chat app shape the offline builder authors — same guest source, same authority set.
-const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_APP_CALLS, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO } = await import("../browser/chat-app.js");
+const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO } = await import("../browser/chat-app.js");
 // The offers app shape — same guest source scripts/build-offers-bundle.mjs signs into
 // bundle/offers.skb, read directly off disk below like chat-app-v1.wasm already is.
 const { OFFER_PROTO, OFFERS_KEY_PREFIX } = await import("../browser/offers-app.js");
@@ -278,10 +278,9 @@ try {
     protocols: [CHAT_PROTO],
     modules: [{ name: "chat" }],
     guest: {
-      // The two signed reach lists (§12.2, §12.10): no host service at all, and one
-      // co-resident guest — the network.
+      // The signed reach (§12.2, §12.10): no host service at all, and one co-resident
+      // guest — the network.
       requires: CHAT_APP_REQUIRES,
-      calls: CHAT_APP_CALLS,
     },
   };
   const chatBundle = signBundle(sodium, authorA, manifest, guestBytes, [chatWasm]);
@@ -401,25 +400,22 @@ try {
 // is installed on one click of a row showing a name and an author, so the reach it
 // declares is the whole of what that click grants — and a chat app's is exactly one
 // local name, `_net`: the network it must reach to be a chat app at all, and no host
-// service whatsoever. Two signed lists now, so the gate is checked on both.
+// service whatsoever.
 try {
-  const chatManifest = (requires, calls, modules, protocols) => ({
+  const chatManifest = (requires, modules, protocols) => ({
     app: "chat", version: 1,
     protocols: protocols ?? [CHAT_PROTO],
     modules: modules ?? [{ name: "chat", hash: "aa" }],
-    guest: { hash: "bb", requires, ...(calls === undefined ? {} : { calls }) },
+    guest: { hash: "bb", requires },
   });
   const shape = (over = {}) => chatManifest(
-    over.requires ?? CHAT_APP_REQUIRES, over.calls ?? CHAT_APP_CALLS, over.modules, over.protocols);
+    over.requires ?? CHAT_APP_REQUIRES, over.modules, over.protocols);
   assert(isChatApp(shape()), "the shell's own app shape is accepted");
-  assert(!isChatApp(shape({ requires: ["fs"] })), "an offered app claiming fs beside the network is refused");
-  assert(!isChatApp(shape({ requires: ["node"] })), "an offered app claiming a signing oracle is refused");
-  assert(!isChatApp(shape({ requires: ["link"] })), "an offered app reaching for sockets is refused");
-  assert(!isChatApp(shape({ calls: [] })), "an app that cannot reach the network is refused");
-  // `calls` absent ≡ none (§12.10), which is the same refusal as an empty list — the
-  // gate must not read a missing field as "whatever the default is".
-  assert(!isChatApp(chatManifest(CHAT_APP_REQUIRES, undefined)), "an app declaring no calls at all is refused");
-  assert(!isChatApp(shape({ calls: [...CHAT_APP_CALLS, "_store"] })), "an app calling a second guest beside the network is refused");
+  assert(!isChatApp(shape({ requires: [...CHAT_APP_REQUIRES, "fs"] })), "an offered app claiming fs beside the network is refused");
+  assert(!isChatApp(shape({ requires: [...CHAT_APP_REQUIRES, "node"] })), "an offered app claiming a signing oracle is refused");
+  assert(!isChatApp(shape({ requires: [...CHAT_APP_REQUIRES, "link"] })), "an offered app reaching for sockets is refused");
+  assert(!isChatApp(shape({ requires: [] })), "an app that cannot reach the network is refused");
+  assert(!isChatApp(shape({ requires: [...CHAT_APP_REQUIRES, "_store"] })), "an app calling a second guest beside the network is refused");
   assert(!isChatApp(shape({ modules: [] })), "a no-module app is refused");
   // The claim is part of what one click grants (§12.10): installing an offered
   // bundle routes every id it claims to it, so a bundle claiming something other than

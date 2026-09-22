@@ -34,7 +34,7 @@ routing, signed bundles, the channel handshake — are documented in seedkernel:
 | `assembly/chat-app-v1/` | v1 handler — text only. `index.ts` is the pure transform, `ui.html` is the iframe UI embedded into the module as a custom section. |
 | `assembly/chat-app-v2/` | v2 handler — text + image + nick. Same shape; upgrading v1→v2 is a re-admit at the same name under the same key. |
 | `browser/chat-shell.*` | The browser shell: identity, admission policy, the transport-bundle and offers-bundle boot loads, a WebRTC mesh, the sandboxed iframe. The inline import map in `chat-shell.html` names the seedkernel surface. |
-| `browser/chat-app.js` | The chat app *shape*, in one place: the guest's source, the `chat` protocol id grammar, and its reach — no host service at all (`guest.requires` is empty) and one co-resident guest, the network (`guest.calls` is `_net`). The shell authors bundles from it and gates received Offers against it; `scripts/smoke.mjs` imports the same file. |
+| `browser/chat-app.js` | The chat app *shape*, in one place: the guest's source, the `chat` protocol id grammar, and its reach — no host service at all and one co-resident guest, the network (`guest.requires` is exactly `_net`). The shell authors bundles from it and gates received Offers against it; `scripts/smoke.mjs` imports the same file. |
 | `browser/offers-app.js` | The offers app *shape*: the `offer/v1` id, the app id `offers`, its one-service authority (`fs` — a host service, so it really is a `guest.requires` entry), and its guest source — a keyspace and a claim, no module. `scripts/build-offers-bundle.mjs` signs it into the boot bundle. |
 | `browser/media-rtc.js` | The call feature: `MediaRtcNetwork`, a subclass of seedkernel's `RtcNetwork` that publishes camera/mic over the peer connections the data channel already uses. Live media is chat's own — the host's seam is raw I/O only. |
 | `scripts/embed-ui.mjs` | Appends a `ui` custom section to a built `.wasm`. |
@@ -145,11 +145,11 @@ how you upgrade it. Peers hand each other the same bundles in an `OFFER` frame;
 the recipient re-verifies the original author's manifest signature. An Offer is
 installed on one click, so the recipient also checks its *shape* before showing
 that click: one module, and a guest whose reach is exactly `_net` and nothing
-else. A signature says who wrote a bundle, not what it may reach — two signed
-lists are where that is written down, `guest.requires` for the host services an
-operator grants (a chat app holds none) and `guest.calls` for the co-resident
-guests it may reach (the network, and only that) — and this shell checks both,
-so it will not install an app claiming reach it did not ask for.
+else. A signature says who wrote a bundle, not what it may reach — the signed
+`guest.requires` list is where that is written down, host services and
+co-resident guests alike (a chat app names no host service, and the network
+and only that) — and this shell checks it exactly, so it will not install an
+app claiming reach it did not ask for.
 
 Anyone wanting to install a custom app builds their own `.skb` with
 `scripts/build-app-bundle.mjs` — there is no per-browser-session self-signing
