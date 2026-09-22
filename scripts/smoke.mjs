@@ -255,7 +255,7 @@ try {
 } catch (err) {
   // An install that names no predecessor cannot acquire `link`; only one replacing the
   // current link owner can.
-  if (/an install replacing/.test(err.message)) ok("forged transport bundle refused: an ordinary install cannot acquire link");
+  if (/claim 'link' is already held/.test(err.message)) ok("forged transport bundle refused: an ordinary install cannot acquire link");
   else fail("forged transport refusal", err);
 }
 
@@ -309,7 +309,7 @@ try {
 // 4. link A and B through the ChannelFactory sinks registered during boot
 try {
   const [chA, chB] = wirePair();
-  channelsA.give(chA, { weDialed: true, expectPeerId: peerB });
+  channelsA.give(chA, { dialed: peerB });
   channelsB.give(chB);
   await until(async () => {
     const [aPeers, bPeers] = await Promise.all([peersOf(A), peersOf(B)]);
