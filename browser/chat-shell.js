@@ -1,8 +1,8 @@
-// The kernel is a dependency, not a sibling directory. Every specifier below is
+// seedkernel is a dependency, not a sibling directory. Every specifier below is
 // a *published* entry point of seedkernel-wasm (its package.json "exports"), so
-// this file can only reach what the kernel has deliberately made public — the
+// this file can only reach what seedkernel has deliberately made public — the
 // import map in chat-shell.html resolves them to the vendored build. If a future
-// kernel change breaks chat, it broke a public export, which is the point.
+// seedkernel change breaks chat, it broke a public export, which is the point.
 import sodium from "seedkernel-wasm/libsodium";
 // bootShell is the assembly itself (§12.9): platform members defaulted, the
 // transport bundle pinned to its own author, the channel adapter built from the
@@ -15,7 +15,7 @@ import { writeOp, OpArgs } from "seedkernel-wasm/op-frame";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { verifyBundle, genesisHash } from "seedkernel-wasm/bundle";
 import { createRelaySignaling } from "seedrelay";
-// Chat's own code. media-rtc.js is the call feature: the kernel's WebRTC seam is
+// Chat's own code. media-rtc.js is the call feature: seedkernel's WebRTC seam is
 // raw I/O, so live audio/video is a subclass of it that lives here.
 import { MediaRtcNetwork } from "./media-rtc.js";
 import { isChatApp, CHAT_OP_SEND, CHAT_OP_RENDER, NET_PROTO } from "./chat-app.js";
@@ -122,7 +122,7 @@ shellPrint("Starting the handler table...", "sys");
 // shipped in the browser runtime tree.
 await loadCrypto(sodium, new URL("./vendor/", import.meta.url));
 
-// The shell (kernel host + admission policy + bundle loader) is assembled once the
+// The host (its shell, admission policy and `install`) is assembled once the
 // identity exists — see the boot sequence below. It is declared here because handlers
 // defined above reach it through `shell`.
 //
@@ -216,7 +216,7 @@ const net = new MediaRtcNetwork({
 // `contact` setting before signaling begins; changing rooms still deliberately severs
 // existing links in `joinRtcRoom()`, without reloading the transport.
 //
-// bootShell installs the kernel-shipped transport bundle at boot and
+// bootShell installs the seedkernel-shipped transport bundle at boot and
 // starts the ChannelFactory before returning. Connecting to a relay merely announces the
 // already-standing node into a signaling room.
 //
@@ -283,7 +283,7 @@ const offersApp = await shell.install(offersBundleBytes(), {
 // ─── channel identity ──────────────────────────────────────────────────
 //
 // Transport identity is the transport bundle's job. Each data channel runs its
-// in-channel HELLO/AUTH challenge (§12.6), proving the far end holds the kernel
+// in-channel HELLO/AUTH challenge (§12.6), proving the far end holds the node
 // private key for the pubkey it claims — a continuous channel binding, which
 // subsumes both SDP a=fingerprint signing and any per-message signature.
 // Frames the driver hands us are already attributed to an authenticated peer, so
@@ -313,7 +313,7 @@ function setRelayPill(state, label) {
 // The linked set is the TRANSPORT GUEST's answer: links are its own, so asking costs a
 // round trip through its realm and this is async. The page asks through `shell.call` — the
 // host's door into a co-resident guest's `services` claim (seedkernel §12.10), the same one
-// the kernel's CLI uses for a cohort — and composes the op with the kernel's own `OpArgs`,
+// seedkernel's CLI uses for a cohort — and composes the op with seedkernel's own `OpArgs`,
 // so the argument writer and the transport's reader move in one artifact. `null` is "nothing
 // claims that id": a node with no transport standing, which is no peers rather than an
 // error, exactly like a rejection from a realm that is going down.
@@ -350,7 +350,7 @@ function updatePeerPill(open) {
 // IS the bundle format — the same bytes seedstore's flagship deployment loads from
 // disk, so a chat app is just a guest that calls its one module and needs no
 // chat-specific install format, domain, or peek/unwrap code. The shell's
-// `install` (the shared §12.4 loader) authenticates the author's signature
+// `install` (the shared install path) authenticates the author's signature
 // over the manifest, which commits to the guest's and module's genesisHash, so the
 // blob survives any number of transitive relays and still authenticates against its
 // original author — exactly the store-and-forward property an Offer needs. The local
@@ -369,7 +369,7 @@ function updatePeerPill(open) {
 //
 // An app's module is a PURE TRANSFORM: the guest hands it `senderPk ‖ chatType ‖
 // body` and it returns the render bytes for the iframe. The guest — not the WASM
-// and not the kernel — does all the I/O: the shell authenticates the sender via the
+// and not the host — does all the I/O: the host authenticates the sender via the
 // AKE channel, invokes the app's guest `handle` entrypoint (the same seam a
 // local `invoke` takes), and the guest drives its module by naming it on the
 // same seam (§12.2). Inbound delivery and local echo both cross the guest, so
@@ -380,7 +380,7 @@ function updatePeerPill(open) {
 // signed bundle blob — the author's manifest signature intact — and is what every
 // "Offer" hands to a peer). Apps received via Offer keep the original author's
 // manifest signature: we never re-sign a bundle.
-// Keyed by the app label — the key the kernel installs a slot under (§12.4). A node
+// Keyed by the app label — the key the host installs a slot under (§12.4). A node
 // holds one slot per label, so two authors' "chat" apps contend for it: the second
 // lands only by replacing the first.
 const installedApps = new Map();   // app label → AppRecord
@@ -532,7 +532,7 @@ async function applyAppBundle(bundleBytes) {
 
 // ── persistence ────────────────────────────────────────────────────────
 // The packed bundle is the only piece of app state we need — the
-// handler in the kernel and the uiHtml both derive from it. We keep them in sessionStorage so a reload
+// installed app and the uiHtml both derive from it. We keep them in sessionStorage so a reload
 // within the same tab keeps the user's app set and lets transitive offers
 // continue to work.
 function persistInstalledApps() {
@@ -691,7 +691,7 @@ async function acceptOffer(recordKey) {
     const rec = await applyAppBundle(offer.bundleBytes);
     pendingOffers.delete(recordKey);
     // The page holds the offers slot's host-side scoped fs view, so it deletes the
-    // record directly — the guest never needed a delete capability of its own.
+    // record directly — the guest never needed a delete grant of its own.
     offersApp.fs.delete(recordKey).catch(() => {});
     renderOfferList();
     shellPrint(`Installed ${rec.name} ${rec.version} from offer.`, "sys");
@@ -724,7 +724,7 @@ function dismissOffer(recordKey) {
 // installed here.
 /** One local op into `rec`'s app: the record's handle loops back through `handle`,
  *  with the host's caller id in front of THIS app's own op framing - composed by the
- *  kernel's op-frame (content, not host-seam metadata) and never read by it. The op NAME is
+ *  seedkernel's op-frame (content, not host-seam metadata) and never read by it. The op NAME is
  *  the app's vocabulary. */
 function appInvoke(rec, op, arg) {
   return rec.invoke(writeOp(op, arg));
@@ -928,7 +928,7 @@ function buildAppRow(rec) {
 function removeApp(key) {
   const rec = installedApps.get(key);
   if (!rec) return;
-  if (!confirm(`Remove ${rec.name} ${rec.version}? The kernel handler will be uninstalled.`)) return;
+  if (!confirm(`Remove ${rec.name} ${rec.version}? The app will be uninstalled.`)) return;
   // Revocation (§12.5): uninstall drops the slot this label names — the protocols it
   // claimed and its guest realm.
   shell.uninstall(key);
@@ -1134,9 +1134,9 @@ window.addEventListener("message", async (ev) => {
 
 // ---------------------------------------------------------------------------
 // Networking — the transport bundle under a WebRTC socket seam (RtcNetwork,
-// host/net-rtc.ts) over a relay signaling channel.
+// services/net-rtc.ts) over a relay signaling channel.
 //
-// The transport is the kernel-shipped signed bundle bootShell loaded: the channel
+// The transport is the seedkernel-shipped signed bundle bootShell loaded: the channel
 // AKE, record layer, link routing and request/response layer run as its confined
 // guest program, driven by the shell's TransportHost. What net-rtc.ts contributes
 // is the WebRTC fabric — perfect negotiation, the relay rendezvous, the speculative-
@@ -1205,7 +1205,7 @@ restoreOffers().catch((err) =>
 // ─── live audio/video calls ────────────────────────────────────────────
 //
 // Calls ride the same RTCPeerConnections as the data channel, through
-// MediaRtcNetwork (./media-rtc.js) — chat's subclass of the kernel's raw-I/O
+// MediaRtcNetwork (./media-rtc.js) — chat's subclass of seedkernel's raw-I/O
 // WebRTC seam. net.addLocalTrack publishes our camera/mic to every connected
 // peer (and to peers that connect later), renegotiating as tracks are added
 // (startCall) or removed (endCall → net.removeLocalTracks). Remote tracks arrive

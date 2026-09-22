@@ -7,7 +7,7 @@
 // handle it is the thing being offered — so until someone accepts an offer there is no app
 // to route it to, and somebody already installed at boot has to own the name. That is this
 // app's whole reason to exist: a keyspace and a claim, nothing else. It holds no network, no
-// signing, no loader — accepting an offer, and installing what it names, stays the page's
+// signing, no install — accepting an offer, and installing what it names, stays the page's
 // job. Composition is several small bundles, not one god shell: this one owns exactly the
 // name a peer's offer arrives on and the fs keyspace its records live in.
 
@@ -24,7 +24,7 @@ export const OFFER_PROTO = "offer/v1";
 export const OFFERS_APP = "offers";
 
 /** The whole authority the offers guest holds (§12.2): a keyspace, nothing more. No
- *  network, no signing, no loader — accepting what lands here and installing it is the
+ *  network, no signing, no install — accepting what lands here and installing it is the
  *  page's job, never this guest's. The manifest declares the SERVICE, never its finer-
  *  grained methods: naming `fs` grants the guest `fs/get` and `fs/put` alike, and a
  *  manifest naming `fs/get` is refused at load (seedkernel §12.2). `crypto/blake2b-256`
@@ -43,7 +43,7 @@ export const OFFERS_KEY_PREFIX = "offers.";
 
 /** The guest this shell signs into the boot bundle (scripts/build-offers-bundle.mjs). Its
  *  `handle` has exactly one caller: a peer's inbound `offer/v1` frame, `[from 32][blob …]`
- *  — the kernel's own attribution prepended to the bundle in transit. Nothing else reaches
+ *  — the host's own attribution prepended to the bundle in transit. Nothing else reaches
  *  it: it declares no `timer` service, so it is never re-entered for a fired deadline, and
  *  nothing on this node calls it back as a loopback, so there is no host-op vocabulary to
  *  frame here and no `op-frame` import (contrast chat-app.js, whose guest also serves a
@@ -54,10 +54,10 @@ export const OFFERS_KEY_PREFIX = "offers.";
  *  means this exact blob already arrived, so it returns empty rather than writing a
  *  duplicate or re-announcing an offer already pending. A fresh blob is `fs/put` under
  *  `[from 32][blob]`, and the hash comes back as the answer — which is exactly what the
- *  page's `onInbound` receives (`LoadBundleOptions.onInbound`, seedkernel §12.10): a
+ *  page's `onInbound` receives (`InstallOptions.onInbound`, seedkernel §12.10): a
  *  non-empty answer is a fresh offer's hash, telling the page to go read the record it
  *  just wrote; an empty one is silence, because there is nothing new to show. There is no
- *  push from a guest to its loader on any other seam, so the answer doubling as the
+ *  push from a guest to the page that installed it on any other seam, so the answer doubling as the
  *  notification is the whole mechanism. Every `host.call` is awaited, including the
  *  hash: seedkernel's seam is uniformly asynchronous even when a backend computes its
  *  answer inline. */
@@ -87,7 +87,7 @@ function writeU32BE(out, off, v) {
   out[off] = v >>> 24; out[off + 1] = (v >>> 16) & 0xff; out[off + 2] = (v >>> 8) & 0xff; out[off + 3] = v & 0xff;
 }
 
-// The kernel's inbound shape is handle([caller 32][body …]): attribution only. This
+// The host's inbound shape is handle([caller 32][body …]): attribution only. This
 // guest has exactly one caller — a peer's offer/v1 frame — so unlike chat-app.js it never
 // has to tell host/timer/peer apart: the whole body after the 32-byte prefix is the
 // offered blob.

@@ -1,16 +1,16 @@
-// Headless smoke test: does chat still work on the kernel it depends on?
+// Headless smoke test: does chat still work on the seedkernel it depends on?
 //
 // Replays the boot path browser/chat-shell.js actually runs — the bootShell
 // assembly + its boot-selected transport + consent-gated chat install +
 // protocol dispatch — minus the browser-only WebRTC/DOM. Two shells link through
 // injected ChannelFactory sinks (the shape RtcNetwork implements), a real
 // chat-app-v1.wasm round-trips a message, and the offers app (a second boot bundle,
-// browser/offers-app.js) round-trips an offer. Run it after a kernel update:
+// browser/offers-app.js) round-trips an offer. Run it after a seedkernel update:
 //
 //   node scripts/smoke.mjs
 //
-// Fails loudly (non-zero exit) on any regression in the kernel surface chat
-// consumes, so a kernel bump that breaks chat is caught headlessly instead of
+// Fails loudly (non-zero exit) on any regression in the seedkernel surface chat
+// consumes, so a seedkernel bump that breaks chat is caught headlessly instead of
 // in the browser.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -27,7 +27,7 @@ const sodium = await loadCrypto();
 // transport bundle installed at boot, the adapter built from the transport options passed
 // here. The shells' admit is then ONLY the consent gate.
 const { bootShell } = await import("seedkernel-wasm/shell-core");
-// `TRANSPORT_SERVICE` is emitted beside the blob it belongs to, not known to the loader:
+// `TRANSPORT_SERVICE` is emitted beside the blob it belongs to, not known to the host:
 // a replacement transport may spell its claim differently, and then THAT spelling is the
 // one the host reaches. Chat runs the shipped one, so this is the id chat must agree with.
 const { transportBundleBytes, TRANSPORT_SERVICE } = await import("seedkernel-wasm/transport-bundle");
@@ -48,7 +48,7 @@ const { OFFERS_AUTHOR_HEX, OFFERS_APP } = await import("../browser/offers-bundle
 // arguments, which is what the host's own door into the network takes (`peersOf` below).
 const { writeOp, OpArgs } = await import("seedkernel-wasm/op-frame");
 
-// The exact transport bundle bytes the kernel embeds, reached through the export —
+// The exact transport bundle bytes seedkernel embeds, reached through the export —
 // so the smoke test touches no non-published surface and never reads the dependency's
 // build directory off disk.
 const TRANSPORT_BYTES = transportBundleBytes();
@@ -72,7 +72,7 @@ function admit(v) {
   return true;
 }
 
-// ── an instrumented channel pair (mirrors the kernel's wirePair) ──────────────
+// ── an instrumented channel pair (mirrors seedkernel's wirePair) ──────────────
 function wirePair() {
   const mk = (name, remoteAddr) => ({
     name, remoteAddr, sent: [], dead: false, inFlight: 0, msg: null, cls: null, peer: null,
@@ -127,7 +127,7 @@ const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 
 /** The peers a node holds an authenticated link to. Asked of the transport GUEST, through
  *  the host's own door into a co-resident `services` claim (`Shell.call`, seedkernel
- *  §12.10) — the same call the kernel's CLI makes for a cohort, and the same one
+ *  §12.10) — the same call seedkernel's CLI makes for a cohort, and the same one
  *  chat-shell.js's `linkedPeers` makes for its peer pill. The driver answers nothing
  *  peer-shaped: links are the guest's, so this is a round trip through its realm.
  *  `null` is "nothing claims that id" — a node with no transport standing. */
@@ -148,9 +148,9 @@ async function setContactSecret(shell, secret) {
   if (!answer) throw new Error(`nothing claims ${NET_PROTO}`);
   await answer;
 }
-// The one string in the kernel's vocabulary chat spells by hand (chat-app.js keeps a
+// The one string in the host's vocabulary chat spells by hand (chat-app.js keeps a
 // no-imports shape) must be the transport bundle's own claim, or the guest calls
-// nothing. The kernel reserves no name for it: the claim is an ordinary LOCAL service
+// nothing. The host reserves no name for it: the claim is an ordinary LOCAL service
 // name (§12.10) — the transport's manifest declares it under `services`, never under
 // `protocols`, so a peer frame naming it is refused by the routing — and the bundle
 // itself is the ground truth.
@@ -180,7 +180,7 @@ const peerA = toHex(identityA.publicKey);
 const peerB = toHex(identityB.publicKey);
 // A's AUTHOR key set, which is not its node identity: a manifest is signed by both an
 // Ed25519 and an ML-DSA-65 key (seedkernel §12.4), and the author id is the hash over
-// the pair. Through the kernel's own seed→key-set derivation, the same call the browser
+// the pair. Through seedkernel's own seed→key-set derivation, the same call the browser
 // shell makes, so this test signs with the key set the shell would.
 const authorA = hybridAuthorKeysFromSeed(sodium, identityA.privateKey.slice(0, 32));
 const CONTACT = new Uint8Array(32).fill(7); // a "room secret" both ends share
@@ -215,7 +215,7 @@ try {
   // deliberately absent too: an app sends by calling the local service name the transport
   // serves, so asserting these absences is asserting the seam. Nor is the adapter on the
   // SHELL: it is the platform's, and the shell's whole part is having bound the raw-link
-  // capability to the bundle just admitted.
+  // service to the bundle just admitted.
   assert(A.transport === undefined, "the shell exposes no transport — the adapter is the platform's");
   assert(A.resolve(NET_PROTO) !== null, `the admitted bundle serves ${NET_PROTO}`);
   assert(netA.openLink === undefined, "the removed per-link injection seam stays absent");
@@ -343,7 +343,7 @@ try {
   await chatApp.invoke(writeOp(CHAT_OP_SEND, arg));
   // B's view of the answer is its own load's onInbound (seedkernel §12.10): the render
   // bytes B's chat app's guest returned for the inbound frame ARE this call's answer,
-  // handed to the loader that mounted it — no second claim, no relay.
+  // handed to the page that installed it — no second claim, no relay.
   await until(() => inbound.render !== null, 4000, "rendered message");
   const delivered = inbound.render;
   // chat v1 render: [type 1][pk_len 1][pk 32][body]

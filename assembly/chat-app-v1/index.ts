@@ -1,15 +1,15 @@
 // Chat backend v1 — text-only.
 //
-// A pure-transform handler (README §4): the shell stages the input at `scratch`,
-// calls `handle`, and reads the render bytes back from `scratch`. No kernel.call,
-// no signer query, no UI bridge — the sender identity is prepended by the shell
+// A pure-transform handler (README §4): the host stages the input at `scratch`,
+// calls `handle`, and reads the render bytes back from `scratch`. No host import,
+// no signer query, no UI bridge — the sender identity is prepended by the host
 // (the AKE channel already authenticated it), and the render bytes are the return
-// value the shell forwards to the iframe.
+// value the chat page forwards to the iframe.
 //
 // Input:   [pk 32][type u8][body ..]   type = 0x00 (text)
 // Render:  [type u8][pk_len u8][pk ..][body ..]
 
-// The layout literals — the shell prepends the 32-byte sender pk, and the app
+// The layout literals — the host prepends the 32-byte sender pk, and the app
 // may start its bookkeeping at offset 0 of private memory (the module reserves
 // nothing, so 0 is both the value and the intent).
 const PK_LEN: i32 = 32;
@@ -29,7 +29,7 @@ scratch = heap.alloc(SCRATCH_SIZE) as i32;
 priv = heap.alloc(PRIVATE_SIZE) as i32;
 
 export function handle(input_len: i32): i32 {
-  // Input: [pk PK_LEN][type u8][body]. The shell prepends the authenticated sender pk.
+  // Input: [pk PK_LEN][type u8][body]. The host prepends the authenticated sender pk.
   if (input_len < PK_LEN + 1) return 0;
   const type = load<u8>(scratch + PK_LEN);
   if (type != 0) return 0;                  // v1 only knows text

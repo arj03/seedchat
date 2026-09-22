@@ -14,11 +14,11 @@
      allow-same-origin: it has an opaque origin, no access to this document's DOM,
      and can reach the shell only via postMessage. The shell's own document has no
      inline scripts and no untrusted innerHTML, so 'unsafe-inline' opens nothing
-     here; 'wasm-unsafe-eval' covers WebAssembly.instantiate (kernel hosts,
+     here; 'wasm-unsafe-eval' covers WebAssembly.instantiate (bundle modules,
      libsodium, QuickJS).
 
      worker-src allows blob: because that is where an app's MODULES run since guest
-     ABI 6: the kernel's module table stands each one up in its own worker so a call
+     ABI 6: the host's module table stands each one up in its own worker so a call
      can be killed at its deadline, and the worker script is a blob URL. Without this
      the fallback is script-src, which has no blob:, and every module bind — so every
      app install — fails at the CSP. -->
@@ -59,7 +59,7 @@
 </header>
 
 <section id="about" class="about" hidden>
-  A signed-install bootstrap. The shell owns only the kernel, signature
+  A signed-install bootstrap. The page owns only the seedkernel host, signature
   module, installer, WebRTC transport, and a sandboxed iframe. Apps arrive as
   signed <code>.skb</code> bundles carrying their own UI, built offline with
   <code>scripts/build-app-bundle.mjs</code>; they can be loaded locally,
@@ -191,21 +191,21 @@
 
 </main>
 
-<!-- The kernel surface chat depends on, declared in one place. `npm run vendor`
-     copies seedkernel-wasm's built host (build-min: host/ + core/) into ./vendor/;
+<!-- The seedkernel surface chat depends on, declared in one place. `npm run vendor`
+     copies seedkernel-wasm's built host (build-min: host/ + services/) into ./vendor/;
      the seedkernel-wasm/* specifiers below are the entire contract between this
      app and the runtime. The QuickJS entries are not chat's own: they are the realm
      engine every app's guest runs in, imported by bare specifier from the vendored
-     safe-js that shell-core loads on the first realm (the kernel's own quickjs-ng
+     safe-js that shell-core loads on the first realm (seedkernel's own quickjs-ng
      build, whose .wasm rides beside its variant, plus quickjs-emscripten-core, the
      JS API layer over it). Same layout seed store's build-browser-demo.mjs stages. -->
 <script type="importmap">
 {
   "imports": {
     "seedkernel-wasm/shell-core":    "./vendor/host/shell-core.js",
-    "seedkernel-wasm/net-rtc":       "./vendor/host/net-rtc.js",
+    "seedkernel-wasm/net-rtc":       "./vendor/services/net-rtc.js",
     "seedkernel-wasm/bundle":        "./vendor/host/bundle.js",
-    "seedkernel-wasm/op-frame":      "./vendor/core/op-frame.js",
+    "seedkernel-wasm/op-frame":      "./vendor/services/op-frame.js",
     "seedkernel-wasm/crypto-browser": "./vendor/host/crypto-browser.js",
     "seedkernel-wasm/libsodium":     "./vendor/libsodium-wrappers.mjs",
     "seedkernel-wasm/quickjs":       "./vendor/quickjs/variant.mjs",

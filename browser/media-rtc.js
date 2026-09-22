@@ -1,17 +1,17 @@
-// Live audio/video over the kernel's WebRTC seam.
+// Live audio/video over seedkernel's WebRTC seam.
 //
-// `RtcNetwork` (seedkernel `host/net-rtc.ts`, §12.7) is raw I/O only: peer
+// `RtcNetwork` (seedkernel `services/net-rtc.ts`, §12.7) is raw I/O only: peer
 // connections, signaling, and one data channel per peer handed to the transport
 // host through its ChannelFactory sink. Media is not the runtime's business, so it
 // lives here — a subclass that re-attaches the call feature to the very same
 // `RTCPeerConnection`s the data channel already uses. addTrack triggers
-// `negotiationneeded`, and the offer it produces flows through the kernel's
+// `negotiationneeded`, and the offer it produces flows through seedkernel's
 // perfect-negotiation path like any other, so a call needs no signaling of its own.
 //
-// The seams it needs are the ones the kernel publishes: the `peers` map (each entry's
+// The seams it needs are the ones seedkernel publishes: the `peers` map (each entry's
 // `pc`), `ensurePeer`, overridden to wire our per-connection listeners at the moment a
 // peer entry is created, and `forget`, overridden because every teardown path — the
-// kernel's own included — goes through it.
+// seedkernel's own included — goes through it.
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 
 export class MediaRtcNetwork extends RtcNetwork {
@@ -19,7 +19,7 @@ export class MediaRtcNetwork extends RtcNetwork {
   // unless the app started a call via addLocalTrack().
   #localTracks = [];
   // peerId -> the senders we created on that peer's pc, so a hang-up can remove
-  // exactly what we added. Kept here rather than on the kernel's PeerEntry.
+  // exactly what we added. Kept here rather than on seedkernel's PeerEntry.
   #callSenders = new Map();
   #onPeerConnectionClosed;
 

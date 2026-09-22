@@ -5,7 +5,7 @@
 // once. Two hand-copies of signed source would be two things to keep in step, and
 // the one that drifts is the one an author's key vouches for.
 //
-// No runtime import: offline authors pass `guestOpFraming` from the kernel's
+// No runtime import: offline authors pass `guestOpFraming` from seedkernel's
 // `/bundle-author` entry point into `chatGuestSource`, keeping that authoring module
 // out of the browser shell's vendored runtime artifact.
 
@@ -25,7 +25,7 @@ export function assertAppId(id) {
 }
 
 /** The local service name the transport bundle serves (the `_net` of the bundled
- *  composition; no kernel semantics attach to the spelling). Named here rather than
+ *  composition; no host semantics attach to the spelling). Named here rather than
  *  imported so this file keeps its no-imports property: it is the one string in the
  *  runtime's vocabulary chat has to spell, and `smoke.mjs` asserts it against the
  *  transport bundle's own `services` claim. */
@@ -55,8 +55,8 @@ export const CHAT_APP_REQUIRES = [];
  *  that uses it.
  *
  *  Its render bytes need no name of their own: they are the answer this guest returns
- *  for an inbound frame, and the loader that mounted this app receives them straight
- *  off that answer through `onInbound` (`LoadBundleOptions.onInbound`, seedkernel
+ *  for an inbound frame, and the page that installed this app receives them straight
+ *  off that answer through `onInbound` (`InstallOptions.onInbound`, seedkernel
  *  §12.10) — the page's own load, not a second claim the guest has to push through.
  *
  *  A call edge is a separate list from `requires` because it carries no privilege: an
@@ -87,7 +87,7 @@ export const CHAT_PROTO = "chat";
  *  app registers a single entrypoint, `handle`; a peer's inbound frame carries
  *  `[peer 32][chatType ‖ body]`, and the host's own `invoke` loopback carries
  *  `[zero 32][opLen u8][op][args]` — the 32-byte caller id tells the two apart, and the
- *  guest splits both with the kernel framing's `callerOf`/`readOp`.
+ *  guest splits both with seedkernel's op-frame `callerOf`/`readOp`.
  *
  *  NAMES rather than bytes, and that is not cosmetic: an op byte is a number the shell
  *  and the guest source have to agree on, which is exactly what collapsing entrypoints
@@ -100,12 +100,12 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *
  *  `handle` is inbound: a peer's frame arrives as `senderPk ‖ body`, and the guest
  *  forwards it to the app's own module — named directly on the same `host.call` seam every
- *  other capability uses (§12.2) — and returns whatever the module answers: the render
+ *  host service uses (§12.2) — and returns whatever the module answers: the render
  *  bytes for that frame. That answer IS the return value of this call, and nothing here
- *  pushes it anywhere: the loader that mounted this app is handed those same bytes through
- *  `onInbound` (`LoadBundleOptions.onInbound`, seedkernel §12.10), once the answer settles.
+ *  pushes it anywhere: the page that installed this app is handed those same bytes through
+ *  `onInbound` (`InstallOptions.onInbound`, seedkernel §12.10), once the answer settles.
  *  There is no second name for it and no 32-byte comparison to make on the way in — the
- *  loader already knows which app it mounted, because it is the one that mounted it.
+ *  page already knows which app it installed, because it is the one that installed it.
  *
  *  Sending is a LOCAL op on the same `handle`. The host owns no send: a message reaches a
  *  peer by calling the id the transport claims, and only a guest can call it. The shell
@@ -121,7 +121,7 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *                    caller writes what it knows (a peer, a protocol id, a body).
  *    to `_net`       `writeOp("send", [noReply u8][to blob][proto blob][payload blob])`
  *                    — the transport's op wire, where a blob is `[len u32][bytes]`. The
- *                    envelope comes from `writeOp` (seedkernel core/op-frame.ts), so
+ *                    envelope comes from `writeOp` (seedkernel services/op-frame.ts), so
  *                    this guest writes the ARGUMENTS and never the framing. The host prepends
  *                    this app's own 32-byte key as the caller, exactly as it prepends the
  *                    sender's key inbound, so the transport can tell an app's request from the
@@ -130,7 +130,7 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *  `noReply` is 1: chat is a broadcast, not a round trip. The frame is handed to the wire
  *  and the call answers `[1]` without waiting for the far end, which is what the shell's
  *  fire-and-forget send is. The choice is written down in the frame rather than implied
- *  by which host method was called. There is no deadline field: the kernel carries the
+ *  by which host method was called. There is no deadline field: the host carries the
  *  invocation's own remaining segment across every handoff, so a caller naming its own
  *  would be minting time (seedkernel §12.3).
  *
@@ -139,9 +139,9 @@ export const CHAT_OP_RENDER = "render"; // [sender 32][payload] → the module's
  *  is what keeps it a module name rather than a host name. */
 export function chatGuestSource(appId, guestOpFraming) {
     assertAppId(appId);
-    // The kernel's inbound shape is `handle([caller 32][body …])`: attribution only.
+    // The host's inbound shape is `handle([caller 32][body …])`: attribution only.
     // Everything after the 32-byte caller is THIS app's own format - the three
-    // spellings below are the app's own, and the kernel never reads any of it
+    // spellings below are the app's own, and the host never reads any of it
     // (seedkernel §12.2). The op is a NAME, never a tag byte.
     return `
 ${guestOpFraming()}
@@ -169,8 +169,8 @@ async function handle(arg) {
     return new Uint8Array(0);
   }
   // A peer's frame, forwarded straight to this app's own module. The render bytes it
-  // returns ARE this call's answer — no relay hop, no second name: the loader that
-  // mounted this app reads them off its own load's onInbound (seedkernel §12.10).
+  // returns ARE this call's answer — no relay hop, no second name: the page that
+  // installed this app reads them off its own load's onInbound (seedkernel §12.10).
   return await host.call("${appId}", arg);
 }`;
 }
