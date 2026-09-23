@@ -1,7 +1,8 @@
 // The chat app SHAPE, in one place: what a chat app's id may be, what its guest
-// program is, and how much authority it holds. Both the browser shell (which
-// authors bundles and peeks received ones) and scripts/smoke.mjs (which authors
-// one headlessly) read it here, so the guest source that gets SIGNED is written
+// program is, and how much authority it holds. The offline author
+// (scripts/build-app-bundle.mjs), scripts/smoke.mjs (which authors one
+// headlessly) and the browser shell (which only gates received bundles with
+// `isChatApp`) all read it here, so the guest source that gets SIGNED is written
 // once. Two hand-copies of signed source would be two things to keep in step, and
 // the one that drifts is the one an author's key vouches for.
 //

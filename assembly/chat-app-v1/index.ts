@@ -1,10 +1,10 @@
 // Chat backend v1 — text-only.
 //
-// A pure-transform handler (README §4): the host stages the input at `scratch`,
-// calls `handle`, and reads the render bytes back from `scratch`. No host import,
-// no signer query, no UI bridge — the sender identity is prepended by the host
-// (the AKE channel already authenticated it), and the render bytes are the return
-// value the chat page forwards to the iframe.
+// A pure-transform handler (seedkernel PROTOCOL §4): the host stages the input
+// at `scratch`, calls `handle`, and reads the render bytes back from `scratch`.
+// No host import, no signer query, no UI bridge — the sender identity is
+// prepended by the host (the AKE channel already authenticated it), and the
+// render bytes are the return value the chat page forwards to the iframe.
 //
 // Input:   [pk 32][type u8][body ..]   type = 0x00 (text)
 // Render:  [type u8][pk_len u8][pk ..][body ..]

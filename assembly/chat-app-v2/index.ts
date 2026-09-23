@@ -1,10 +1,11 @@
 // Chat backend v2 — adds image (jpeg) and nick on top of v1's text protocol.
 //
-// A pure-transform handler (README §4): the host stages the input at `scratch`,
-// calls `handle`, and reads the render bytes back from `scratch`. There is no
-// host import, no signer query, no UI bridge — the sender identity is prepended
-// by the host (the AKE channel already authenticated it), and the render bytes
-// are the handler's return value, which the chat page forwards to the iframe.
+// A pure-transform handler (seedkernel PROTOCOL §4): the host stages the input
+// at `scratch`, calls `handle`, and reads the render bytes back from `scratch`.
+// There is no host import, no signer query, no UI bridge — the sender identity
+// is prepended by the host (the AKE channel already authenticated it), and the
+// render bytes are the handler's return value, which the chat page forwards to
+// the iframe.
 //
 // Input:   [pk 32][type u8][body ..]
 //   type 0  text    body = utf-8 text
@@ -41,8 +42,8 @@ const NICK_OFF: i32 = PRIV_USER_OFF;
 const STAGING_OFF: i32 = NICK_OFF + NICK_TABLE_BYTES;
 
 export let scratch: i32 = 0;
-// Declare the larger I/O region to the host (README §4.1) so a big image plus its
-// render header is not capped at the 128 KB default.
+// Declare the larger I/O region to the host (seedkernel PROTOCOL §4.1) so a big
+// image plus its render header is not capped at the 128 KB default.
 export const scratchSize: i32 = SCRATCH_SIZE;
 let priv: i32 = 0;
 scratch = heap.alloc(SCRATCH_SIZE) as i32;

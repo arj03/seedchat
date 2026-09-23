@@ -5,7 +5,7 @@
 // This is deliberately a dumb copy of `build-min` wholesale: shell-core.js and
 // bundle.js import their siblings and the `services/` tree by relative path, so the
 // whole tree has to arrive intact even though chat itself names only a handful
-// of entry points. The minified tree is what seed store's p2p.html vendors too —
+// of entry points. The minified tree is what seedstore's p2p.html vendors too —
 // same convention across both apps — with the readable `build/` as a fallback.
 //
 // libsodium ships alongside because libsodium-wrappers.mjs resolves both its core
@@ -15,7 +15,7 @@
 // The QuickJS realm engine (safe-js) is vendored too: the transport bundle chat
 // admits runs as a confined guest program, and the realm factory lives in
 // host/safe-js.js, which names seedkernel's in-repo engine and
-// quickjs-emscripten-core as bare specifiers. Same set and layout seed store's
+// quickjs-emscripten-core as bare specifiers. Same set and layout seedstore's
 // build-browser-demo.mjs stages, so one import map serves both apps.
 
 import { cpSync, mkdirSync, existsSync, rmSync, readdirSync, statSync, copyFileSync } from "node:fs";
@@ -36,7 +36,7 @@ if (!existsSync(resolve(relayRoot, "client.js"))) {
 
 // seedkernel is a sibling checkout by declaration: package.json pins
 // `file:../seedkernel/WASM`, and seedkernel is `private: true` and never published.
-// So name that path, the same way seed store's build-browser-demo.mjs does. Resolving
+// So name that path, the same way seedstore's build-browser-demo.mjs does. Resolving
 // it through Node instead would defend against install shapes the dependency spec has
 // already ruled out, and would do it by reaching for `seedkernel-wasm/package.json` —
 // a subpath that resolves only while seedkernel's `exports` map carries an entry
@@ -67,7 +67,7 @@ if (hostSrc === rawDir) {
   console.warn("note: vendoring the unminified host — run `npm run build:host:min` in seedkernel for the smaller build");
 }
 
-// ── staleness guard (same one seed store's build-browser-demo.mjs runs) ──────
+// ── staleness guard (same one seedstore's build-browser-demo.mjs runs) ──────
 // The browser runs the MINIFIED host; seedkernel's own Node tests run build/.
 // The two diverge silently when `build:host` (tsc) is re-run but `build:host:min`
 // (minify) is not — a real trap after switching branches, because seedkernel's tests
@@ -159,7 +159,7 @@ for (const f of ["libsodium-wrappers.mjs", "libsodium-core.mjs", "libsodium.wasm
 // `new URL("emscripten-module.wasm", import.meta.url)` — so the engine's four
 // files must stay together, the same rule libsodium's three follow above.
 // Nothing here is node-only: the glue is built for `web,node` and picks the
-// browser's fetch path at runtime. Same layout seed store's
+// browser's fetch path at runtime. Same layout seedstore's
 // build-browser-demo.mjs stages.
 const nodeModules = resolve(pkgRoot, "node_modules");
 

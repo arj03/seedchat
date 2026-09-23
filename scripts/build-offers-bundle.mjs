@@ -3,7 +3,7 @@
 // (scripts/build-app-bundle.mjs), this one is not something a user drops in — it is
 // loaded at BOOT, alongside the transport bundle, so its bytes have to reach the served
 // page rather than sit in the gitignored bundle/ directory. This script therefore also
-// generates browser/offers-bundle.js, a tracked module in the shape of seedkernel's
+// generates browser/offers-bundle.js, a gitignored module in the shape of seedkernel's
 // host/transport-bundle.ts: the blob embedded as base64, so the page's own boot code can
 // import it like any other browser/ file.
 //
