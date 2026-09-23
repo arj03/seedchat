@@ -1,4 +1,4 @@
-# seedchat — a chat app for [seedkernel](https://github.com/arj03/seedkernel)
+# seedchat: a chat app for [seedkernel](https://github.com/arj03/seedkernel)
 
 Chat is the smallest possible app on the runtime: a confined JS **guest** over a
 single **pure-transform** WASM module. The guest's one `handle` entrypoint
