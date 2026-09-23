@@ -27,7 +27,7 @@ export const OFFERS_APP = "offers";
  *  network, no signing, no install — accepting what lands here and installing it is the
  *  page's job, never this guest's. The manifest declares the SERVICE, never its finer-
  *  grained methods: naming `fs` grants the guest `fs/get` and `fs/put` alike, and a
- *  manifest naming `fs/get` is refused at load (seedkernel §12.2). `crypto/blake2b-256`
+ *  manifest naming `fs/get` is refused at load (seedkernel §12.2). `crypto/blake2b`
  *  needs no entry here: a `crypto/*` name is ungated, not a grant (seedkernel §12.1), so
  *  it never appears in `requires`. */
 export const OFFERS_REQUIRES = ["fs"];
@@ -49,7 +49,7 @@ export const OFFERS_KEY_PREFIX = "offers.";
  *  frame here and no `op-frame` import (contrast chat-app.js, whose guest also serves a
  *  local `send` op on the same `handle`).
  *
- *  It hashes the blob (`crypto/blake2b-256` — ungated, not a grant), and that hash is both
+ *  It hashes the blob (`crypto/blake2b` — ungated, not a grant), and that hash is both
  *  the dedupe key and the guest's answer. It `fs/get`s the record first: an existing one
  *  means this exact blob already arrived, so it returns empty rather than writing a
  *  duplicate or re-announcing an offer already pending. A fresh blob is `fs/put` under
@@ -94,7 +94,11 @@ function writeU32BE(out, off, v) {
 async function handle(arg) {
   const from = arg.subarray(0, 32);
   const blob = arg.subarray(32);
-  const hash = await host.call("crypto/blake2b-256", blob);
+  // crypto/blake2b takes [outLen][keyLen][key][msg]: the unkeyed 32-byte hash.
+  const hashArg = new Uint8Array(2 + blob.length);
+  hashArg[0] = 32;
+  hashArg.set(blob, 2);
+  const hash = await host.call("crypto/blake2b", hashArg);
   const key = ${JSON.stringify(OFFERS_KEY_PREFIX)} + toHex(hash);
   const keyBytes = utf8Encode(key);
   const existing = await host.call("fs/get", keyBytes);
