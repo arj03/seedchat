@@ -1,6 +1,6 @@
 // The offers app SHAPE, in the same spirit as chat-app.js: what the offers app's guest
 // program is, and how much authority it holds. Both the browser shell (which loads the
-// boot bundle built from it and reads its records) and scripts/build-offers-bundle.mjs
+// boot bundle built from it and reads its records) and scripts/build-boot-bundles.mjs
 // (which signs it) read it here, so the guest source that gets SIGNED is written once.
 //
 // `offer/v1` carries a signed bundle from one browser to another, and the app that would
@@ -12,7 +12,7 @@
 // name a peer's offer arrives on and the fs keyspace its records live in.
 
 /** The wire protocol a peer's offer travels under (§12.10) — an ordinary id, claimed by
- *  the boot bundle this shell builds from this file (scripts/build-offers-bundle.mjs).
+ *  the boot bundle this shell builds from this file (scripts/build-boot-bundles.mjs).
  *  Ordinary, not a local service claim, because a PEER is exactly who reaches it: the
  *  whole point of an offer is that it arrives from another browser, before either end has
  *  an app installed that could otherwise receive it. */
@@ -20,7 +20,7 @@ export const OFFER_PROTO = "offer/v1";
 
 /** This app's id, and its manifest's `app`. A literal, not a grammar like chat's
  *  (`chat-app.js` `APP_ID`): there is exactly one offers app, built once by this shell's
- *  own scripts/build-offers-bundle.mjs, never by a peer's bundle or a user's drag-and-drop. */
+ *  own scripts/build-boot-bundles.mjs, never by a peer's bundle or a user's drag-and-drop. */
 export const OFFERS_APP = "offers";
 
 /** The whole authority the offers guest holds (§12.2): a keyspace, nothing more. No
@@ -41,7 +41,7 @@ export const OFFERS_REQUIRES = ["fs"];
  *  peer or two different ones, lands on the same key rather than piling up duplicates. */
 export const OFFERS_KEY_PREFIX = "offers.";
 
-/** The guest this shell signs into the boot bundle (scripts/build-offers-bundle.mjs). Its
+/** The guest this shell signs into the boot bundle (scripts/build-boot-bundles.mjs). Its
  *  `handle` has exactly one caller: a peer's inbound `offer/v1` frame, `[from 32][blob …]`
  *  — the host's own attribution prepended to the bundle in transit. Nothing else reaches
  *  it: it declares no `timer` service, so it is never re-entered for a fired deadline, and

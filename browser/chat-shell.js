@@ -14,15 +14,22 @@ import { bootShell } from "seedkernel-wasm/shell-core";
 import { writeOp, OpArgs } from "seedkernel-wasm/op-frame";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { verifyBundle, genesisHash } from "seedkernel-wasm/bundle";
-import { createRelaySignaling } from "seedrelay";
-// Chat's own code. media-rtc.js is the call feature: seedkernel's WebRTC seam is
-// raw I/O, so live audio/video is a subclass of it that lives here.
-import { MediaRtcNetwork } from "./media-rtc.js";
+// The sockets: a WebSocket for the relay the transport signals through, and seedkernel's
+// WebRTC seam for the peer connections the transport negotiates (§12.7).
+import { WsNetwork } from "seedkernel-wasm/net-ws";
+import { RtcNetwork } from "seedkernel-wasm/net-rtc";
+import { combineChannels } from "seedkernel-wasm/socket-seam";
+// Chat's own code. media-rtc.js is the call feature: audio and video ride peer
+// connections this page owns, signaled through the calls boot bundle below.
+import { MediaCalls } from "./media-rtc.js";
 import { isChatApp, CHAT_OP_SEND, CHAT_OP_RENDER, NET_PROTO } from "./chat-app.js";
 // The offers app: a second boot bundle, loaded right below alongside the transport —
 // see "boot the offers app" further down for why a bundle rather than a page-held name.
 import { OFFER_PROTO, OFFERS_KEY_PREFIX } from "./offers-app.js";
 import { offersBundleBytes, OFFERS_AUTHOR_HEX, OFFERS_APP } from "./offers-bundle.js";
+// The calls app: a third boot bundle, the signaling path for a call's media.
+import { CALLS_OP_SEND } from "./calls-app.js";
+import { callsBundleBytes, CALLS_AUTHOR_HEX, CALLS_APP } from "./calls-bundle.js";
 
 const RTC_CONFIG = { iceServers: [{ urls: [
   "stun:stun.l.google.com:19302",
@@ -170,33 +177,11 @@ const myPeerId = myKeys.publicKey;
 
 shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 
-// One stable signaling adapter and one stable WebRTC ChannelFactory for the tab. The
-// factory has to exist BEFORE TransportHost: bootShell registers its accept sink while
-// starting the signed transport, and RtcNetwork hands every later data channel to it.
-let relayConnection = null; // { base, room, label, url } for the current attempt
-const relay = createRelaySignaling({
-  webSocketFactory: (url) => new WebSocket(url),
-  onStateChange: relayStateChanged,
-});
-const signaling = relay.signaling;
-const net = new MediaRtcNetwork({
-  peerId: myPkHex,
-  signaling,
-  rtcConfig: RTC_CONFIG,
-  onPeerConnectionClosed: (peerId) => {
-    // This is physical media cleanup, not an authenticated transport-peer event.
-    removeRemoteTile(peerId);
-    updateCallStatus();
-  },
-  onTrack: (peerId, track) => {
-    const tile = getOrCreateRemoteTile(peerId);
-    tile.stream.addTrack(track);
-    track.addEventListener("ended", () => {
-      try { tile.stream.removeTrack(track); } catch {}
-      if (tile.stream.getTracks().length === 0) removeRemoteTile(peerId);
-    });
-  },
-});
+// The tab's sockets, standing before the transport: bootShell registers its accept sink
+// while starting it, and RtcNetwork announces every data channel through that sink. The
+// transport itself opens the relay (a WebSocket) and drives the peer connections.
+let relayConnection = null; // { base, room, label, url } for the current room
+const net = combineChannels(new WsNetwork(), new RtcNetwork());
 
 // Assemble the shared shell now that the identity exists — via bootShell, the ONE
 // assembly (§12.9). The platform is a browser seam: sodium, our identity, a
@@ -205,10 +190,10 @@ const net = new MediaRtcNetwork({
 // options (identity taken from the top-level fields, never restated) and returns with
 // the shell. The adapter is the platform's: link ids and sockets. Transport policy belongs
 // to the signed bundle, and so does the address book — it lives in that bundle's own realm
-// now (§12.10), and chat writes nothing to it, because a peer here arrives as an accepted
-// RTC link the signaling already named rather than as an address to dial.
-// MediaRtcNetwork is the platform's ChannelFactory, constructed above and passed in as
-// `channels`; bootShell registers its accept sink while starting the transport. Raw-link
+// now (§12.10), and chat writes nothing to it: a peer here is met in the relay room the
+// transport joins, and connected by it.
+// The sockets above are passed in as `channels`; bootShell registers their accept sink
+// while starting the transport. Raw-link
 // events then go only to whichever admitted slot owns the `link` binding, and
 // `shell.close()` closes the whole stack.
 //
@@ -217,8 +202,8 @@ const net = new MediaRtcNetwork({
 // existing links in `joinRtcRoom()`, without reloading the transport.
 //
 // bootShell installs the seedkernel-shipped transport bundle at boot and
-// starts the ChannelFactory before returning. Connecting to a relay merely announces the
-// already-standing node into a signaling room.
+// starts the ChannelFactory before returning. Connecting to a relay is the transport's
+// `relay` op: it joins the room and connects the peers it meets there.
 //
 // The realm engine every app's guest runs in — the transport bundle's, the offers
 // app's, and each chat app's — is bootShell's default (safe-js), imported lazily on
@@ -235,15 +220,18 @@ const booted = await bootShell({
   identity: myKeys,
   transport: {
     channels: net,
+    // STUN for the transport's peer connections, as installation config (§12.6).
+    config: { iceServers: RTC_CONFIG.iceServers },
   },
   admit(v) {
     // The offers app is pinned: the exact author and app this PAGE was built with
-    // (browser/offers-bundle.js, generated by scripts/build-offers-bundle.mjs), read off
+    // (browser/offers-bundle.js, generated by scripts/build-boot-bundles.mjs), read off
     // the artifact rather than restated by hand. A boot bundle gets a pin rather than a
     // consent prompt because it is loaded once below, before any dialog could run, under
     // bytes this deployment shipped — there is nothing here for a click to actually
     // decide, the same reasoning that keeps the transport off the consent path.
     if (bytesToHex(v.author) === OFFERS_AUTHOR_HEX && v.manifest.app === OFFERS_APP) return true;
+    if (bytesToHex(v.author) === CALLS_AUTHOR_HEX && v.manifest.app === CALLS_APP) return true;
     const bytesHashHex = v.modules.length > 0 ? bytesToHex(genesisHash(sodium, v.modules[0].wasm)) : "";
     if (!pendingApprovals.has(bytesHashHex)) return false;
     pendingApprovals.delete(bytesHashHex);
@@ -276,6 +264,39 @@ const offersApp = await shell.install(offersBundleBytes(), {
     offersApp.fs.get(key).then((record) => {
       if (!record) return;
       handleOffer(record.subarray(32), bytesToHex(record.subarray(0, 32)), key).catch(() => {});
+    });
+  },
+});
+
+// ─── boot the calls app ─────────────────────────────────────────────────
+//
+// A call's audio and video ride peer connections this page owns (media-rtc.js), beside
+// the transport's; their signaling rides the node's own authenticated channel under
+// `call/v1`, the calls boot bundle's claim. A peer's signal reaches the page as that
+// load's `onInbound` answer, attributed by the channel it arrived on; ours leave through
+// the same app's `send` op, since only a guest can reach `_net`.
+const callsApp = await shell.install(callsBundleBytes(), {
+  onInbound: (claim, from, answer) => { if (answer.length > 0) void media.onSignal(bytesToHex(from), answer); },
+});
+const media = new MediaCalls({
+  myId: myPkHex,
+  rtcConfig: RTC_CONFIG,
+  send: (peerId, signal) => {
+    const arg = new Uint8Array(32 + signal.length);
+    arg.set(hexToBytes(peerId), 0);
+    arg.set(signal, 32);
+    return callsApp.invoke(writeOp(CALLS_OP_SEND, arg));
+  },
+  onPeerClosed: (peerId) => {
+    removeRemoteTile(peerId);
+    updateCallStatus();
+  },
+  onTrack: (peerId, track) => {
+    const tile = getOrCreateRemoteTile(peerId);
+    tile.stream.addTrack(track);
+    track.addEventListener("ended", () => {
+      try { tile.stream.removeTrack(track); } catch {}
+      if (tile.stream.getTracks().length === 0) removeRemoteTile(peerId);
     });
   },
 });
@@ -1133,15 +1154,14 @@ window.addEventListener("message", async (ev) => {
 });
 
 // ---------------------------------------------------------------------------
-// Networking — the transport bundle under a WebRTC socket seam (RtcNetwork,
-// services/net-rtc.ts) over a relay signaling channel.
+// Networking — the transport bundle over a WebRTC mesh it negotiates through a relay.
 //
 // The transport is the seedkernel-shipped signed bundle bootShell loaded: the channel
 // AKE, record layer, link routing and request/response layer run as its confined
-// guest program, driven by the shell's TransportHost. What net-rtc.ts contributes
-// is the WebRTC fabric — perfect negotiation, the relay rendezvous, the speculative-
-// peer cap, ICE-restart recovery — each data channel handed to TransportHost through
-// its ChannelFactory accept sink. Channel identity is the transport's in-channel HELLO/AUTH (§12.6),
+// guest program, driven by the shell's TransportHost — and so do the relay room, who
+// offers to whom, and ICE restarts (§12.7). What net-rtc.ts contributes is the platform
+// object: it holds each RTCPeerConnection and passes its negotiation through as bytes.
+// Channel identity is the transport's in-channel HELLO/AUTH (§12.6),
 // so any frame the driver hands to our sink is already attributed to an
 // authenticated peer — `_from` is that peer's pubkey, which we treat as the
 // message author. No per-message signature.
@@ -1163,30 +1183,26 @@ function pruneNickTold(peers) {
   for (const id of nickToldPeers) if (!linked.has(id)) nickToldPeers.delete(id);
 }
 
-// RtcNetwork retains the stable Signaling created before boot while the app points its underlying
-// WebSocket at the selected URL/room. seedrelay owns serialization, queuing, and
-// stale-socket suppression; this page still owns every lifecycle and UI decision.
-
 // The room's contact secret: 32 bytes, or null for an open room — we answer anyone who
 // finds the room name. Set from the invite link's `#` fragment on load, or minted by
 // "Random"; the sharing machinery is further down, under "Room secret". Declared with
 // the other networking state near the top of the file, not here — see there for why.
 
 // Changing the rendezvous room or contact secret does NOT reload the transport bundle or
-// replace its ChannelFactory. `connectRelay` rotates the guest-owned gate before signaling.
-// A room change then severs authenticated links and closes their physical peer connections,
-// leaving the transport guest, factory sink, and signaling adapter standing. Reconnecting
-// to the same room simply sends another hello.
-function joinRtcRoom(url) {
+// replace its sockets. `connectRelay` rotates the guest-owned gate before joining.
+// A room change then severs every link — the relay's and the peers' — leaving the
+// transport guest and the socket sink standing; a call follows the linked set as it
+// changes. Rejoining the same room simply says hello again.
+async function joinRtcRoom(url) {
   const secret = roomSecret ?? undefined;
   if (transportRoomUrl !== undefined && (transportRoomUrl !== url || transportSecret !== secret)) {
-    // TransportHost owns live link descriptors; MediaRtcNetwork owns peer connections.
     transport.reset();
-    net.resetPeers();
   }
   transportRoomUrl = url;
   transportSecret = secret;
-  net.join();
+  const answer = shell.call(NET_PROTO, new OpArgs("relay").text(url).build());
+  if (!answer) throw new Error(`nothing claims ${NET_PROTO}`);
+  await answer;
 }
 
 // Boot the app registry now that the shell exists: render the (empty) lists, then
@@ -1204,14 +1220,12 @@ restoreOffers().catch((err) =>
 
 // ─── live audio/video calls ────────────────────────────────────────────
 //
-// Calls ride the same RTCPeerConnections as the data channel, through
-// MediaRtcNetwork (./media-rtc.js) — chat's subclass of seedkernel's raw-I/O
-// WebRTC seam. net.addLocalTrack publishes our camera/mic to every connected
-// peer (and to peers that connect later), renegotiating as tracks are added
-// (startCall) or removed (endCall → net.removeLocalTracks). Remote tracks arrive
-// via the onTrack callback wired on `net` above and land in a per-peer tile keyed
-// by pubkey hex; a tile is cleaned up when its track ends or its physical peer
-// connection closes.
+// Calls ride peer connections of their own, one per linked peer, through MediaCalls
+// (./media-rtc.js), signaled over the calls boot bundle. media.start publishes our
+// camera/mic to every linked peer, and pollPeerViews keeps it following the linked set;
+// endCall hangs up with every peer. Remote tracks arrive via the onTrack callback wired
+// on `media` above and land in a per-peer tile keyed by pubkey hex; a tile is cleaned up
+// when its track ends or its media connection closes.
 
 const callBar      = document.getElementById("call-bar");
 const callStartBtn = document.getElementById("call-start");
@@ -1226,8 +1240,12 @@ const remoteTiles = new Map(); // pkHex -> { wrap, video, stream }
 
 async function updateCallStatus(peerCount) {
   if (!localStream) {
-    callStatus.textContent = "idle";
-    callBar.classList.add("idle");
+    // Not sending — but a peer that is shows up here anyway, so the bar says so, and the
+    // button offers to join that call rather than to start one.
+    const n = remoteTiles.size;
+    callStartBtn.textContent = n > 0 ? "Join call" : "Start call";
+    callStatus.textContent = n > 0 ? `receiving from ${n} peer${n === 1 ? "" : "s"}` : "idle";
+    callBar.classList.toggle("idle", n === 0);
   } else {
     const n = peerCount ?? (await linkedPeers()).length;
     // Re-read after the await: a hang-up while the transport was answering means there is no
@@ -1292,6 +1310,7 @@ function getOrCreateRemoteTile(pkHex) {
   t = { wrap, video: v, stream };
   remoteTiles.set(pkHex, t);
   showTilesIfAny();
+  updateCallStatus();
   return t;
 }
 
@@ -1305,6 +1324,7 @@ function removeRemoteTile(pkHex) {
   t.wrap.remove();
   remoteTiles.delete(pkHex);
   showTilesIfAny();
+  updateCallStatus();
 }
 
 async function startCall() {
@@ -1327,16 +1347,16 @@ async function startCall() {
   callEndBtn.disabled = false;
   callStartBtn.disabled = true;
   ensureLocalTile();
-  // MediaRtcNetwork publishes each track to every connected peer and to any peer
-  // that connects later, renegotiating as needed.
-  for (const track of localStream.getTracks()) net.addLocalTrack(track, localStream);
+  // Published to every linked peer now, and to any that links later (pollPeerViews).
+  media.start(localStream.getTracks().map((track) => ({ track, stream: localStream })), await linkedPeers());
+  const joined = remoteTiles.size > 0;
   updateCallStatus();
-  shellPrint("Call started.", "sys");
+  shellPrint(joined ? "Joined the call." : "Call started.", "sys");
 }
 
 function endCall() {
   if (!localStream) return;
-  net.removeLocalTracks();
+  media.end();
   for (const t of localStream.getTracks()) t.stop();
   localStream = null;
   removeLocalTile();
@@ -1361,19 +1381,18 @@ callMuteBtn.addEventListener("click", toggleMute);
 
 // ─── relay connection ───────────────────────────────────────────────────
 //
-// Proactive ICE restart on a network change. ICE keepalives take 5–10s to
-// notice a network flip on their own; kicking restartAllIce() the moment the
-// browser tells us connectivity changed cuts straight to recovery. The
-// renegotiation offers ride the relay signaling channel, so the relay must be
-// reachable for recovery to complete.
+// Proactive ICE restart on a network change, for a call's media connections. ICE
+// keepalives take 5–10s to notice a network flip on their own; kicking restartAllIce()
+// the moment the browser tells us connectivity changed cuts straight to recovery. The
+// transport restarts its own connections when they report `disconnected` (§12.7).
 window.addEventListener("online", () => {
   shellPrint("Network online — restarting ICE", "sys");
-  net.restartAllIce();
+  media.restartAllIce();
 });
 if (navigator.connection && typeof navigator.connection.addEventListener === "function") {
   navigator.connection.addEventListener("change", () => {
     shellPrint("Network changed — restarting ICE", "sys");
-    net.restartAllIce();
+    media.restartAllIce();
   });
 }
 
@@ -1419,7 +1438,11 @@ async function connectRelay() {
     // arrive under the previous room's credential.
     await setTransportContact(roomSecret);
     relayConnection = { base, room, label, url };
-    relay.connect(url);
+    relayShown = -1;
+    relayStatus.textContent = "connecting...";
+    setRelayPill("connecting", `room ${label}`);
+    shellPrint(`Joining ${url} (room: ${label})...`, "sys");
+    await joinRtcRoom(url);
   }
   catch (err) {
     relayStatus.textContent = "error";
@@ -1429,23 +1452,34 @@ async function connectRelay() {
   }
 }
 
-function relayStateChanged({ state }) {
+// The relay link is the transport's, so its state is asked of the transport: 0 none
+// joined, 1 its link is up, 2 dropped and redialing (seedkernel §12.6). Polled, and shown
+// only when it changes.
+let relayShown = -1;
+async function pollRelay() {
+  try {
+    const answer = shell.call(NET_PROTO, new OpArgs("relayState").build());
+    const state = answer ? (await answer)[0] : 0;
+    if (state !== relayShown) { relayShown = state; showRelayState(state); }
+  } catch {}
+  setTimeout(pollRelay, 1000);
+}
+
+function showRelayState(state) {
   const current = relayConnection;
-  if (!current) return;
+  if (!current || state === 0) {
+    relayStatus.textContent = "disconnected";
+    setRelayPill("off", "no relay");
+    relayConnectBtn.disabled = false;
+    return;
+  }
   const { base, room, label, url } = current;
-  if (state === "connecting") {
-    shellPrint(`Connecting to ${url} (room: ${label})...`, "sys");
-    relayStatus.textContent = "connecting...";
-    setRelayPill("connecting", `room ${label}`);
-    relayConnectBtn.disabled = true;
-  } else if (state === "connected") {
-    shellPrint(`Relay connected — room ${label}, waiting for peers.`, "sys");
+  if (state === 1) {
+    shellPrint(`Relay link up — room ${label}, waiting for peers.`, "sys");
     relayStatus.textContent = `connected · room ${label}`;
     setRelayPill("ok", `room ${label}`);
     relayConnectBtn.disabled = false;
-    // Remember the working URL + room so a reload picks the relay back up
-    // automatically. Saved on success only, so a typo doesn't get retried
-    // forever.
+    // Remember the room so a reload picks it back up automatically.
     sessionStorage.setItem("chat.relayUrl", base);
     sessionStorage.setItem("chat.relayRoom", room);
     // The secret belongs to the room, so it is saved and cleared with it — a reload must
@@ -1453,27 +1487,14 @@ function relayStateChanged({ state }) {
     // after moving to an open one.
     if (roomSecret) sessionStorage.setItem("chat.roomSecret", bytesToHex(roomSecret));
     else sessionStorage.removeItem("chat.roomSecret");
-    // seedrelay flushed queued signals before reporting "connected". The transport and
-    // its ChannelFactory are already standing; rotate old-room channels if necessary,
-    // then announce this node so the WebRTC dance can begin.
-    try { joinRtcRoom(url); }
-    catch (err) {
-      shellPrint(`Room join failed: ${err.message}`, "err");
-      relayStatus.textContent = "error";
-      setRelayPill("err", "no transport");
-    }
-  } else if (state === "disconnected") {
-    relayStatus.textContent = "disconnected";
-    setRelayPill("off", "no relay");
+  } else {
+    relayStatus.textContent = "unreachable — retrying";
+    setRelayPill("err", "relay down");
     relayConnectBtn.disabled = false;
-    shellPrint("Relay disconnected. Existing P2P links unaffected.", "sys");
-  } else if (state === "error") {
-    relayStatus.textContent = "error";
-    setRelayPill("err", "relay error");
-    relayConnectBtn.disabled = false;
-    shellPrint(`Relay error — is one running at ${url}?`, "err");
+    shellPrint(`Relay unreachable — is one running at ${url}? Retrying; existing P2P links are unaffected.`, "err");
   }
 }
+pollRelay();
 relayConnectBtn.addEventListener("click", connectRelay);
 relayUrlInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); connectRelay(); }
@@ -1578,9 +1599,8 @@ function defaultRelayUrl() {
 }
 
 // Auto-reconnect to the last relay that successfully accepted us. This is
-// the other half of the reload story: re-establishing the relay link is
-// what lets our broadcast hello reach peers and tear down their zombie
-// entries for our previous tab.
+// the other half of the reload story: rejoining the room is what lets our
+// broadcast hello reach peers, which then renegotiate with our new tab.
 const savedRelayUrl = sessionStorage.getItem("chat.relayUrl");
 const savedRelayRoom = sessionStorage.getItem("chat.relayRoom");
 const savedRoomSecret = sessionStorage.getItem("chat.roomSecret");
@@ -1616,6 +1636,7 @@ async function pollPeerViews() {
     const peers = await linkedPeers();
     updatePeerPill(peers.length);
     pruneNickTold(peers);
+    media.sync(peers);
     if (localStream) await updateCallStatus(peers.length);
   } catch {}
   setTimeout(pollPeerViews, 750);

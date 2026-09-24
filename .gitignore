@@ -6,3 +6,4 @@ browser/vendor/
 *.pem
 *.version
 browser/offers-bundle.js
+browser/calls-bundle.js

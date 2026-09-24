@@ -38,12 +38,15 @@ const { signBundle, guestOpFraming, hybridAuthorKeysFromSeed }
   = await import("seedkernel-wasm/bundle-author");
 // The chat app shape the offline builder authors — same guest source, same authority set.
 const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO } = await import("../browser/chat-app.js");
-// The offers app shape — same guest source scripts/build-offers-bundle.mjs signs into
+// The offers app shape — same guest source scripts/build-boot-bundles.mjs signs into
 // bundle/offers.skb, read directly off disk below like chat-app-v1.wasm already is.
 const { OFFER_PROTO, OFFERS_KEY_PREFIX } = await import("../browser/offers-app.js");
 // The identity the page pins its offers boot bundle by, off the generated artifact the
 // page itself reads — so `admit` below is the browser's gate, not a stand-in for it.
 const { OFFERS_AUTHOR_HEX, OFFERS_APP } = await import("../browser/offers-bundle.js");
+// The calls app: the signaling path for a call's media, pinned the same way.
+const { CALL_PROTO, CALLS_OP_SEND } = await import("../browser/calls-app.js");
+const { CALLS_AUTHOR_HEX, CALLS_APP } = await import("../browser/calls-bundle.js");
 // `writeOp` frames an app's own local op; `OpArgs` writes the transport bundle's op
 // arguments, which is what the host's own door into the network takes (`peersOf` below).
 const { writeOp, OpArgs } = await import("seedkernel-wasm/op-frame");
@@ -66,6 +69,7 @@ function admit(v) {
   // exactly as chat-shell.js pins it: bytes the deployment shipped, loaded before any
   // dialog could run, so there is nothing for a consent click to decide.
   if (toHex(v.author) === OFFERS_AUTHOR_HEX && v.manifest.app === OFFERS_APP) return true;
+  if (toHex(v.author) === CALLS_AUTHOR_HEX && v.manifest.app === CALLS_APP) return true;
   const bytesHashHex = v.modules.length > 0 ? toHex(genesisHash(sodium, v.modules[0].wasm)) : "";
   if (!pendingApprovals.has(bytesHashHex)) return false;
   pendingApprovals.delete(bytesHashHex);
@@ -93,20 +97,38 @@ function wirePair() {
   return [a, b];
 }
 
-// An accept-only ChannelFactory, matching RtcNetwork's side of the platform seam. The
-// transport registers its sink during boot; a test then hands each end of wirePair to the
-// appropriate host with the same arrival metadata RtcNetwork reports beside a channel.
+// A ChannelFactory over channels the TEST built: one end of a pair handed in as an accept,
+// the other answered to the dial a node's transport makes for the peer it was taught at
+// that destination — every dial goes through the transport's own address book.
 class InjectedChannels {
   #onAccept = null;
+  #dials = new Map();
 
-  async listen(_tcp, _ws, onAccept) {
+  async listen(addrs, onAccept) {
     this.#onAccept = onAccept;
-    return { port: 0, wsPort: 0 };
+    return addrs.map(() => 0);
+  }
+
+  connect(dest) {
+    const channel = this.#dials.get(dest) ?? null;
+    this.#dials.delete(dest);
+    return channel;
   }
 
   give(channel, arrival = {}) {
     if (!this.#onAccept) throw new Error("channel factory has no transport sink");
     this.#onAccept(channel, arrival);
+  }
+
+  /** Teach `shell`'s transport `peer` at a destination this factory answers with
+   *  `channel`, presenting `secret`, and set the dial off with `ready`. */
+  async dial(shell, peer, channel, secret) {
+    const dest = `inject://${peer}`;
+    this.#dials.set(dest, channel);
+    const taught = shell.call(NET_PROTO, new OpArgs("addr").blob(Buffer.from(peer, "hex")).blob(secret).text(dest).build());
+    if (!taught) throw new Error(`nothing claims ${NET_PROTO}`);
+    await taught;
+    void shell.call(NET_PROTO, new OpArgs("ready").u32(1).build())?.catch(() => {});
   }
 
   close() { this.#onAccept = null; }
@@ -308,8 +330,8 @@ try {
 // 4. link A and B through the ChannelFactory sinks registered during boot
 try {
   const [chA, chB] = wirePair();
-  channelsA.give(chA, { dialed: peerB });
   channelsB.give(chB);
+  await channelsA.dial(A, peerB, chA, CONTACT);
   await until(async () => {
     const [aPeers, bPeers] = await Promise.all([peersOf(A), peersOf(B)]);
     return aPeers.includes(peerB) && bPeers.includes(peerA);
@@ -396,7 +418,31 @@ try {
   ok(`offer end-to-end: A's chat app → offer/v1 → B's offers app's guest → fs record ${OFFERS_KEY_PREFIX}${hex.slice(0, 12)}…`);
 } catch (err) { fail("offer end-to-end", err); }
 
-// 7. the shape gate an Offer passes through (peekMeta → isChatApp). A peer's bundle
+// 7. the calls app: a third boot bundle (browser/calls-app.js). A call's media rides a
+//    peer connection the page owns; its signaling rides the node's channel under
+//    call/v1. A's calls app sends a signal, and B's page sees it as its load's
+//    onInbound answer, attributed to A by the channel.
+try {
+  const callsSkbBytes = new Uint8Array(readFileSync(resolve(here, "../bundle/calls.skb")));
+  const aCalls = await A.install(callsSkbBytes);
+  const signals = [];
+  const bCalls = await B.install(callsSkbBytes, {
+    onInbound: (claim, from, answer) => { if (answer.length > 0) signals.push({ claim, from: toHex(from), signal: new Uint8Array(answer) }); },
+  });
+  assert(B.resolve(CALL_PROTO) === bCalls.manifest.app, `B routes "${CALL_PROTO}" to the calls app`);
+  const signal = new TextEncoder().encode(JSON.stringify({ sdp: { type: "offer", sdp: "v=0" } }));
+  const arg = new Uint8Array(32 + signal.length);
+  arg.set(identityB.publicKey, 0);
+  arg.set(signal, 32);
+  await aCalls.invoke(writeOp(CALLS_OP_SEND, arg));
+  await until(() => signals.length > 0, 4000, "call signal");
+  assert(signals[0].claim === CALL_PROTO, "the signal arrived under call/v1");
+  assert(signals[0].from === peerA, "the signal is attributed to A by the channel");
+  assert(toHex(signals[0].signal) === toHex(signal), "the signal arrives byte for byte");
+  ok("call signaling end-to-end: A's calls app → call/v1 → B's calls app → onInbound");
+} catch (err) { fail("call signaling end-to-end", err); }
+
+// 8. the shape gate an Offer passes through (peekMeta → isChatApp). A peer's bundle
 // is installed on one click of a row showing a name and an author, so the reach it
 // declares is the whole of what that click grants — and a chat app's is exactly one
 // local name, `_net`: the network it must reach to be a chat app at all, and no host

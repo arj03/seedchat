@@ -33,8 +33,9 @@ chat makes into the runtime goes through a published entry point of
 
 - **Node.js ≥ 20.**
 - **Sibling checkouts** of [seedkernel](https://github.com/arj03/seedkernel) and
-  [seedrelay](https://github.com/arj03/seedrelay). Both are `file:` dependencies
-  (`../seedkernel/WASM`, `../seedrelay`), so the layout must be:
+  [seedrelay](https://github.com/arj03/seedrelay) (the relay server `npm run relay`
+  starts). Both are `file:` dependencies (`../seedkernel/WASM`, `../seedrelay`), so the
+  layout must be:
 
   ```
   some-dir/
@@ -51,14 +52,16 @@ chat makes into the runtime goes through a published entry point of
 #    browser core libsodium and PQ wasm)
 cd ../seedkernel/WASM && npm install && npm run build:browser
 
-# 2. build chat (both app bundles + the offers boot bundle) and vendor the runtime
+# 2. build chat (both app bundles + the offers and calls boot bundles) and vendor the runtime
 cd ../../seedchat && npm install && npm run build
 
 # 2b. (optional) headless check that chat still works against this seedkernel:
-#     two shells, a real chat app, a full message round-trip, an offer round-trip
+#     two shells, a real chat app, a full message round-trip, an offer round-trip,
+#     a call signal round-trip
 npm run smoke
 
-# 3. signaling rendezvous for the WebRTC mesh (kill it once channels are open)
+# 3. signaling rendezvous for the WebRTC mesh (the transport bundle joins it; kill it
+#    once channels are open)
 npm run relay
 
 # 4. in another terminal: re-vendor + serve browser/ with caching off
@@ -70,10 +73,10 @@ Open the page in two tabs or two browsers and connect both to the same room on t
 
 | Script | What it does |
 | --- | --- |
-| `npm run build` | Compiles both AssemblyScript modules, embeds their UI and metadata, signs `bundle/chat-app-v1.skb` and `bundle/chat-app-v2.skb`, signs the offers boot bundle, then vendors the runtime. |
+| `npm run build` | Compiles both AssemblyScript modules, embeds their UI and metadata, signs `bundle/chat-app-v1.skb` and `bundle/chat-app-v2.skb`, signs the offers and calls boot bundles, then vendors the runtime. |
 | `npm run build:chat-app-v1` / `build:chat-app-v2` | One app's compile → embed → sign pipeline. |
-| `npm run build:offers-bundle` | Signs the offers app into `bundle/offers.skb` and generates `browser/offers-bundle.js`. |
-| `npm run vendor` | Copies the built seedkernel host, libsodium, QuickJS and the seedrelay client into `browser/vendor/`. |
+| `npm run build:boot-bundles` | Signs the offers and calls apps into `bundle/offers.skb` and `bundle/calls.skb` and generates `browser/offers-bundle.js` and `browser/calls-bundle.js`. |
+| `npm run vendor` | Copies the built seedkernel host, libsodium and QuickJS into `browser/vendor/`. |
 | `npm run smoke` | Headless regression test (needs `npm run build` first). Run it after every seedkernel update. |
 | `npm run relay` | Starts the `seedrelay` WebSocket rendezvous on port 8080. |
 | `npm run serve` | Re-vendors, then serves `browser/` on port 3000 with caching disabled. |
@@ -128,16 +131,17 @@ when both tabs are on this machine. Reaching the shell from another device needs
 | `assembly/chat-app-v1/` | v1 handler — text only. `index.ts` is the pure transform, `ui.html` is the iframe UI embedded into the module as a custom section. |
 | `assembly/chat-app-v2/` | v2 handler — text + image + nick. Same shape; upgrading v1→v2 is a re-admit at the same name under the same key. |
 | `asconfig.chat-app-v*.json` | AssemblyScript compiler config for each handler (`build/chat-app-v*.wasm`). |
-| `browser/chat-shell.*` | The browser shell: identity, admission policy, the transport-bundle and offers-bundle boot loads, a WebRTC mesh, the sandboxed iframe. The inline import map in `chat-shell.html` names the seedkernel surface. |
+| `browser/chat-shell.*` | The browser shell: identity, admission policy, the transport, offers and calls boot loads, the sockets the transport's WebRTC mesh runs over, the sandboxed iframe. The inline import map in `chat-shell.html` names the seedkernel surface. |
 | `browser/chat-app.js` | The chat app *shape*, in one place: the guest's source, the `chat` protocol id, and its reach — no host service at all and one co-resident guest, the network (`guest.requires` is exactly `_net`). `scripts/build-app-bundle.mjs` and `scripts/smoke.mjs` author bundles from it; the shell gates received Offers against it with `isChatApp`. |
-| `browser/offers-app.js` | The offers app *shape*: the `offer/v1` id, the app id `offers`, its one-service authority (`fs` — a host service, so it really is a `guest.requires` entry), and its guest source — a keyspace and a claim, no module. `scripts/build-offers-bundle.mjs` signs it into the boot bundle. |
-| `browser/media-rtc.js` | The call feature: `MediaRtcNetwork`, a subclass of seedkernel's `RtcNetwork` that publishes camera/mic over the peer connections the data channel already uses. Live media is chat's own — the host's seam is raw I/O only. |
+| `browser/offers-app.js` | The offers app *shape*: the `offer/v1` id, the app id `offers`, its one-service authority (`fs` — a host service, so it really is a `guest.requires` entry), and its guest source — a keyspace and a claim, no module. `scripts/build-boot-bundles.mjs` signs it into the boot bundle. |
+| `browser/calls-app.js` | The calls app *shape*: the `call/v1` id, the app id `calls`, its one reach (`_net`), and its guest source — a claim that hands a peer's call signal to the page, and a `send` op that puts the page's on the wire. |
+| `browser/media-rtc.js` | The call feature: `MediaCalls`, one `RTCPeerConnection` per peer that the page owns, beside the transport's, with perfect negotiation signaled over `call/v1`. Live media is chat's own — the host holds only the transport's connections. |
 | `scripts/embed-ui.mjs` | Appends a `ui` custom section to a built `.wasm`. |
 | `scripts/embed-meta.mjs` | Appends an `app_meta` JSON custom section (id, name, version, description). |
 | `scripts/build-app-bundle.mjs` | The offline bundle author: signs a built + meta-embedded `.wasm` into a `.skb` under `chat-author.key`, tracking a monotonic freshness mark in `chat-author.version`. |
-| `scripts/build-offers-bundle.mjs` | Signs the offers app's guest-only bundle under the same key, with its own freshness mark in `offers-author.version`. |
-| `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/`, plus the browser libsodium, the QuickJS realm engine and the seedrelay client. Refuses a stale seedkernel build. |
-| `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips a message through a real `chat-app-v1.wasm`, and round-trips an offer through the offers app. |
+| `scripts/build-boot-bundles.mjs` | Signs the offers and calls apps' guest-only bundles under the same key, each with its own freshness mark in `<name>-author.version`. |
+| `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/`, plus the browser libsodium and the QuickJS realm engine. Refuses a stale seedkernel build. |
+| `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips a message through a real `chat-app-v1.wasm`, an offer through the offers app, and a call signal through the calls app. |
 | `scripts/clean.mjs` | Deletes `build/` and `browser/vendor/` when a rebuild isn't taking. |
 
 `ui` and `app_meta` are **chat-shell conventions, not runtime contracts** — the
@@ -148,11 +152,11 @@ host never reads either section. They live here because the reader lives here.
 | Path | What it is |
 | --- | --- |
 | `build/` | Compiled `.wasm` (and `.wat`) handlers. |
-| `bundle/` | Signed bundles: `chat-app-v1.skb`, `chat-app-v2.skb`, `offers.skb`. |
+| `bundle/` | Signed bundles: `chat-app-v1.skb`, `chat-app-v2.skb`, `offers.skb`, `calls.skb`. |
 | `browser/vendor/` | The vendored runtime the page loads. |
-| `browser/offers-bundle.js` | The offers boot bundle embedded as a JS module, since the page is served from `browser/` and `bundle/` is not. |
+| `browser/offers-bundle.js`, `browser/calls-bundle.js` | The boot bundles embedded as JS modules, since the page is served from `browser/` and `bundle/` is not. |
 | `chat-author.key` | The author signing key, minted on the first build. |
-| `chat-author.version`, `offers-author.version` | Each app's version high-water mark. |
+| `chat-author.version`, `offers-author.version`, `calls-author.version` | Each app's version high-water mark. |
 
 **Back up `chat-author.key` and the `.version` files together.** The key *is* the
 author identity: bundles signed under a new key are a different author, so peers
@@ -272,17 +276,19 @@ holds `chat` — remove the first to install it.
 
 ## The seedkernel surface chat uses
 
-Nine published entry points of `seedkernel-wasm`, across the browser shell and the
+Eleven published entry points of `seedkernel-wasm`, across the browser shell and the
 build/smoke scripts:
 
 | Import | Used for |
 | --- | --- |
 | `seedkernel-wasm` | Node `loadCrypto()` in the offline bundle builders and the headless smoke test. |
-| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.9): the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. Chat's `admit` composes the offers-pin and the consent gate. Its `Shell.call` is the host's own door into a co-resident guest's `services` claim, which is how the peer pill asks the transport who is linked. |
+| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.9): the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. Chat's `admit` composes the offers and calls pins and the consent gate. Its `Shell.call` is the host's own door into a co-resident guest's `services` claim, which is how the peer pill asks the transport who is linked. |
 | `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` and `TRANSPORT_SERVICE` — the seedkernel-shipped transport bundle as raw bytes, and the local service id it claims, used by the headless smoke assertions (§12.6); browser boot gets the same artifact through `bootShell`. |
 | `seedkernel-wasm/bundle` | `verifyBundle` — the one call that unpacks and checks an offered bundle (`peekMeta`) — and `genesisHash`, the module hash the consent gate keys on. The browser only verifies; peer attribution uses its node public key. |
-| `seedkernel-wasm/bundle-author` | `authorBundle`, `guestOpFraming` and `hybridAuthorKeysFromSeed` in the offline `build-app-bundle.mjs` and `build-offers-bundle.mjs` scripts. This entry point is never imported by the browser shell. |
-| `seedkernel-wasm/net-rtc` | `RtcNetwork` — the relay-signaled WebRTC `ChannelFactory`, constructed before `bootShell` and subclassed for calls in `browser/media-rtc.js`. |
+| `seedkernel-wasm/bundle-author` | `authorBundle`, `guestOpFraming` and `hybridAuthorKeysFromSeed` in the offline `build-app-bundle.mjs` and `build-boot-bundles.mjs` scripts. This entry point is never imported by the browser shell. |
+| `seedkernel-wasm/net-rtc` | `RtcNetwork` — the WebRTC `ChannelFactory`: it holds the transport's peer connections, which the transport negotiates through the relay (§12.7). |
+| `seedkernel-wasm/net-ws` | `WsNetwork` — the WebSocket the transport opens to the relay. |
+| `seedkernel-wasm/socket-seam` | `combineChannels` — both factories behind one driver, passed as `transport.channels`. |
 | `seedkernel-wasm/op-frame` | `writeOp` — the signed apps' own operation framing for local guest invocations — and `OpArgs`, the transport bundle's argument writer, paired with its reader so a host-side call cannot drift from what the guest parses. |
 | `seedkernel-wasm/crypto-browser` | `loadCrypto` — the browser build of the same crypto seam Node's `loadCrypto` provides. |
 | `seedkernel-wasm/libsodium` | The browser libsodium build. |
@@ -290,9 +296,9 @@ build/smoke scripts:
 The import map in `chat-shell.html` also maps `seedkernel-wasm/quickjs`. Chat
 never imports it; the vendored host does, for its QuickJS realms.
 
-The JSON-over-WebSocket rendezvous is deliberately not another seedkernel entry point.
-`seedrelay` owns both its bounded server and reconnectable client adapter; chat owns
-only the selected URL, room, credential, and UI lifecycle.
+The rendezvous is deliberately not a seedkernel entry point. `seedrelay` is the server;
+the transport bundle speaks its wire, joining a room through its `relay` operation and
+redialing a relay that drops. Chat owns only the selected URL, room, credential, and UI.
 
 Plus one on the guest side: the app modules define their two memory-layout
 literals — `PK_LEN = 32` and `PRIV_USER_OFF = 0` — alongside their layout
@@ -304,19 +310,19 @@ Three properties serve as the summary; the details live in the seedkernel docs:
   record layer and request/response layer ship as a signed transport bundle
   serving the local service name `_net`, embedded in the host and reached as raw
   bytes through `transport-bundle`. The host side — link ids and sockets — is
-  `bootShell`'s channel adapter, built around the platform's `RtcNetwork`
-  ChannelFactory supplied as `transport.channels`; transport policy and its
+  `bootShell`'s channel adapter, built around a WebSocket and the platform's
+  `RtcNetwork`, combined and supplied as `transport.channels`; transport policy and its
   defaults belong to the signed bundle, as do the address book and contact gate,
   which live in that bundle's own realm rather than under the adapter. Chat rotates
-  the gate with the transport's local `contact` operation (the room secret) before
-  opening signaling;
-  it never writes an address because an RTC peer arrives as an accepted link the
-  signaling already named, not as an address something dialed
+  the gate with the transport's local `contact` operation (the room secret), then
+  joins the room with its `relay` operation; it never writes an address, because the
+  transport meets and connects every peer in that room itself
   (§12.6, [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)).
-- **The offers app gets a pin, chat's own half of it.** `offer/v1` carries a
+- **The offers and calls apps get a pin, chat's own half of it.** `offer/v1` carries a
   signed bundle for an app that does not exist yet, so something already
   installed at boot owns the name and `admit` allows exactly the author and app
-  the page was built with — a pin, not a consent prompt. Chat's own consent gate
+  the page was built with — a pin, not a consent prompt. The calls app, which carries
+  a call's signaling, is pinned the same way. Chat's own consent gate
   is everything else.
 - **Both directions cross an app's guest.** The host has no send and no receive:
   an inbound frame reaches the shell as the link occupant's own delivery return,
@@ -345,9 +351,9 @@ out here.
 - **`npm run vendor` refuses with a staleness error.** seedkernel's `build/` is
   newer than its `build-min/`, which happens when you rerun its `tsc` without
   minifying. Rerun `npm run build:browser` in `../seedkernel/WASM`.
-- **`seedkernel-wasm not found` / `seedrelay not found`.** The sibling checkouts
+- **`seedkernel-wasm not found`.** The sibling checkouts
   are missing or misnamed; see [Prerequisites](#prerequisites).
-- **`npm run smoke` can't find `build/chat-app-v1.wasm` or `bundle/offers.skb`.**
+- **`npm run smoke` can't find `build/chat-app-v1.wasm` or a boot bundle.**
   Run `npm run build` first.
 - **Peers never appear.** Both tabs must use the same relay URL and room. In a
   gated room they must also hold the same secret, so share the invite link rather
