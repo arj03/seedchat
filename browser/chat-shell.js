@@ -181,7 +181,7 @@ shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 // while starting it, and RtcNetwork announces every data channel through that sink. The
 // transport itself opens the relay (a WebSocket), links through it, and drives the peer
 // connections.
-let relayConnection = null; // { base, room, label, url } for the current room
+let relayConnection = null; // { base, room, label, url, joining } for the current room
 const net = combineChannels(new WsNetwork(), new RtcNetwork());
 
 // Assemble the shared shell now that the identity exists — via bootShell, the ONE
@@ -1441,14 +1441,16 @@ async function connectRelay() {
     // Apply the gate before joining: no link can arrive under the previous room's
     // credential.
     await setTransportContact(roomSecret);
-    relayConnection = { base, room, label, url, at: Date.now() };
+    relayConnection = { base, room, label, url, joining: true };
     relayShown = -1;
     relayStatus.textContent = "connecting...";
     setRelayPill("connecting", `room ${label}`);
     shellPrint(`Joining ${url} (room: ${label})...`, "sys");
     await joinRtcRoom(url);
+    relayConnection.joining = false;
   }
   catch (err) {
+    if (relayConnection) relayConnection.joining = false;
     relayStatus.textContent = "error";
     setRelayPill("err", "relay error");
     relayConnectBtn.disabled = false;
@@ -1458,16 +1460,14 @@ async function connectRelay() {
 
 // The relay link is the transport's, so its state is asked of the transport: 0 none
 // joined, 1 registered, 2 dropped and redialing (seedkernel §12.6). Polled, and shown
-// only when it changes.
+// only when it changes; a join shows as connecting until the transport answers it, once
+// registered or once that attempt has failed.
 let relayShown = -1;
 async function pollRelay() {
   try {
     const answer = shell.call(NET_PROTO, new OpArgs("relayState").build());
     const state = answer ? (await answer)[0] : 0;
-    // Joining returns once the socket is open and registering takes one more round trip,
-    // so a fresh join reads as redialing for a moment.
-    const settling = state === 2 && relayConnection && Date.now() - relayConnection.at < 3000;
-    if (state !== relayShown && !settling) { relayShown = state; showRelayState(state); }
+    if (state !== relayShown && !relayConnection?.joining) { relayShown = state; showRelayState(state); }
   } catch {}
   setTimeout(pollRelay, 1000);
 }
@@ -1606,8 +1606,8 @@ function defaultRelayUrl() {
 }
 
 // Auto-reconnect to the last relay that successfully accepted us. This is
-// the other half of the reload story: rejoining the room is what lets our
-// broadcast hello reach peers, which then renegotiate with our new tab.
+// the other half of the reload story: rejoining the room announces our key to
+// its members, and the transport links each of them with our new tab.
 const savedRelayUrl = sessionStorage.getItem("chat.relayUrl");
 const savedRelayRoom = sessionStorage.getItem("chat.relayRoom");
 const savedRoomSecret = sessionStorage.getItem("chat.roomSecret");
