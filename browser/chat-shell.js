@@ -14,8 +14,8 @@ import { bootShell } from "seedkernel-wasm/shell-core";
 import { writeOp, OpArgs } from "seedkernel-wasm/op-frame";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { verifyBundle, genesisHash } from "seedkernel-wasm/bundle";
-// The sockets: a WebSocket for the relay the transport signals through, and seedkernel's
-// WebRTC seam for the peer connections the transport negotiates (§12.7).
+// The sockets: a WebSocket for the relay the transport meets and links peers through, and
+// seedkernel's WebRTC seam for the peer connections it then moves them to (§12.7).
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { combineChannels } from "seedkernel-wasm/socket-seam";
@@ -149,7 +149,7 @@ let transport;
 let transportSecret;
 let transportRoomUrl;
 // The room's contact secret (see "Room secret" further down for the sharing UI).
-// It is applied to the transport guest before signaling starts (§12.6.3).
+// It is applied to the transport guest before it joins a room (§12.6.3).
 let roomSecret = null;
 
 // ─── per-tab Ed25519 identity ──────────────────────────────────────────
@@ -179,7 +179,8 @@ shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 
 // The tab's sockets, standing before the transport: bootShell registers its accept sink
 // while starting it, and RtcNetwork announces every data channel through that sink. The
-// transport itself opens the relay (a WebSocket) and drives the peer connections.
+// transport itself opens the relay (a WebSocket), links through it, and drives the peer
+// connections.
 let relayConnection = null; // { base, room, label, url } for the current room
 const net = combineChannels(new WsNetwork(), new RtcNetwork());
 
@@ -191,19 +192,19 @@ const net = combineChannels(new WsNetwork(), new RtcNetwork());
 // the shell. The adapter is the platform's: link ids and sockets. Transport policy belongs
 // to the signed bundle, and so does the address book — it lives in that bundle's own realm
 // now (§12.10), and chat writes nothing to it: a peer here is met in the relay room the
-// transport joins, and connected by it.
+// transport joins, and linked by it.
 // The sockets above are passed in as `channels`; bootShell registers their accept sink
 // while starting the transport. Raw-link
 // events then go only to whichever admitted slot owns the `link` binding, and
 // `shell.close()` closes the whole stack.
 //
 // Contact policy belongs to the signed transport guest. `connectRelay()` rotates its
-// `contact` setting before signaling begins; changing rooms still deliberately severs
+// `contact` setting before it joins a room; changing rooms still deliberately severs
 // existing links in `joinRtcRoom()`, without reloading the transport.
 //
 // bootShell installs the seedkernel-shipped transport bundle at boot and
 // starts the ChannelFactory before returning. Connecting to a relay is the transport's
-// `relay` op: it joins the room and connects the peers it meets there.
+// `relay` op: it registers there, joins the room and links the peers it meets.
 //
 // The realm engine every app's guest runs in — the transport bundle's, the offers
 // app's, and each chat app's — is bootShell's default (safe-js), imported lazily on
@@ -1154,12 +1155,14 @@ window.addEventListener("message", async (ev) => {
 });
 
 // ---------------------------------------------------------------------------
-// Networking — the transport bundle over a WebRTC mesh it negotiates through a relay.
+// Networking: the transport bundle meets peers in a relay room, links through the relay,
+// and moves each link to WebRTC.
 //
 // The transport is the seedkernel-shipped signed bundle bootShell loaded: the channel
 // AKE, record layer, link routing and request/response layer run as its confined
-// guest program, driven by the shell's TransportHost — and so do the relay room, who
-// offers to whom, and ICE restarts (§12.7). What net-rtc.ts contributes is the platform
+// guest program, driven by the shell's TransportHost, and so do the relay room, the move
+// to WebRTC (signaled over the peer's authenticated link), who offers, and ICE restarts
+// (§12.7). What net-rtc.ts contributes is the platform
 // object: it holds each RTCPeerConnection and passes its negotiation through as bytes.
 // Channel identity is the transport's in-channel HELLO/AUTH (§12.6),
 // so any frame the driver hands to our sink is already attributed to an
@@ -1192,7 +1195,7 @@ function pruneNickTold(peers) {
 // replace its sockets. `connectRelay` rotates the guest-owned gate before joining.
 // A room change then severs every link — the relay's and the peers' — leaving the
 // transport guest and the socket sink standing; a call follows the linked set as it
-// changes. Rejoining the same room simply says hello again.
+// changes. Rejoining the same room keeps the registration.
 async function joinRtcRoom(url) {
   const secret = roomSecret ?? undefined;
   if (transportRoomUrl !== undefined && (transportRoomUrl !== url || transportSecret !== secret)) {
@@ -1414,7 +1417,8 @@ function buildRelayUrl(base, room) {
   try { u = new URL(base); } catch { return null; }
   if (u.protocol !== "ws:" && u.protocol !== "wss:") return null;
   const hasPath = u.pathname && u.pathname !== "/";
-  if (!hasPath && room) u.pathname = "/" + encodeURIComponent(room);
+  // A bare relay URL joins no room, so an empty room names the default one.
+  if (!hasPath) u.pathname = "/" + encodeURIComponent(room || DEFAULT_ROOM);
   return u.toString();
 }
 
@@ -1434,10 +1438,10 @@ async function connectRelay() {
   updateRoomGateHint();
   const label = room || DEFAULT_ROOM;
   try {
-    // Apply the gate before opening signaling: no platform-chosen RTC channel can
-    // arrive under the previous room's credential.
+    // Apply the gate before joining: no link can arrive under the previous room's
+    // credential.
     await setTransportContact(roomSecret);
-    relayConnection = { base, room, label, url };
+    relayConnection = { base, room, label, url, at: Date.now() };
     relayShown = -1;
     relayStatus.textContent = "connecting...";
     setRelayPill("connecting", `room ${label}`);
@@ -1453,14 +1457,17 @@ async function connectRelay() {
 }
 
 // The relay link is the transport's, so its state is asked of the transport: 0 none
-// joined, 1 its link is up, 2 dropped and redialing (seedkernel §12.6). Polled, and shown
+// joined, 1 registered, 2 dropped and redialing (seedkernel §12.6). Polled, and shown
 // only when it changes.
 let relayShown = -1;
 async function pollRelay() {
   try {
     const answer = shell.call(NET_PROTO, new OpArgs("relayState").build());
     const state = answer ? (await answer)[0] : 0;
-    if (state !== relayShown) { relayShown = state; showRelayState(state); }
+    // Joining returns once the socket is open and registering takes one more round trip,
+    // so a fresh join reads as redialing for a moment.
+    const settling = state === 2 && relayConnection && Date.now() - relayConnection.at < 3000;
+    if (state !== relayShown && !settling) { relayShown = state; showRelayState(state); }
   } catch {}
   setTimeout(pollRelay, 1000);
 }

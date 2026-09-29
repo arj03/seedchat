@@ -51,7 +51,7 @@
     <span>seedkernel</span>
   </div>
   <div class="status-row">
-    <span id="relay-pill" class="pill" title="Signaling relay state"><span class="led"></span><span id="relay-pill-text">no relay</span></span>
+    <span id="relay-pill" class="pill" title="Relay state"><span class="led"></span><span id="relay-pill-text">no relay</span></span>
     <span id="peer-pill" class="pill" title="Connected peers"><span id="peer-pill-text">0 peers</span></span>
     <span id="identity-pill" class="pill identity" title="Click to copy your public key">id —</span>
   </div>
@@ -160,8 +160,9 @@
 
   <!-- ─── Network (relay) ──────────────────────────────────────────── -->
   <div id="panel-relay" class="panel hidden" role="tabpanel">
-    <p class="hint">A signaling relay forwards SDP/ICE between peers while they're setting up a direct
-      link. Once peers are connected, the relay is no longer needed and can be closed.</p>
+    <p class="hint">Peers meet in a room on a relay and link through it, then move to a direct
+      link. The relay forwards only encrypted bytes; once peers are directly connected it is no
+      longer needed, and where a direct link cannot be made the link stays on the relay.</p>
 
     <label class="field">
       Relay URL
@@ -182,8 +183,8 @@
       (allowed chars: <code>A-Z a-z 0-9 . _ -</code>).</p>
     <p class="hint"><strong>Random</strong> mints a private room <em>and</em> a contact secret, then
       <strong>Copy invite link</strong> gives you one URL carrying both. The secret lives in the link's
-      <code>#</code> fragment, which browsers never send to a server — so the relay forwards your
-      signaling without being able to join the room itself. A peer that cannot produce the secret
+      <code>#</code> fragment, which browsers never send to a server, so the relay forwards your
+      traffic without being able to join the room itself. A peer that cannot produce the secret
       draws no response at all. Without one the room is open: anyone who learns its name can join.</p>
     <p class="hint">Start a relay locally with <code>npm run relay</code>, or point at a
       public one your group trusts.</p>

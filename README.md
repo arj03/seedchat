@@ -60,8 +60,8 @@ cd ../../seedchat && npm install && npm run build
 #     a call signal round-trip
 npm run smoke
 
-# 3. signaling rendezvous for the WebRTC mesh (the transport bundle joins it; kill it
-#    once channels are open)
+# 3. the relay where peers meet and link before moving to WebRTC (the transport bundle
+#    joins it; once peers are on WebRTC, killing it leaves them linked)
 npm run relay
 
 # 4. in another terminal: re-vendor + serve browser/ with caching off
@@ -78,7 +78,7 @@ Open the page in two tabs or two browsers and connect both to the same room on t
 | `npm run build:boot-bundles` | Signs the offers and calls apps into `bundle/offers.skb` and `bundle/calls.skb` and generates `browser/offers-bundle.js` and `browser/calls-bundle.js`. |
 | `npm run vendor` | Copies the built seedkernel host, libsodium and QuickJS into `browser/vendor/`. |
 | `npm run smoke` | Headless regression test (needs `npm run build` first). Run it after every seedkernel update. |
-| `npm run relay` | Starts the `seedrelay` WebSocket rendezvous on port 8080. |
+| `npm run relay` | Starts the `seedrelay` relay on port 8080. |
 | `npm run serve` | Re-vendors, then serves `browser/` on port 3000 with caching disabled. |
 | `npm run clean` | Deletes `build/` and `browser/vendor/`. |
 
@@ -116,9 +116,10 @@ be *open* or *gated*:
   needs for routing and never the credential. A peer with a wrong or missing secret
   is refused silently: it just never appears.
 
-Either way, identity is bound in-channel by the transport bundle's HELLO/AUTH
-handshake, so a relay can observe SDP metadata and refuse to forward, but can never
-impersonate a peer.
+Either way, identity is bound in-channel by the transport bundle's handshake, which
+runs end to end through the relay, so a relay can see which keys meet and refuse to
+forward, but can never read the traffic or impersonate a peer. WebRTC signaling rides the
+peers' own authenticated link, so no relay or room member sees SDP or candidates.
 
 **Other devices.** `localhost` is a secure context, so plain HTTP is enough for WebRTC
 when both tabs are on this machine. Reaching the shell from another device needs HTTPS
@@ -286,7 +287,7 @@ build/smoke scripts:
 | `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` and `TRANSPORT_SERVICE` — the seedkernel-shipped transport bundle as raw bytes, and the local service id it claims, used by the headless smoke assertions (§12.6); browser boot gets the same artifact through `bootShell`. |
 | `seedkernel-wasm/bundle` | `verifyBundle` — the one call that unpacks and checks an offered bundle (`peekMeta`) — and `genesisHash`, the module hash the consent gate keys on. The browser only verifies; peer attribution uses its node public key. |
 | `seedkernel-wasm/bundle-author` | `authorBundle`, `guestOpFraming` and `hybridAuthorKeysFromSeed` in the offline `build-app-bundle.mjs` and `build-boot-bundles.mjs` scripts. This entry point is never imported by the browser shell. |
-| `seedkernel-wasm/net-rtc` | `RtcNetwork` — the WebRTC `ChannelFactory`: it holds the transport's peer connections, which the transport negotiates through the relay (§12.7). |
+| `seedkernel-wasm/net-rtc` | `RtcNetwork` — the WebRTC `ChannelFactory`: it holds the transport's peer connections, which the transport negotiates over links made through the relay (§12.7). |
 | `seedkernel-wasm/net-ws` | `WsNetwork` — the WebSocket the transport opens to the relay. |
 | `seedkernel-wasm/socket-seam` | `combineChannels` — both factories behind one driver, passed as `transport.channels`. |
 | `seedkernel-wasm/op-frame` | `writeOp` — the signed apps' own operation framing for local guest invocations — and `OpArgs`, the transport bundle's argument writer, paired with its reader so a host-side call cannot drift from what the guest parses. |
@@ -296,9 +297,9 @@ build/smoke scripts:
 The import map in `chat-shell.html` also maps `seedkernel-wasm/quickjs`. Chat
 never imports it; the vendored host does, for its QuickJS realms.
 
-The rendezvous is deliberately not a seedkernel entry point. `seedrelay` is the server;
-the transport bundle speaks its wire, joining a room through its `relay` operation and
-redialing a relay that drops. Chat owns only the selected URL, room, credential, and UI.
+The relay is deliberately not a seedkernel entry point. `seedrelay` is the server;
+the transport bundle speaks its wire, registering and joining a room through its `relay`
+operation and redialing a relay that drops. Chat owns only the selected URL, room, credential, and UI.
 
 Plus one on the guest side: the app modules define their two memory-layout
 literals — `PK_LEN = 32` and `PRIV_USER_OFF = 0` — alongside their layout
@@ -316,7 +317,7 @@ Three properties serve as the summary; the details live in the seedkernel docs:
   which live in that bundle's own realm rather than under the adapter. Chat rotates
   the gate with the transport's local `contact` operation (the room secret), then
   joins the room with its `relay` operation; it never writes an address, because the
-  transport meets and connects every peer in that room itself
+  transport meets and links every peer in that room itself
   (§12.6, [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)).
 - **The offers and calls apps get a pin, chat's own half of it.** `offer/v1` carries a
   signed bundle for an app that does not exist yet, so something already
