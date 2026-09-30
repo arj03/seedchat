@@ -127,6 +127,18 @@ for (const f of ["libsodium-wrappers.mjs", "libsodium-core.mjs", "libsodium.wasm
 // ML-KEM-768 is private content of the signed transport bundle now; no loose
 // browser artifact is needed here.
 
+// ── vendor seedrelay's room client ──────────────────────────────────────────
+// Rooms are the app's: the page meets peers in a relay room itself and hands them to the
+// transport, which knows only keys and relays. seedrelay is a sibling checkout, like
+// seedkernel (package.json pins `file:../seedrelay`).
+const roomsSrc = resolve(root, "..", "seedrelay", "rooms.mjs");
+if (!existsSync(roomsSrc)) {
+  console.error(`seedrelay not found at ${dirname(roomsSrc)}.\n  check it out beside this repo`);
+  process.exit(2);
+}
+mkdirSync(resolve(vendor, "seedrelay"), { recursive: true });
+copyFileSync(roomsSrc, resolve(vendor, "seedrelay", "rooms.mjs"));
+
 // ── vendor the QuickJS realm engine so chat runs offline ────────────────────
 // Two pieces, because that is how seedkernel splits them: the ENGINE is the
 // seedkernel's own in-repo quickjs-ng 0.16.1 build (WASM/quickjs/dist — the same
