@@ -116,6 +116,13 @@ be *open* or *gated*:
   needs for routing and never the credential. A peer with a wrong or missing secret
   is refused silently: it just never appears.
 
+**Private relays.** A relay started with `--secret` (seedrelay's
+[Private relays](https://github.com/arj03/seedrelay#private-relays)) serves only
+clients that know its secret. Enter it in the **Relay secret** field on the Network
+tab. It belongs to the relay, not the room, so it is not part of an invite link: get
+it from whoever runs the relay. The room client and the transport each prove it with
+BLAKE2b and never send it.
+
 Either way, identity is bound in-channel by the transport bundle's handshake, which
 runs end to end through the relay, so a relay can see which keys meet and refuse to
 forward, but can never read the traffic or impersonate a peer. WebRTC signaling rides the
@@ -359,6 +366,9 @@ out here.
 - **Peers never appear.** Both tabs must use the same relay URL and room. In a
   gated room they must also hold the same secret, so share the invite link rather
   than the room name: a peer with the wrong secret is refused without any error.
+- **The relay reads as unreachable, but it is running.** It may be private: a relay
+  started with `--secret` drops a client without its secret, or with another one.
+  Enter the relay's secret in the **Relay secret** field.
 - **A dropped `.skb` says "Not a valid app bundle", or a peer's Offer never
   shows up.** The bundle failed verification or the `isChatApp` shape check (an
   Offer that fails is dropped silently). A chat app needs exactly one module, the

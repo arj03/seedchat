@@ -172,6 +172,10 @@
       Room
       <input id="relay-room" type="text" inputmode="text" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="global" />
     </label>
+    <label class="field">
+      Relay secret
+      <input id="relay-secret" type="password" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="only for a private relay" />
+    </label>
     <div class="row">
       <button id="connect-relay" class="primary" type="button">Connect</button>
       <button id="new-room" type="button">Random</button>
@@ -188,6 +192,10 @@
       draws no response at all. Without one the room is open: anyone who learns its name can join.</p>
     <p class="hint">Start a relay locally with <code>npm run relay</code>, or point at a
       public one your group trusts.</p>
+    <p class="hint">A <strong>relay secret</strong> is the relay's own, not the room's: a relay started
+      with <code>--secret</code> serves only clients that prove it, and the proof never sends the
+      secret. Get it from whoever runs the relay; it is not part of an invite link. Leave it empty
+      for an open relay.</p>
   </div>
 
 </main>

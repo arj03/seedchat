@@ -45,6 +45,7 @@ const RELAY_STUN_PORT = 3478;
 const shellLog = document.getElementById("shell-log");
 const relayUrlInput = document.getElementById("relay-url");
 const relayRoomInput = document.getElementById("relay-room");
+const relaySecretInput = document.getElementById("relay-secret");
 const relayConnectBtn = document.getElementById("connect-relay");
 const relayNewRoomBtn = document.getElementById("new-room");
 const relayCopyInviteBtn = document.getElementById("copy-invite");
@@ -1204,7 +1205,11 @@ function pruneNickTold(peers) {
 // A room change then severs every link — the relay's and the peers' — leaving the
 // transport guest and the socket sink standing; a call follows the linked set as it
 // changes. Rejoining the same room keeps the registration.
-async function joinRtcRoom(origin, room) {
+//
+// `relaySecret` is a private relay's (seedrelay's `--secret`), or null for an open one. It
+// is the relay operator's credential, not the room's, so it never rides in an invite link.
+// The room client and the transport each prove it with BLAKE2b, and never send it.
+async function joinRtcRoom(origin, room, relaySecret) {
   const secret = roomSecret ?? undefined;
   const url = `${origin}/${room}`;
   if (transportRoomUrl !== undefined && (transportRoomUrl !== url || transportSecret !== secret)) {
@@ -1212,17 +1217,18 @@ async function joinRtcRoom(origin, room) {
   }
   transportRoomUrl = url;
   transportSecret = secret;
-  if (rooms?.origin !== origin) {
+  if (rooms?.origin !== origin || rooms.relaySecret !== relaySecret) {
     rooms?.client.close();
     roomMembers.clear();
     const client = roomClient({
       relay: origin,
       publicKey: myKeys.publicKey,
       sign: (m) => sodium.crypto_sign_detached(m, myKeys.privateKey),
+      ...(relaySecret ? { secret: relaySecret, blake2b: (m) => sodium.crypto_generichash(64, m) } : {}),
       onMember: (_room, key, present) => void onRoomMember(origin, key, present),
       onRefused: (name) => shellPrint(`Room ${name} is full; try again later.`, "err"),
     });
-    rooms = { origin, client, room: null };
+    rooms = { origin, relaySecret, client, room: null };
   }
   if (rooms.room !== room) {
     if (rooms.room !== null) await rooms.client.leave(rooms.room);
@@ -1230,7 +1236,9 @@ async function joinRtcRoom(origin, room) {
     await rooms.client.join(room);
   }
   // The transport registers this node's key on the relay, so room members can call it.
-  const answer = shell.call(NET_PROTO, new OpArgs("relay").text(origin).build());
+  const op = new OpArgs("relay").text(origin);
+  if (relaySecret) op.text(relaySecret);
+  const answer = shell.call(NET_PROTO, op.build());
   if (!answer) throw new Error(`nothing claims ${NET_PROTO}`);
   await answer;
 }
@@ -1470,17 +1478,18 @@ async function connectRelay() {
   syncHash();
   updateRoomGateHint();
   const label = room || DEFAULT_ROOM;
+  const relaySecret = relaySecretInput.value.trim() || null;
   try {
     // Apply the gate before joining: no link can arrive under the previous room's
     // credential.
     await setTransportContact(roomSecret);
-    relayConnection = { base, room, label, url, joining: true };
+    relayConnection = { base, room, label, url, relaySecret, joining: true };
     RTC_CONFIG.iceServers = [{ urls: `stun:${new URL(base).hostname}:${RELAY_STUN_PORT}` }];
     relayShown = -1;
     relayStatus.textContent = "connecting...";
     setRelayPill("connecting", `room ${label}`);
     shellPrint(`Joining ${url} (room: ${label})...`, "sys");
-    await joinRtcRoom(target.origin, target.room);
+    await joinRtcRoom(target.origin, target.room, relaySecret);
     relayConnection.joining = false;
   }
   catch (err) {
@@ -1514,7 +1523,7 @@ function showRelayState(state) {
     relayConnectBtn.disabled = false;
     return;
   }
-  const { base, room, label, url } = current;
+  const { base, room, label, url, relaySecret } = current;
   if (state === 1) {
     shellPrint(`Relay link up — room ${label}, waiting for peers.`, "sys");
     relayStatus.textContent = `connected · room ${label}`;
@@ -1528,11 +1537,16 @@ function showRelayState(state) {
     // after moving to an open one.
     if (roomSecret) sessionStorage.setItem("chat.roomSecret", bytesToHex(roomSecret));
     else sessionStorage.removeItem("chat.roomSecret");
+    // The relay secret belongs to the relay, so it is saved and cleared with the relay.
+    if (relaySecret) sessionStorage.setItem("chat.relaySecret", relaySecret);
+    else sessionStorage.removeItem("chat.relaySecret");
   } else {
     relayStatus.textContent = "unreachable — retrying";
     setRelayPill("err", "relay down");
     relayConnectBtn.disabled = false;
-    shellPrint(`Relay unreachable — is one running at ${url}? Retrying; existing P2P links are unaffected.`, "err");
+    // A private relay drops a node without its secret, which reads here as unreachable.
+    shellPrint(`Relay unreachable — is one running at ${url}, and if it is private, is the relay secret right? ` +
+      "Retrying; existing P2P links are unaffected.", "err");
   }
 }
 pollRelay();
@@ -1541,6 +1555,9 @@ relayUrlInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); connectRelay(); }
 });
 relayRoomInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); connectRelay(); }
+});
+relaySecretInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); connectRelay(); }
 });
 
@@ -1645,8 +1662,10 @@ function defaultRelayUrl() {
 const savedRelayUrl = sessionStorage.getItem("chat.relayUrl");
 const savedRelayRoom = sessionStorage.getItem("chat.relayRoom");
 const savedRoomSecret = sessionStorage.getItem("chat.roomSecret");
+const savedRelaySecret = sessionStorage.getItem("chat.relaySecret");
 relayUrlInput.value = savedRelayUrl || defaultRelayUrl();
 if (savedRelayRoom) relayRoomInput.value = savedRelayRoom;
+if (savedRelaySecret) relaySecretInput.value = savedRelaySecret;
 if (savedRoomSecret && /^[0-9a-f]{64}$/.test(savedRoomSecret)) roomSecret = hexToBytes(savedRoomSecret);
 
 // An invite link WINS over the saved session: following someone's link is an explicit
