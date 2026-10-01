@@ -1713,9 +1713,12 @@ relayCopyInviteBtn.addEventListener("click", async () => {
 
 // Default relay URL: same host the page is loaded from (so phones loading
 // the shell off a desktop's LAN IP get the right pre-fill out of the box).
-// Always ws:// — the relay is plain WebSocket; user can override to wss://.
+// An HTTPS page may open only wss://, so it names its own origin: the proxy that serves
+// it over TLS fronts the relay too (seedrelay's droplet script sets both up under one
+// name). Otherwise ws:// on the relay's own port; user can override to wss://.
 // Falls back to "localhost" on file:// where location.hostname is empty.
 function defaultRelayUrl() {
+  if (location.protocol === "https:") return `wss://${location.host}`;
   const host = location.hostname || "localhost";
   return `ws://${host}:8080`;
 }
