@@ -162,6 +162,18 @@ async function peersOf(shell) {
   return out;
 }
 
+/** How a node reaches each linked peer: the transport's `routes` op, which chat-shell.js's
+ *  `peerRoutes` reads for the Network tab's peer list. Peer hex to whether its link is
+ *  direct. */
+async function routesOf(shell) {
+  const answer = shell.call(NET_PROTO, new OpArgs("routes").build());
+  if (!answer) return new Map();
+  const bytes = await answer;
+  const out = new Map();
+  for (let off = 0; off + 33 <= bytes.length; off += 33) out.set(toHex(bytes.slice(off, off + 32)), bytes[off + 32] === 1);
+  return out;
+}
+
 /** Set the transport guest's inbound contact gate. Empty means open (§12.6.3). */
 async function setContactSecret(shell, secret) {
   const answer = shell.call(NET_PROTO, new OpArgs("contact")
@@ -337,6 +349,13 @@ try {
     return aPeers.includes(peerB) && bPeers.includes(peerA);
   }, 4000, "handshake");
   ok("two transport ends authenticated over the channel seam");
+
+  // The injected channel is a dial of the peer itself, not a splice through a relay, so
+  // each end reads the other as direct — the answer the page's peer list shows.
+  const [aRoutes, bRoutes] = await Promise.all([routesOf(A), routesOf(B)]);
+  assert(aRoutes.get(peerB) === true && bRoutes.get(peerA) === true,
+    "`routes` must answer each linked peer, and read a dialed link as direct");
+  ok("the transport answers how each peer is reached");
 
   const rotated = new Uint8Array(32).fill(9);
   await Promise.all([setContactSecret(A, rotated), setContactSecret(B, rotated)]);

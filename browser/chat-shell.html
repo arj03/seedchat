@@ -182,6 +182,20 @@
       <button id="copy-invite" type="button">Copy invite link</button>
       <span id="relay-status" class="sys relay-status">not connected</span>
     </div>
+
+    <section class="step">
+      <header class="step-head">
+        <span class="step-pip">⇄</span>
+        <h3 class="step-title">Peers</h3>
+      </header>
+      <div class="step-body">
+        <ul id="peer-list" class="app-list">
+          <li class="empty-row">No peers linked yet.</li>
+        </ul>
+        <p class="hint subtle"><strong>direct</strong> is a link that has moved to WebRTC;
+          <strong>via relay</strong> is one the relay still forwards.</p>
+      </div>
+    </section>
     <p class="hint" id="room-gate-hint">Pick a room name and share it with the peers you want to meet — only clients
       in the same room see each other. Leave empty for the default <code>global</code> room
       (allowed chars: <code>A-Z a-z 0-9 . _ -</code>).</p>

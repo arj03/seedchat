@@ -50,6 +50,7 @@ const relayConnectBtn = document.getElementById("connect-relay");
 const relayNewRoomBtn = document.getElementById("new-room");
 const relayCopyInviteBtn = document.getElementById("copy-invite");
 const relayStatus = document.getElementById("relay-status");
+const peerListEl = document.getElementById("peer-list");
 const appStatus = document.getElementById("app-status");
 const frame = document.getElementById("app-frame");
 const appEmpty = document.getElementById("app-empty");
@@ -360,6 +361,23 @@ async function linkedPeers() {
   catch { return []; }
 }
 
+// How each linked peer is reached is the transport's to say as well: its `routes` op answers
+// the same set as `[key 32][direct u8]` apiece, 1 once the peer's link has moved off the
+// relay to WebRTC and 0 while the relay still forwards it (seedkernel §12.7).
+async function peerRoutes() {
+  const answer = shell.call(NET_PROTO, new OpArgs("routes").build());
+  if (!answer) return [];
+  try {
+    const bytes = await answer;
+    const out = [];
+    for (let off = 0; off + 33 <= bytes.length; off += 33) {
+      out.push({ id: bytesToHex(bytes.subarray(off, off + 32)), direct: bytes[off + 32] === 1 });
+    }
+    return out;
+  }
+  catch { return []; }
+}
+
 /** Rotate the transport guest's inbound contact gate. Empty means open (§12.6.3). */
 async function setTransportContact(secret) {
   const answer = shell.call(NET_PROTO, new OpArgs("contact")
@@ -369,9 +387,52 @@ async function setTransportContact(secret) {
   await answer;
 }
 
-function updatePeerPill(open) {
-  peerPillText.textContent = open === 1 ? "1 peer" : `${open} peers`;
-  peerPill.classList.toggle("ok", open > 0);
+// The pill counts the linked peers, and says how many of them the relay still forwards:
+// green once every link is direct, amber while any is relayed.
+function updatePeerPill(routes) {
+  const open = routes.length;
+  const relayed = routes.filter((r) => !r.direct).length;
+  peerPillText.textContent = (open === 1 ? "1 peer" : `${open} peers`) + (relayed > 0 ? ` · ${relayed} via relay` : "");
+  peerPill.classList.toggle("ok", open > 0 && relayed === 0);
+  peerPill.classList.toggle("warn", relayed > 0);
+  peerPill.title = open === 0 ? "Connected peers"
+    : relayed === 0 ? "Connected peers — all linked directly"
+    : `Connected peers — ${open - relayed} direct, ${relayed} through the relay`;
+}
+
+// The Network tab's peer list: one row per linked peer, with how it is reached. Redrawn
+// only when the transport's answer changes, like the relay state below.
+let peersShown = "";
+function renderPeerList(routes) {
+  const sorted = [...routes].sort((a, b) => (a.id < b.id ? -1 : 1));
+  const shown = sorted.map((r) => r.id + (r.direct ? "+" : "-")).join();
+  if (shown === peersShown) return;
+  peersShown = shown;
+  peerListEl.innerHTML = "";
+  if (sorted.length === 0) {
+    const li = document.createElement("li");
+    li.className = "empty-row";
+    li.textContent = "No peers linked yet.";
+    peerListEl.appendChild(li);
+    return;
+  }
+  for (const { id, direct } of sorted) {
+    const li = document.createElement("li");
+    li.className = "peer-row";
+    const name = document.createElement("span");
+    name.className = "peer-row-id";
+    name.textContent = id.slice(0, 8);
+    name.title = id;
+    li.appendChild(name);
+    const route = document.createElement("span");
+    route.className = direct ? "peer-route direct" : "peer-route relayed";
+    route.textContent = direct ? "direct" : "via relay";
+    route.title = direct
+      ? "Linked peer to peer over WebRTC; the relay carries none of this traffic."
+      : "The relay forwards this link's encrypted bytes; no direct link has been made.";
+    li.appendChild(route);
+    peerListEl.appendChild(li);
+  }
 }
 
 // ─── app registry ──────────────────────────────────────────────────────
@@ -1689,20 +1750,22 @@ syncHash();
 if (savedRelayUrl) connectRelay();
 
 // Presentation-only polling: authenticated peer truth stays in the transport guest. The
-// page asks for the current set to render counts; it never mirrors transitions or drives
-// reconnection/fan-out from a client-side Set.
+// page asks for the current set to render counts and routes; it never mirrors transitions or
+// drives reconnection/fan-out from a client-side Set.
 async function pollPeerViews() {
   // A failed tick is swallowed rather than logged: this runs every 750ms, and the next
   // one either succeeds or the pill simply keeps its last value. What must NOT happen is
   // the reschedule being skipped — that would freeze the pill for the tab's life.
   try {
-    const peers = await linkedPeers();
+    const routes = await peerRoutes();
+    const peers = routes.map((r) => r.id);
     // A room member this node calls (the smaller key calls, so a pair dials once) and has
     // no link to is dialed: `ready` dials every address the transport holds.
     if ([...roomMembers].some((m) => myPkHex < m && !peers.includes(m))) {
       void shell.call(NET_PROTO, new OpArgs("ready").u32(0).build())?.catch(() => {});
     }
-    updatePeerPill(peers.length);
+    updatePeerPill(routes);
+    renderPeerList(routes);
     pruneNickTold(peers);
     media.sync(peers);
     if (localStream) await updateCallStatus(peers.length);

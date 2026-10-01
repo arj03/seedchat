@@ -528,6 +528,28 @@
   .field-label-sm { font-size: 0.8em; }
   .relay-status   { font-size: 0.82em; }
 
+  /* ── network panel: linked peers ──────────────────────────────────── */
+  .peer-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6em;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.5em 0.8em;
+  }
+  .peer-row-id { color: var(--peer); }
+  .peer-route {
+    font-size: 0.78em;
+    padding: 0.05em 0.5em;
+    border-radius: 3px;
+    border: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  .peer-route.direct  { color: var(--ok);   border-color: #2d4d3a; background: #14241a; }
+  .peer-route.relayed { color: var(--warn); border-color: #4d4023; background: #2a2410; }
+
   /* ── apps panel ───────────────────────────────────────────────────── */
   .dropzone {
     border: 1px dashed var(--line-2);

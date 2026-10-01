@@ -129,6 +129,11 @@ runs end to end through the relay, so a relay can see which keys meet and refuse
 forward, but can never read the traffic or impersonate a peer. WebRTC signaling rides the
 peers' own authenticated link, so no relay or room member sees SDP or candidates.
 
+**Direct or relayed.** The **Network** tab lists each linked peer with how it is
+reached: `direct` once its link has moved to WebRTC, `via relay` while the relay still
+forwards it, which is where a link stays when no direct one can be made. The peer pill
+in the top bar counts the relayed ones and turns green once every link is direct.
+
 **Other devices.** `localhost` is a secure context, so plain HTTP is enough for WebRTC
 when both tabs are on this machine. Reaching the shell from another device needs HTTPS
 (and a relay URL that device can reach; `wss://` if the page is served over HTTPS).
@@ -291,7 +296,7 @@ build/smoke scripts:
 | Import | Used for |
 | --- | --- |
 | `seedkernel-wasm` | Node `loadCrypto()` in the offline bundle builders and the headless smoke test. |
-| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.9): the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. Chat's `admit` composes the offers and calls pins and the consent gate. Its `Shell.call` is the host's own door into a co-resident guest's `services` claim, which is how the peer pill asks the transport who is linked. |
+| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.9): the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. Chat's `admit` composes the offers and calls pins and the consent gate. Its `Shell.call` is the host's own door into a co-resident guest's `services` claim, which is how the peer pill and the peer list ask the transport who is linked, and whether directly or through the relay. |
 | `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` and `TRANSPORT_SERVICE` — the seedkernel-shipped transport bundle as raw bytes, and the local service id it claims, used by the headless smoke assertions (§12.6); browser boot gets the same artifact through `bootShell`. |
 | `seedkernel-wasm/bundle` | `verifyBundle` — the one call that unpacks and checks an offered bundle (`peekMeta`) — and `genesisHash`, the module hash the consent gate keys on. The browser only verifies; peer attribution uses its node public key. |
 | `seedkernel-wasm/bundle-author` | `authorBundle`, `guestOpFraming` and `hybridAuthorKeysFromSeed` in the offline `build-app-bundle.mjs` and `build-boot-bundles.mjs` scripts. This entry point is never imported by the browser shell. |
@@ -340,9 +345,9 @@ Three properties serve as the summary; the details live in the seedkernel docs:
   and an outbound frame leaves by an app *calling* `_net`. The render bytes a
   chat app's guest returns for an inbound frame are that call's answer, read off
   the load's own `onInbound` (§12.10) — no second claim, no host-side tap. The
-  page's own questions go the same way: "who is linked" is a call on `_net`
-  through `Shell.call`, not a field on the adapter, because links are the
-  transport guest's and the adapter knows only sockets.
+  page's own questions go the same way: "who is linked, and is it direct" is a
+  call on `_net` through `Shell.call`, not a field on the adapter, because links
+  are the transport guest's and the adapter knows only sockets.
 
 The browser JS entry points are declared in exactly two places: the imports at the top of
 `chat-shell.js`, and the inline import map in `chat-shell.html`. The CSP allows
