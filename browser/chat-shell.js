@@ -14,11 +14,15 @@ import { bootShell } from "seedkernel-wasm/shell-core";
 import { writeOp, OpArgs } from "seedkernel-wasm/op-frame";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { verifyBundle, genesisHash } from "seedkernel-wasm/bundle";
-// The sockets: a WebSocket for the relay the transport signals through, and seedkernel's
-// WebRTC seam for the peer connections the transport negotiates (§12.7).
+// The sockets: a WebSocket for the relay the transport meets and links peers through, and
+// seedkernel's WebRTC seam for the peer connections it then moves them to (§12.7).
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { combineChannels } from "seedkernel-wasm/socket-seam";
+// Rooms are this page's, not the transport's: it meets peers in a relay room with
+// seedrelay's room client and hands their keys to the transport, which knows only keys
+// and the relays that reach them.
+import { roomClient } from "seedrelay/rooms";
 // Chat's own code. media-rtc.js is the call feature: audio and video ride peer
 // connections this page owns, signaled through the calls boot bundle below.
 import { MediaCalls } from "./media-rtc.js";
@@ -31,15 +35,17 @@ import { offersBundleBytes, OFFERS_AUTHOR_HEX, OFFERS_APP } from "./offers-bundl
 import { CALLS_OP_SEND } from "./calls-app.js";
 import { callsBundleBytes, CALLS_AUTHOR_HEX, CALLS_APP } from "./calls-bundle.js";
 
-const RTC_CONFIG = { iceServers: [{ urls: [
-  "stun:stun.l.google.com:19302",
-  "stun:stun.cloudflare.com:3478",
-  "stun:stun.nextcloud.com:443",
-] }] };
+// The media calls' peer connections ask the relay for their address, as the transport's do
+// (seedkernel §12.7), so no third party learns who is calling: `connectRelay` points this at
+// the relay it joins.
+const RTC_CONFIG = { iceServers: [] };
+/** A seedrelay answers STUN on this UDP port. */
+const RELAY_STUN_PORT = 3478;
 
 const shellLog = document.getElementById("shell-log");
 const relayUrlInput = document.getElementById("relay-url");
 const relayRoomInput = document.getElementById("relay-room");
+const relaySecretInput = document.getElementById("relay-secret");
 const relayConnectBtn = document.getElementById("connect-relay");
 const relayNewRoomBtn = document.getElementById("new-room");
 const relayCopyInviteBtn = document.getElementById("copy-invite");
@@ -148,8 +154,12 @@ let transport;
 // connections while retaining the one ChannelFactory registered at boot.
 let transportSecret;
 let transportRoomUrl;
+// The relay room this page is in: its relay's origin, the room client there, and the room
+// name. `roomMembers` is who the room client last heard is in it, keys in hex.
+let rooms = null;
+const roomMembers = new Set();
 // The room's contact secret (see "Room secret" further down for the sharing UI).
-// It is applied to the transport guest before signaling starts (§12.6.3).
+// It is applied to the transport guest before it joins a room (§12.6.3).
 let roomSecret = null;
 
 // ─── per-tab Ed25519 identity ──────────────────────────────────────────
@@ -179,8 +189,9 @@ shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 
 // The tab's sockets, standing before the transport: bootShell registers its accept sink
 // while starting it, and RtcNetwork announces every data channel through that sink. The
-// transport itself opens the relay (a WebSocket) and drives the peer connections.
-let relayConnection = null; // { base, room, label, url } for the current room
+// transport itself opens the relay (a WebSocket), links through it, and drives the peer
+// connections.
+let relayConnection = null; // { base, room, label, url, joining } for the current room
 const net = combineChannels(new WsNetwork(), new RtcNetwork());
 
 // Assemble the shared shell now that the identity exists — via bootShell, the ONE
@@ -191,19 +202,19 @@ const net = combineChannels(new WsNetwork(), new RtcNetwork());
 // the shell. The adapter is the platform's: link ids and sockets. Transport policy belongs
 // to the signed bundle, and so does the address book — it lives in that bundle's own realm
 // now (§12.10), and chat writes nothing to it: a peer here is met in the relay room the
-// transport joins, and connected by it.
+// transport joins, and linked by it.
 // The sockets above are passed in as `channels`; bootShell registers their accept sink
 // while starting the transport. Raw-link
 // events then go only to whichever admitted slot owns the `link` binding, and
 // `shell.close()` closes the whole stack.
 //
 // Contact policy belongs to the signed transport guest. `connectRelay()` rotates its
-// `contact` setting before signaling begins; changing rooms still deliberately severs
+// `contact` setting before it joins a room; changing rooms still deliberately severs
 // existing links in `joinRtcRoom()`, without reloading the transport.
 //
 // bootShell installs the seedkernel-shipped transport bundle at boot and
 // starts the ChannelFactory before returning. Connecting to a relay is the transport's
-// `relay` op: it joins the room and connects the peers it meets there.
+// `relay` op: it registers there, joins the room and links the peers it meets.
 //
 // The realm engine every app's guest runs in — the transport bundle's, the offers
 // app's, and each chat app's — is bootShell's default (safe-js), imported lazily on
@@ -218,11 +229,10 @@ const net = combineChannels(new WsNetwork(), new RtcNetwork());
 const booted = await bootShell({
   sodium,
   identity: myKeys,
-  transport: {
-    channels: net,
-    // STUN for the transport's peer connections, as installation config (§12.6).
-    config: { iceServers: RTC_CONFIG.iceServers },
-  },
+  // The transport asks the relay a peer is linked through for STUN (§12.7). A chat room
+  // keeps its members linked, so links do not idle out; the page redials a member whose
+  // link drops (`pollPeerViews`).
+  transport: { channels: net, config: { linkIdleTimeoutMs: 0 } },
   admit(v) {
     // The offers app is pinned: the exact author and app this PAGE was built with
     // (browser/offers-bundle.js, generated by scripts/build-boot-bundles.mjs), read off
@@ -1154,12 +1164,15 @@ window.addEventListener("message", async (ev) => {
 });
 
 // ---------------------------------------------------------------------------
-// Networking — the transport bundle over a WebRTC mesh it negotiates through a relay.
+// Networking: the page meets peers in a relay room; the transport bundle links to them
+// through the relay and moves each link to WebRTC.
 //
 // The transport is the seedkernel-shipped signed bundle bootShell loaded: the channel
 // AKE, record layer, link routing and request/response layer run as its confined
-// guest program, driven by the shell's TransportHost — and so do the relay room, who
-// offers to whom, and ICE restarts (§12.7). What net-rtc.ts contributes is the platform
+// guest program, driven by the shell's TransportHost, and so do the relay registration,
+// the links through the relay, the move to WebRTC (signaled over the peer's authenticated
+// link) and who offers; a WebRTC link that is lost is dialed again through the relay
+// (§12.7). What net-rtc.ts contributes is the platform
 // object: it holds each RTCPeerConnection and passes its negotiation through as bytes.
 // Channel identity is the transport's in-channel HELLO/AUTH (§12.6),
 // so any frame the driver hands to our sink is already attributed to an
@@ -1192,17 +1205,55 @@ function pruneNickTold(peers) {
 // replace its sockets. `connectRelay` rotates the guest-owned gate before joining.
 // A room change then severs every link — the relay's and the peers' — leaving the
 // transport guest and the socket sink standing; a call follows the linked set as it
-// changes. Rejoining the same room simply says hello again.
-async function joinRtcRoom(url) {
+// changes. Rejoining the same room keeps the registration.
+//
+// `relaySecret` is a private relay's (seedrelay's `--secret`), or null for an open one. It
+// is the relay operator's credential, not the room's, so it never rides in an invite link.
+// The room client and the transport each prove it with BLAKE2b, and never send it.
+async function joinRtcRoom(origin, room, relaySecret) {
   const secret = roomSecret ?? undefined;
+  const url = `${origin}/${room}`;
   if (transportRoomUrl !== undefined && (transportRoomUrl !== url || transportSecret !== secret)) {
     transport.reset();
   }
   transportRoomUrl = url;
   transportSecret = secret;
-  const answer = shell.call(NET_PROTO, new OpArgs("relay").text(url).build());
+  if (rooms?.origin !== origin || rooms.relaySecret !== relaySecret) {
+    rooms?.client.close();
+    roomMembers.clear();
+    const client = roomClient({
+      relay: origin,
+      publicKey: myKeys.publicKey,
+      sign: (m) => sodium.crypto_sign_detached(m, myKeys.privateKey),
+      ...(relaySecret ? { secret: relaySecret, blake2b: (m) => sodium.crypto_generichash(64, m) } : {}),
+      onMember: (_room, key, present) => void onRoomMember(origin, key, present),
+      onRefused: (name) => shellPrint(`Room ${name} is full; try again later.`, "err"),
+    });
+    rooms = { origin, relaySecret, client, room: null };
+  }
+  if (rooms.room !== room) {
+    if (rooms.room !== null) await rooms.client.leave(rooms.room);
+    rooms.room = room;
+    await rooms.client.join(room);
+  }
+  // The transport registers this node's key on the relay, so room members can call it,
+  // and answers the relay's state as `pollRelay` reads it.
+  const op = new OpArgs("relay").text(origin);
+  if (relaySecret) op.text(relaySecret);
+  const answer = shell.call(NET_PROTO, op.build());
   if (!answer) throw new Error(`nothing claims ${NET_PROTO}`);
-  await answer;
+  return (await answer)[0];
+}
+
+// A key the room client heard join or leave. A member is reached through the relay, under
+// the room's contact secret, which its members share.
+async function onRoomMember(origin, key, present) {
+  if (key === myPkHex) return;
+  if (!present) { roomMembers.delete(key); return; }
+  roomMembers.add(key);
+  const secret = roomSecret ?? new Uint8Array(0);
+  const answer = shell.call(NET_PROTO, new OpArgs("addr").blob(hexToBytes(key)).blob(secret).text(`relay+${origin}`).build());
+  try { await answer; } catch {}
 }
 
 // Boot the app registry now that the shell exists: render the (empty) lists, then
@@ -1396,26 +1447,21 @@ if (navigator.connection && typeof navigator.connection.addEventListener === "fu
   });
 }
 
-// Room names mirror the relay-side validation (see seedrelay/server.mjs):
-// URL-safe identifier characters, length 1..128. Empty input is allowed
-// and means "use the default room".
+// Room names stay URL-safe identifier characters, length 1..128, so they read cleanly in
+// the relay URL and invite links; the relay itself sees only a hash of the name. Empty
+// input is allowed and means "use the default room".
 const ROOM_NAME_RE = /^[A-Za-z0-9._-]{1,128}$/;
 const DEFAULT_ROOM = "global";
 
-// Splice the chosen room onto the base relay URL as a path component. The
-// relay reads the first path segment as the room name; if the user typed
-// a URL that already contains a path we keep it (lets them paste a full
-// `ws://host:8080/my-room` URL in just the URL field if they prefer).
-function buildRelayUrl(base, room) {
-  // Trim any trailing slash on the base, then append `/<encoded room>`.
-  // If `base` already ends with a non-empty path we leave it alone — the
-  // user typed an explicit URL.
+// The relay's origin and the room to join there. A URL typed with a path names its room
+// (lets them paste a full `ws://host:8080/my-room` URL in just the URL field if they
+// prefer); otherwise the room field does, and an empty one names the default room.
+function parseRelay(base, room) {
   let u;
   try { u = new URL(base); } catch { return null; }
   if (u.protocol !== "ws:" && u.protocol !== "wss:") return null;
-  const hasPath = u.pathname && u.pathname !== "/";
-  if (!hasPath && room) u.pathname = "/" + encodeURIComponent(room);
-  return u.toString();
+  const path = decodeURIComponent(u.pathname.replace(/^\/+|\/+$/g, ""));
+  return { origin: `${u.protocol}//${u.host}`, room: path || room || DEFAULT_ROOM };
 }
 
 async function connectRelay() {
@@ -1426,25 +1472,31 @@ async function connectRelay() {
     shellPrint("Room name must match [A-Za-z0-9._-] (up to 128 chars).", "err");
     return;
   }
-  const url = buildRelayUrl(base, room);
-  if (!url) { shellPrint("Relay URL must be ws:// or wss://.", "err"); return; }
+  const target = parseRelay(base, room);
+  if (!target) { shellPrint("Relay URL must be ws:// or wss://.", "err"); return; }
+  const url = `${target.origin}/${target.room}`;
   // Keep the address bar in step with a hand-typed room, so "Copy invite link" (and the
   // browser's own copy-URL) always describe the room we are actually joining.
   syncHash();
   updateRoomGateHint();
   const label = room || DEFAULT_ROOM;
+  const relaySecret = relaySecretInput.value.trim() || null;
   try {
-    // Apply the gate before opening signaling: no platform-chosen RTC channel can
-    // arrive under the previous room's credential.
+    // Apply the gate before joining: no link can arrive under the previous room's
+    // credential.
     await setTransportContact(roomSecret);
-    relayConnection = { base, room, label, url };
+    relayConnection = { base, room, label, url, relaySecret, joining: true };
+    RTC_CONFIG.iceServers = [{ urls: `stun:${new URL(base).hostname}:${RELAY_STUN_PORT}` }];
     relayShown = -1;
     relayStatus.textContent = "connecting...";
     setRelayPill("connecting", `room ${label}`);
     shellPrint(`Joining ${url} (room: ${label})...`, "sys");
-    await joinRtcRoom(url);
+    relayShown = await joinRtcRoom(target.origin, target.room, relaySecret);
+    relayConnection.joining = false;
+    showRelayState(relayShown);
   }
   catch (err) {
+    if (relayConnection) relayConnection.joining = false;
     relayStatus.textContent = "error";
     setRelayPill("err", "relay error");
     relayConnectBtn.disabled = false;
@@ -1453,14 +1505,15 @@ async function connectRelay() {
 }
 
 // The relay link is the transport's, so its state is asked of the transport: 0 none
-// joined, 1 its link is up, 2 dropped and redialing (seedkernel §12.6). Polled, and shown
-// only when it changes.
+// joined, 1 registered, 2 dropped and redialing (seedkernel §12.6). Polled, and shown
+// only when it changes; a join shows as connecting until the transport answers it with
+// that state, once registered or once that attempt has failed.
 let relayShown = -1;
 async function pollRelay() {
   try {
     const answer = shell.call(NET_PROTO, new OpArgs("relayState").build());
     const state = answer ? (await answer)[0] : 0;
-    if (state !== relayShown) { relayShown = state; showRelayState(state); }
+    if (state !== relayShown && !relayConnection?.joining) { relayShown = state; showRelayState(state); }
   } catch {}
   setTimeout(pollRelay, 1000);
 }
@@ -1473,7 +1526,7 @@ function showRelayState(state) {
     relayConnectBtn.disabled = false;
     return;
   }
-  const { base, room, label, url } = current;
+  const { base, room, label, url, relaySecret } = current;
   if (state === 1) {
     shellPrint(`Relay link up — room ${label}, waiting for peers.`, "sys");
     relayStatus.textContent = `connected · room ${label}`;
@@ -1487,11 +1540,16 @@ function showRelayState(state) {
     // after moving to an open one.
     if (roomSecret) sessionStorage.setItem("chat.roomSecret", bytesToHex(roomSecret));
     else sessionStorage.removeItem("chat.roomSecret");
+    // The relay secret belongs to the relay, so it is saved and cleared with the relay.
+    if (relaySecret) sessionStorage.setItem("chat.relaySecret", relaySecret);
+    else sessionStorage.removeItem("chat.relaySecret");
   } else {
     relayStatus.textContent = "unreachable — retrying";
     setRelayPill("err", "relay down");
     relayConnectBtn.disabled = false;
-    shellPrint(`Relay unreachable — is one running at ${url}? Retrying; existing P2P links are unaffected.`, "err");
+    // A private relay drops a node without its secret, which reads here as unreachable.
+    shellPrint(`Relay unreachable — is one running at ${url}, and if it is private, is the relay secret right? ` +
+      "Retrying; existing P2P links are unaffected.", "err");
   }
 }
 pollRelay();
@@ -1500,6 +1558,9 @@ relayUrlInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); connectRelay(); }
 });
 relayRoomInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); connectRelay(); }
+});
+relaySecretInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); connectRelay(); }
 });
 
@@ -1599,13 +1660,15 @@ function defaultRelayUrl() {
 }
 
 // Auto-reconnect to the last relay that successfully accepted us. This is
-// the other half of the reload story: rejoining the room is what lets our
-// broadcast hello reach peers, which then renegotiate with our new tab.
+// the other half of the reload story: rejoining the room announces our key to
+// its members, and the transport links each of them with our new tab.
 const savedRelayUrl = sessionStorage.getItem("chat.relayUrl");
 const savedRelayRoom = sessionStorage.getItem("chat.relayRoom");
 const savedRoomSecret = sessionStorage.getItem("chat.roomSecret");
+const savedRelaySecret = sessionStorage.getItem("chat.relaySecret");
 relayUrlInput.value = savedRelayUrl || defaultRelayUrl();
 if (savedRelayRoom) relayRoomInput.value = savedRelayRoom;
+if (savedRelaySecret) relaySecretInput.value = savedRelaySecret;
 if (savedRoomSecret && /^[0-9a-f]{64}$/.test(savedRoomSecret)) roomSecret = hexToBytes(savedRoomSecret);
 
 // An invite link WINS over the saved session: following someone's link is an explicit
@@ -1634,6 +1697,11 @@ async function pollPeerViews() {
   // the reschedule being skipped — that would freeze the pill for the tab's life.
   try {
     const peers = await linkedPeers();
+    // A room member this node calls (the smaller key calls, so a pair dials once) and has
+    // no link to is dialed: `ready` dials every address the transport holds.
+    if ([...roomMembers].some((m) => myPkHex < m && !peers.includes(m))) {
+      void shell.call(NET_PROTO, new OpArgs("ready").u32(0).build())?.catch(() => {});
+    }
     updatePeerPill(peers.length);
     pruneNickTold(peers);
     media.sync(peers);
