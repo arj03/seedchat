@@ -121,7 +121,8 @@ be *open* or *gated*:
 clients that know its secret. Enter it in the **Relay secret** field on the Network
 tab. It belongs to the relay, not the room, so it is not part of an invite link: get
 it from whoever runs the relay. The room client and the transport each prove it with
-BLAKE2b and never send it.
+BLAKE2b and never send it; whoever sees a registration can still test guesses at it,
+so a relay's secret must be long and random.
 
 Either way, identity is bound in-channel by the transport bundle's handshake, which
 runs end to end through the relay, so a relay can see which keys meet and refuse to
@@ -305,8 +306,9 @@ The import map in `chat-shell.html` also maps `seedkernel-wasm/quickjs`. Chat
 never imports it; the vendored host does, for its QuickJS realms.
 
 The relay is deliberately not a seedkernel entry point. `seedrelay` is the server;
-the transport bundle speaks its wire, registering and joining a room through its `relay`
-operation and redialing a relay that drops. Chat owns only the selected URL, room, credential, and UI.
+the transport bundle speaks its control wire, registering through its `relay` operation
+and redialing a relay that drops, and chat meets the room with seedrelay's room client.
+Chat owns only the selected URL, room, credentials, and UI.
 
 Plus one on the guest side: the app modules define their two memory-layout
 literals — `PK_LEN = 32` and `PRIV_USER_OFF = 0` — alongside their layout
@@ -322,10 +324,11 @@ Three properties serve as the summary; the details live in the seedkernel docs:
   `RtcNetwork`, combined and supplied as `transport.channels`; transport policy and its
   defaults belong to the signed bundle, as do the address book and contact gate,
   which live in that bundle's own realm rather than under the adapter. Chat rotates
-  the gate with the transport's local `contact` operation (the room secret), then
-  joins the room with its `relay` operation; it never writes an address, because the
-  transport meets and links every peer in that room itself
-  (§12.6, [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)).
+  the gate with the transport's local `contact` operation (the room secret), registers
+  on the relay with its `relay` operation, and hands it each room member as a `relay+`
+  address with `addr`; the transport links to them through the relay and moves each
+  link to WebRTC itself
+  (§12.6, §12.7, [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)).
 - **The offers and calls apps get a pin, chat's own half of it.** `offer/v1` carries a
   signed bundle for an app that does not exist yet, so something already
   installed at boot owns the name and `admit` allows exactly the author and app

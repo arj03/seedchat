@@ -1164,13 +1164,14 @@ window.addEventListener("message", async (ev) => {
 });
 
 // ---------------------------------------------------------------------------
-// Networking: the transport bundle meets peers in a relay room, links through the relay,
-// and moves each link to WebRTC.
+// Networking: the page meets peers in a relay room; the transport bundle links to them
+// through the relay and moves each link to WebRTC.
 //
 // The transport is the seedkernel-shipped signed bundle bootShell loaded: the channel
 // AKE, record layer, link routing and request/response layer run as its confined
-// guest program, driven by the shell's TransportHost, and so do the relay room, the move
-// to WebRTC (signaled over the peer's authenticated link), who offers, and ICE restarts
+// guest program, driven by the shell's TransportHost, and so do the relay registration,
+// the links through the relay, the move to WebRTC (signaled over the peer's authenticated
+// link) and who offers; a WebRTC link that is lost is dialed again through the relay
 // (§12.7). What net-rtc.ts contributes is the platform
 // object: it holds each RTCPeerConnection and passes its negotiation through as bytes.
 // Channel identity is the transport's in-channel HELLO/AUTH (§12.6),
@@ -1235,12 +1236,13 @@ async function joinRtcRoom(origin, room, relaySecret) {
     rooms.room = room;
     await rooms.client.join(room);
   }
-  // The transport registers this node's key on the relay, so room members can call it.
+  // The transport registers this node's key on the relay, so room members can call it,
+  // and answers the relay's state as `pollRelay` reads it.
   const op = new OpArgs("relay").text(origin);
   if (relaySecret) op.text(relaySecret);
   const answer = shell.call(NET_PROTO, op.build());
   if (!answer) throw new Error(`nothing claims ${NET_PROTO}`);
-  await answer;
+  return (await answer)[0];
 }
 
 // A key the room client heard join or leave. A member is reached through the relay, under
@@ -1489,8 +1491,9 @@ async function connectRelay() {
     relayStatus.textContent = "connecting...";
     setRelayPill("connecting", `room ${label}`);
     shellPrint(`Joining ${url} (room: ${label})...`, "sys");
-    await joinRtcRoom(target.origin, target.room, relaySecret);
+    relayShown = await joinRtcRoom(target.origin, target.room, relaySecret);
     relayConnection.joining = false;
+    showRelayState(relayShown);
   }
   catch (err) {
     if (relayConnection) relayConnection.joining = false;
@@ -1503,8 +1506,8 @@ async function connectRelay() {
 
 // The relay link is the transport's, so its state is asked of the transport: 0 none
 // joined, 1 registered, 2 dropped and redialing (seedkernel §12.6). Polled, and shown
-// only when it changes; a join shows as connecting until the transport answers it, once
-// registered or once that attempt has failed.
+// only when it changes; a join shows as connecting until the transport answers it with
+// that state, once registered or once that attempt has failed.
 let relayShown = -1;
 async function pollRelay() {
   try {
