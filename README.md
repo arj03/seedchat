@@ -143,7 +143,7 @@ when both tabs are on this machine. Reaching the shell from another device needs
 | Path | What it is |
 | --- | --- |
 | `assembly/chat-app-v1/` | v1 handler — text only. `index.ts` is the pure transform, `ui.html` is the iframe UI embedded into the module as a custom section. |
-| `assembly/chat-app-v2/` | v2 handler — text + image + nick. Same shape; upgrading v1→v2 is a re-admit at the same name under the same key. |
+| `assembly/chat-app-v2/` | v2 handler — text + image + nick, plus direct chats. Same shape; upgrading v1→v2 is a re-admit at the same name under the same key. |
 | `asconfig.chat-app-v*.json` | AssemblyScript compiler config for each handler (`build/chat-app-v*.wasm`). |
 | `browser/chat-shell.*` | The browser shell: identity, admission policy, the transport, offers and calls boot loads, the sockets the transport's WebRTC mesh runs over, the sandboxed iframe. The inline import map in `chat-shell.html` names the seedkernel surface. |
 | `browser/chat-app.js` | The chat app *shape*, in one place: the guest's source, the `chat` protocol id, and its reach — no host service at all and one co-resident guest, the network (`guest.requires` is exactly `_net`). `scripts/build-app-bundle.mjs` and `scripts/smoke.mjs` author bundles from it; the shell gates received Offers against it with `isChatApp`. |
@@ -224,6 +224,7 @@ part is chat's own format, and the host never reads it:
 | `0x00` text | UTF-8 text | v1, v2 |
 | `0x01` image | JPEG bytes | v2 |
 | `0x02` nick | UTF-8 nick for this sender | v2 |
+| `0x03` / `0x04` direct text / image | `[to 32][content]` | v2 |
 
 **Output (the render bytes)** is whatever your UI knows how to draw. Return `0` to
 render nothing. Unknown `chatType`s should render nothing, which is how v1 stays
@@ -246,7 +247,8 @@ keys. It talks to the shell only via `postMessage`:
 | UI → shell | `{ type: "ready" }` | Sent once on load. The shell replies with `init`, then flushes any queued renders. |
 | shell → UI | `{ type: "init", pk: Uint8Array(32) }` | This tab's own public key. |
 | shell → UI | `{ type: "render", payload: Uint8Array }` | One set of render bytes from your module. This covers both inbound frames and the local echo of your own sends. |
-| UI → shell | `{ type: "send", chatType: number, body: Uint8Array }` | Broadcast `[chatType][body]` to every linked peer under the `chat` protocol, and echo it locally through the module. |
+| UI → shell | `{ type: "send", chatType: number, body: Uint8Array, to?: Uint8Array(32) }` | Send `[chatType][body]` under the `chat` protocol to every linked peer, or only to `to` when given, and echo it locally through the module. |
+| shell → UI | `{ type: "peers", peers: Uint8Array(32)[] }` | The currently linked peers, posted when the set changes. |
 
 ### 3. Metadata and signing
 

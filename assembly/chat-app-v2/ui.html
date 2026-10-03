@@ -75,6 +75,56 @@
   }
   #nick:focus { outline: none; border-color: var(--me); background: #181c22; }
 
+  #layout { flex: 1; min-height: 0; display: flex; }
+  #side {
+    width: 13em;
+    flex: none;
+    overflow-y: auto;
+    background: var(--panel);
+    border-right: 1px solid var(--line);
+    padding: 0.4em 0;
+    font-size: 0.88em;
+  }
+  #side h3 {
+    margin: 0.6em 0.8em 0.25em;
+    font-size: 0.8em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+  .conv {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4em;
+    width: 100%;
+    min-height: 32px;
+    padding: 0.2em 0.8em;
+    background: none;
+    border: 0;
+    border-radius: 0;
+    text-align: left;
+    overflow: hidden;
+  }
+  .conv span.name { overflow: hidden; text-overflow: ellipsis; }
+  .conv.active { background: #1f3a55; color: #d6eaff; }
+  .conv .unread {
+    background: var(--me); color: #06121c; border-radius: 999px;
+    padding: 0 0.5em; font-size: 0.8em; font-weight: 700;
+  }
+  #main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #conv-title {
+    display: flex; align-items: center; gap: 0.5em;
+    padding: 0.35em 0.8em; border-bottom: 1px solid var(--line);
+    font-weight: 600;
+  }
+  #conv-title button { min-height: 28px; padding: 0 0.6em; font-size: 0.85em; border-radius: 6px; }
+  #menu-btn { display: none; }
+  #leave-btn { margin-left: auto; }
+  .line-author.clickable { cursor: pointer; }
+  .line-author.clickable:hover { text-decoration: underline; }
+
   #log {
     flex: 1;
     min-height: 0;
@@ -165,6 +215,10 @@
   @media (max-width: 720px) {
     body { font-size: 14px; }
     #log { padding: 0.55em 0.7em; }
+    #menu-btn { display: inline-block; }
+    #side { display: none; position: absolute; z-index: 50; top: 0; bottom: 0; left: 0; box-shadow: 4px 0 12px rgba(0,0,0,.5); }
+    #side.open { display: block; }
+    #layout { position: relative; }
     #msg { font-size: 16px; }    /* prevent iOS zoom-on-focus */
     header { padding: 0.4em 0.6em; }
   }
@@ -180,14 +234,28 @@
   </div>
 </header>
 
-<div id="log"></div>
-
-<form id="form" autocomplete="off">
-  <input id="msg" type="text" placeholder="Message" autocapitalize="sentences" />
-  <button id="image-btn" type="button" title="Attach image" aria-label="Attach image">📎</button>
-  <button class="primary" type="submit">Send</button>
-  <input id="image-file" type="file" accept="image/*" hidden />
-</form>
+<div id="layout">
+  <nav id="side" aria-label="Conversations">
+    <h3>Room</h3>
+    <div id="room-list"></div>
+    <h3>Direct</h3>
+    <div id="direct-list"></div>
+  </nav>
+  <div id="main">
+    <div id="conv-title">
+      <button id="menu-btn" type="button" aria-label="Conversations">☰</button>
+      <span id="conv-name"></span>
+      <button id="leave-btn" type="button">Close</button>
+    </div>
+    <div id="log"></div>
+    <form id="form" autocomplete="off">
+      <input id="msg" type="text" placeholder="Message" autocapitalize="sentences" />
+      <button id="image-btn" type="button" title="Attach image" aria-label="Attach image">📎</button>
+      <button class="primary" type="submit">Send</button>
+      <input id="image-file" type="file" accept="image/*" hidden />
+    </form>
+  </div>
+</div>
 
 <div id="lightbox" role="dialog" aria-label="Image viewer"><img id="lightbox-img" alt="" /></div>
 
@@ -196,20 +264,31 @@
 //
 // Protocol with parent shell:
 //   parent → us: { type: "init",   pk: Uint8Array(32) }
+//   parent → us: { type: "peers",  peers: Uint8Array(32)[] }   (the currently linked peers)
 //   parent → us: { type: "render", payload: Uint8Array }
 //                  payload = [type u8][pk_len u8][pk ..][nick_len u8][nick ..][body ..]
 //   us → parent: { type: "ready" }
-//   us → parent: { type: "send", chatType: 0|1|2, body: Uint8Array }
+//   us → parent: { type: "send", chatType: 0..4, body: Uint8Array, to?: Uint8Array(32) }
+//                  `to` sends to that one peer instead of every linked peer.
+//
+// Conversations. The ROOM is everyone linked (types 0/1). A DIRECT chat (type 3/4) goes to
+// one peer only and names that peer in its body, so the sender's own echo can be filed
+// under the right conversation. The body is not secret from the shell or the relay's peer,
+// but only the addressee is sent it.
 const CHAT_TYPE_TEXT  = 0x00;
 const CHAT_TYPE_IMAGE = 0x01;
 const CHAT_TYPE_NICK  = 0x02;
+const CHAT_TYPE_DIRECT_TEXT  = 0x03;
+const CHAT_TYPE_DIRECT_IMAGE = 0x04;
+
+const ROOM = "room";
 
 // Resize images to this width before sending so the JPEG-encoded bytes stay
 // under the 64 KB envelope cap.
 const IMAGE_MAX_WIDTH    = 600;
 const IMAGE_TARGET_BYTES = 50 * 1024;
 
-const log = document.getElementById("log");
+const logHost = document.getElementById("log");
 const form = document.getElementById("form");
 const msgInput = document.getElementById("msg");
 const nickInput = document.getElementById("nick");
@@ -217,55 +296,185 @@ const imageBtn = document.getElementById("image-btn");
 const imageFile = document.getElementById("image-file");
 const lightbox = document.getElementById("lightbox");
 const lightboxImg = document.getElementById("lightbox-img");
+const side = document.getElementById("side");
+const roomList = document.getElementById("room-list");
+const directList = document.getElementById("direct-list");
+const convName = document.getElementById("conv-name");
+const leaveBtn = document.getElementById("leave-btn");
+const menuBtn = document.getElementById("menu-btn");
 let myPk = null;
 
-function shortPk(pk) {
-  return Array.from(pk.slice(0, 4)).map(b => b.toString(16).padStart(2, "0")).join("");
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+function toHex(pk) {
+  return Array.from(pk, b => b.toString(16).padStart(2, "0")).join("");
 }
+function shortPk(pk) { return toHex(pk.slice(0, 4)); }
 function arraysEqual(a, b) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
 }
+function concat(...parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+function fromHex(hex) {
+  return Uint8Array.from(hex.match(/../g), h => parseInt(h, 16));
+}
 
+// ── who we know ─────────────────────────────────────────────────────────
+// pk hex → { id, pk, nick, linked }. Fed by the shell's peer list and by every render.
+const people = new Map();
+function person(pk) {
+  const id = toHex(pk);
+  let p = people.get(id);
+  if (!p) { p = { id, pk, nick: "", linked: false }; people.set(id, p); }
+  return p;
+}
+function personName(p) { return p.nick ? `${p.nick} (${shortPk(p.pk)})` : shortPk(p.pk); }
+function nameOfId(id) {
+  const p = people.get(id);
+  return p ? personName(p) : id.slice(0, 8);
+}
+
+// ── conversations ───────────────────────────────────────────────────────
+// key "room" or "d:<pk hex>" → { key, kind, name, el, unread }
+const convs = new Map();
+let active = null;
+
+const ROOM_KEY = ROOM;
+function directKey(id) { return "d:" + id; }
+
+function getConv(key) {
+  let c = convs.get(key);
+  if (c) return c;
+  const el = document.createElement("div");
+  el.hidden = true;
+  logHost.appendChild(el);
+  c = { key, kind: key === ROOM_KEY ? "room" : "direct", name: key.slice(2), el, unread: 0 };
+  convs.set(key, c);
+  renderSide();
+  return c;
+}
+
+function convLabel(c) {
+  return c.kind === "room" ? "Everyone" : nameOfId(c.name);
+}
+
+function openConv(key) {
+  const c = getConv(key);
+  if (active) active.el.hidden = true;
+  active = c;
+  c.unread = 0;
+  c.el.hidden = false;
+  scrollToBottom();
+  leaveBtn.hidden = c.key === ROOM_KEY;
+  side.classList.remove("open");
+  renderSide();
+}
+
+function closeConv(c) {
+  if (c.key === ROOM_KEY) return;
+  c.el.remove();
+  convs.delete(c.key);
+  if (active === c) openConv(ROOM_KEY);
+  else renderSide();
+}
+
+function convButton(key, label, unread) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "conv" + (active && active.key === key ? " active" : "");
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = label;
+  b.appendChild(name);
+  if (unread > 0) {
+    const u = document.createElement("span");
+    u.className = "unread";
+    u.textContent = unread > 99 ? "99+" : String(unread);
+    b.appendChild(u);
+  }
+  b.addEventListener("click", () => openConv(key));
+  return b;
+}
+
+function renderSide() {
+  roomList.replaceChildren();
+  directList.replaceChildren();
+  const room = convs.get(ROOM_KEY);
+  if (room) roomList.appendChild(convButton(ROOM_KEY, convLabel(room), room.unread));
+  // Everyone linked is one click from a direct chat, as well as everyone we have one with.
+  const ids = new Set();
+  for (const p of people.values()) if (p.linked) ids.add(p.id);
+  for (const c of convs.values()) if (c.kind === "direct") ids.add(c.name);
+  const rows = [...ids].map(id => ({ id, label: nameOfId(id) }));
+  rows.sort((a, b) => a.label.localeCompare(b.label));
+  for (const { id, label } of rows) {
+    const c = convs.get(directKey(id));
+    directList.appendChild(convButton(directKey(id), label, c ? c.unread : 0));
+  }
+  if (rows.length === 0) {
+    const none = document.createElement("div");
+    none.className = "sys";
+    none.style.padding = "0.2em 0.8em";
+    none.textContent = "no one linked yet";
+    directList.appendChild(none);
+  }
+  if (active) convName.textContent = convLabel(active);
+}
+
+// ── log rendering ───────────────────────────────────────────────────────
 function isAtBottom() {
   // 32px slop so floaty scroll positions still count as "at bottom".
-  return log.scrollHeight - log.scrollTop - log.clientHeight < 32;
+  return logHost.scrollHeight - logHost.scrollTop - logHost.clientHeight < 32;
 }
-function scrollToBottom() { log.scrollTop = log.scrollHeight; }
+function scrollToBottom() { logHost.scrollTop = logHost.scrollHeight; }
 
-function appendLine(node, wantsScroll = true) {
-  const stick = wantsScroll && isAtBottom();
-  log.appendChild(node);
-  if (stick) scrollToBottom();
+function appendLine(c, node) {
+  const stick = c === active && isAtBottom();
+  c.el.appendChild(node);
+  if (c === active) { if (stick) scrollToBottom(); }
+  else { c.unread++; renderSide(); }
 }
 
-function print(text, cls) {
+function print(text, cls, c = active) {
   const line = document.createElement("div");
   if (cls) line.className = cls;
   line.textContent = text;
-  appendLine(line);
+  appendLine(c, line);
 }
 
-function printMessage(tag, text, cls) {
-  const line = document.createElement("div");
-  if (cls) line.className = cls;
+// The author is a click target for a direct chat with them (not for ourselves).
+function authorSpan(pk, tag) {
   const author = document.createElement("span");
   author.className = "line-author";
   author.textContent = tag + ":";
-  line.appendChild(author);
-  line.appendChild(document.createTextNode(text));
-  appendLine(line);
+  if (!(myPk && arraysEqual(pk, myPk))) {
+    author.classList.add("clickable");
+    author.title = "Direct message";
+    author.addEventListener("click", () => openConv(directKey(toHex(pk))));
+  }
+  return author;
 }
 
-function appendImage(tag, imageBytes, cls) {
+function printMessage(c, pk, tag, text, cls) {
+  const line = document.createElement("div");
+  if (cls) line.className = cls;
+  line.appendChild(authorSpan(pk, tag));
+  line.appendChild(document.createTextNode(text));
+  appendLine(c, line);
+}
+
+function appendImage(c, pk, tag, imageBytes, cls) {
   const wrap = document.createElement("div");
   if (cls) wrap.className = cls;
   const head = document.createElement("div");
-  const author = document.createElement("span");
-  author.className = "line-author";
-  author.textContent = tag + ":";
-  head.appendChild(author);
+  head.appendChild(authorSpan(pk, tag));
   head.appendChild(document.createTextNode("[image]"));
   wrap.appendChild(head);
   const blob = new Blob([imageBytes], { type: "image/jpeg" });
@@ -278,7 +487,7 @@ function appendImage(tag, imageBytes, cls) {
     lightbox.classList.add("open");
   });
   wrap.appendChild(img);
-  appendLine(wrap);
+  appendLine(c, wrap);
 }
 
 lightbox.addEventListener("click", () => {
@@ -286,8 +495,41 @@ lightbox.addEventListener("click", () => {
   lightboxImg.src = "";
 });
 
-function send(chatType, body) {
-  window.parent.postMessage({ type: "send", chatType, body }, "*");
+function send(chatType, body, to) {
+  const msg = { type: "send", chatType, body };
+  if (to) msg.to = to;
+  window.parent.postMessage(msg, "*");
+}
+
+// Send text or an image into one conversation.
+function sendInto(c, isImage, content) {
+  if (c.kind === "room") {
+    send(isImage ? CHAT_TYPE_IMAGE : CHAT_TYPE_TEXT, content);
+  } else {
+    const to = fromHex(c.name);
+    send(isImage ? CHAT_TYPE_DIRECT_IMAGE : CHAT_TYPE_DIRECT_TEXT, concat(to, content), to);
+  }
+}
+
+// Work out which conversation a render belongs to, and what its content is. Returns
+// null for a frame this page should not show: a direct message addressed to somebody else.
+function route(type, pk, body, isMe) {
+  switch (type) {
+    case CHAT_TYPE_TEXT:
+    case CHAT_TYPE_IMAGE:
+      return { c: getConv(ROOM_KEY), image: type === CHAT_TYPE_IMAGE, content: body };
+    case CHAT_TYPE_DIRECT_TEXT:
+    case CHAT_TYPE_DIRECT_IMAGE: {
+      if (body.length < 32) return null;
+      const to = body.slice(0, 32);
+      let other;
+      if (isMe) other = to;
+      else if (myPk && arraysEqual(to, myPk)) other = pk;
+      else return null;                           // addressed to someone else
+      return { c: getConv(directKey(toHex(other))), image: type === CHAT_TYPE_DIRECT_IMAGE, content: body.slice(32) };
+    }
+  }
+  return null;
 }
 
 window.addEventListener("message", (ev) => {
@@ -296,7 +538,11 @@ window.addEventListener("message", (ev) => {
   if (!msg) return;
   if (msg.type === "init") {
     myPk = new Uint8Array(msg.pk);
-    print(`You are ${shortPk(myPk)}. Invite a peer to start chatting.`, "sys");
+    print(`You are ${shortPk(myPk)}. Invite a peer to start chatting.`, "sys", getConv(ROOM_KEY));
+  } else if (msg.type === "peers") {
+    for (const p of people.values()) p.linked = false;
+    for (const raw of msg.peers) person(new Uint8Array(raw)).linked = true;
+    renderSide();
   } else if (msg.type === "sys") {
     print(msg.text, "sys");
   } else if (msg.type === "render") {
@@ -310,20 +556,25 @@ window.addEventListener("message", (ev) => {
     if (p >= payload.length) return;
     const nLen = payload[p++];
     if (p + nLen > payload.length) return;
-    const nick = nLen > 0 ? new TextDecoder().decode(payload.slice(p, p + nLen)) : "";
+    const nick = nLen > 0 ? dec.decode(payload.slice(p, p + nLen)) : "";
     p += nLen;
     const body = payload.slice(p);
-    const isMe = myPk && arraysEqual(pk, myPk);
+    const isMe = !!myPk && arraysEqual(pk, myPk);
+    if (!isMe) {
+      const who = person(pk);
+      if (nick !== who.nick) { who.nick = nick; renderSide(); }
+    }
     const tag = nick ? `${nick} (${shortPk(pk)})` : shortPk(pk);
     const cls = isMe ? "me" : "peer";
-    if (type === CHAT_TYPE_TEXT) {
-      printMessage(tag, new TextDecoder().decode(body), cls);
-    } else if (type === CHAT_TYPE_IMAGE) {
-      appendImage(tag, body, cls);
-    } else if (type === CHAT_TYPE_NICK) {
-      const newNick = body.length > 0 ? new TextDecoder().decode(body) : "(cleared)";
-      print(`${shortPk(pk)} is now ${newNick}`, "sys");
+    if (type === CHAT_TYPE_NICK) {
+      const newNick = body.length > 0 ? dec.decode(body) : "(cleared)";
+      print(`${shortPk(pk)} is now ${newNick}`, "sys", getConv(ROOM_KEY));
+      return;
     }
+    const r = route(type, pk, body, isMe);
+    if (!r) return;
+    if (r.image) appendImage(r.c, pk, tag, r.content, cls);
+    else printMessage(r.c, pk, tag, dec.decode(r.content), cls);
   }
 });
 
@@ -331,16 +582,20 @@ nickInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();
     const trimmed = nickInput.value.slice(0, 32);
-    send(CHAT_TYPE_NICK, new TextEncoder().encode(trimmed));
+    send(CHAT_TYPE_NICK, enc.encode(trimmed));
     msgInput.focus();
   }
 });
+
+leaveBtn.addEventListener("click", () => { if (active) closeConv(active); });
+menuBtn.addEventListener("click", () => side.classList.toggle("open"));
 
 imageBtn.addEventListener("click", () => imageFile.click());
 imageFile.addEventListener("change", async () => {
   const file = imageFile.files && imageFile.files[0];
   imageFile.value = "";
   if (!file) return;
+  const target = active;
   try {
     const bitmap = await createImageBitmap(file);
     const targetW = bitmap.width <= IMAGE_MAX_WIDTH ? bitmap.width : IMAGE_MAX_WIDTH;
@@ -357,13 +612,14 @@ imageFile.addEventListener("change", async () => {
       if (buf.length <= IMAGE_TARGET_BYTES) { bytes = buf; break; }
       bytes = buf;
     }
-    if (!bytes) { print("Image encode failed.", "err"); return; }
+    if (!bytes) { print("Image encode failed.", "err", target); return; }
     if (bytes.length > IMAGE_TARGET_BYTES) {
-      print(`Image is ${bytes.length} bytes — sending anyway, may exceed 64 KB envelope.`, "err");
+      print(`Image is ${bytes.length} bytes — sending anyway, may exceed 64 KB envelope.`, "err", target);
     }
-    send(CHAT_TYPE_IMAGE, bytes);
+    // Into the conversation the picture was picked in, even if the user has moved on.
+    if (convs.has(target.key)) sendInto(target, true, bytes);
   } catch (err) {
-    print(`Image failed: ${err.message}`, "err");
+    print(`Image failed: ${err.message}`, "err", target);
   }
 });
 
@@ -371,11 +627,12 @@ form.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = msgInput.value;
   if (!text) return;
-  send(CHAT_TYPE_TEXT, new TextEncoder().encode(text));
+  sendInto(active, false, enc.encode(text));
   msgInput.value = "";
   msgInput.focus();
 });
 
+openConv(ROOM_KEY);
 window.parent.postMessage({ type: "ready" }, "*");
 msgInput.focus();
 </script>

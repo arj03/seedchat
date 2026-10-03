@@ -11,6 +11,10 @@
 //   type 0  text    body = utf-8 text
 //   type 1  image   body = jpeg bytes
 //   type 2  nick    body = utf-8 nick (this sender's new nick)
+//   type 3  direct text    body = [to 32][utf-8 text]
+//   type 4  direct image   body = [to 32][jpeg bytes]
+//   The module passes 3 and 4 through untouched; who a direct message is for is the
+//   page's to read, like the body of any other frame.
 //
 // Render:  [type u8][pk_len u8][pk ..][nick_len u8][nick ..][body ..]
 //
@@ -86,7 +90,7 @@ export function handle(input_len: i32): i32 {
   // sender pk; there is no envelope signer to query.
   if (input_len < PK_LEN + 1) return 0;
   const type = load<u8>(scratch + PK_LEN);
-  if (type > 2) return 0;
+  if (type > 4) return 0;
   const bodyLen = input_len - PK_LEN - 1;
 
   // Stage the whole input into priv so we can rebuild scratch as the render

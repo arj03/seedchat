@@ -844,14 +844,16 @@ function sendFrame(sender, peerId, proto, payload) {
  *  is what keeps this from being a peer mirror: nothing here observes a peer coming or
  *  going, and a peer that dropped and came back is simply absent from the set it is
  *  pruned against, so it is told again. */
-async function broadcastToPeers(proto, payload, { nickPrefix = null, isNick = false } = {}) {
+async function broadcastToPeers(proto, payload, { nickPrefix = null, isNick = false, only = null } = {}) {
   const key = shell.resolve(proto);
   if (!key) return; // nothing installed claims this protocol — nothing to send with
   const sender = installedApps.get(key);
   if (!sender) return;
   const peers = await linkedPeers();
   pruneNickTold(peers);
-  for (const peerId of peers) {
+  // `only` narrows the fan-out to one peer: a direct message. A peer that is not linked
+  // is simply not reached, exactly as a broadcast does not reach it.
+  for (const peerId of only ? peers.filter((p) => p === only) : peers) {
     try {
       if (nickPrefix && !nickToldPeers.has(peerId)) {
         await sendFrame(sender, peerId, proto, nickPrefix);
@@ -1178,6 +1180,7 @@ window.addEventListener("message", async (ev) => {
       frame.contentWindow.postMessage({ type: "render", payload }, "*");
     }
     renderQueue.length = 0;
+    lastPeersKey = null; // the fresh page has not been told who is linked
     return;
   }
 
@@ -1209,7 +1212,8 @@ window.addEventListener("message", async (ev) => {
     // about to reach — cleared here, before the broadcast below re-adds them.
     if (isNick) nickToldPeers.clear();
     // Fire-and-forget to every linked peer over Transport — one plane.
-    broadcastToPeers(proto, chatBytes, { nickPrefix, isNick });
+    const only = msg.to ? bytesToHex(new Uint8Array(msg.to)) : null;
+    broadcastToPeers(proto, chatBytes, { nickPrefix, isNick, only });
     // Local echo: run through the app's guest, render if active. Not awaited —
     // the echo is a view concern, and the send has already gone out; letting it
     // gate the lines below would make a guest failure also drop the presence
@@ -1755,6 +1759,16 @@ if (savedRelayUrl) connectRelay();
 // Presentation-only polling: authenticated peer truth stays in the transport guest. The
 // page asks for the current set to render counts and routes; it never mirrors transitions or
 // drives reconnection/fan-out from a client-side Set.
+// The linked set, handed to the app's page so it can offer a direct chat with someone who
+// has not spoken yet. Presentation only, like the pill: posted when the set changes.
+let lastPeersKey = null;
+function postPeersToApp(peers) {
+  const key = [...peers].sort().join(",");
+  if (!iframeReady || !frame.contentWindow || key === lastPeersKey) return;
+  lastPeersKey = key;
+  frame.contentWindow.postMessage({ type: "peers", peers: peers.map(hexToBytes) }, "*");
+}
+
 async function pollPeerViews() {
   // A failed tick is swallowed rather than logged: this runs every 750ms, and the next
   // one either succeeds or the pill simply keeps its last value. What must NOT happen is
@@ -1770,6 +1784,7 @@ async function pollPeerViews() {
     updatePeerPill(routes);
     renderPeerList(routes);
     pruneNickTold(peers);
+    postPeersToApp(peers);
     media.sync(peers);
     if (localStream) await updateCallStatus(peers.length);
   } catch {}
