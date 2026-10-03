@@ -47,6 +47,10 @@
   }
 
   header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6em;
     padding: 0.55em 0.8em;
     border-bottom: 1px solid var(--line);
     background:
@@ -66,6 +70,16 @@
     letter-spacing: 0.15em;
     box-shadow: 0 0 8px rgba(255, 46, 136, 0.35), inset 0 0 6px rgba(255, 46, 136, 0.18);
     text-shadow: 0 0 6px rgba(255, 46, 136, 0.6);
+  }
+  #room {
+    min-width: 0;
+    font-family: var(--mono);
+    font-size: 0.85em;
+    padding: 0.2em 0.5em;
+    background: var(--panel-2);
+    color: var(--neon-2);
+    border: 1px solid var(--line-2);
+    border-radius: 4px;
   }
 
   #log {
@@ -162,7 +176,10 @@
 </head>
 <body>
 
-<header><span class="badge">// chat-app v1 :: text-only</span></header>
+<header>
+  <span class="badge">// chat-app v1 :: text-only</span>
+  <select id="room" aria-label="Room to write to" hidden></select>
+</header>
 
 <div id="log"></div>
 
@@ -176,20 +193,33 @@
 //
 // Protocol (postMessage with parent shell):
 //   parent → us: { type: "init",   pk: Uint8Array(32) }
+//   parent → us: { type: "rooms",  rooms: { id: Uint8Array(32), name: string, members: Uint8Array(32)[] }[] }
+//                  the rooms this node is in, and who the relay says is in each
 //   parent → us: { type: "render", payload: Uint8Array }
 //                  payload = [type u8][pk_len u8][pk ..][body ..]
 //   us → parent: { type: "ready" }              once the UI is wired up
-//   us → parent: { type: "send", chatType: 0,   body: Uint8Array }
-const CHAT_TYPE_TEXT = 0x00;
+//   us → parent: { type: "send", chatType: 5,   body: Uint8Array, room: Uint8Array(32) }
+//   us → parent: { type: "conv", room?: Uint8Array(32) }
+//                  the room being written to, which is who a call started now is with
+//
+// A message is room text, body = [room 32][utf-8 text], and goes to that room's members.
+// The one log shows every joined room, each line tagged with its room; the picker in the
+// header says which room is written to.
+const CHAT_TYPE_ROOM_TEXT = 0x05;
 
 const log = document.getElementById("log");
 const form = document.getElementById("form");
 const msgInput = document.getElementById("msg");
+const roomSelect = document.getElementById("room");
 let myPk = null;
+// The rooms this node is in, as the shell says: room id hex → { id, name, members },
+// `members` the key hex of everyone the relay lists there.
+const rooms = new Map();
 
-function shortPk(pk) {
-  return Array.from(pk.slice(0, 4)).map(b => b.toString(16).padStart(2, "0")).join("");
+function toHex(bytes) {
+  return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
 }
+function shortPk(pk) { return toHex(pk.slice(0, 4)); }
 function arraysEqual(a, b) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -226,7 +256,20 @@ window.addEventListener("message", (ev) => {
   if (!msg) return;
   if (msg.type === "init") {
     myPk = new Uint8Array(msg.pk);
-    print(`You are ${shortPk(myPk)}. Invite a peer to start chatting.`, "sys");
+    print(`You are ${shortPk(myPk)}. Join a room on the Network tab to start chatting.`, "sys");
+  } else if (msg.type === "rooms") {
+    const was = roomSelect.value;
+    rooms.clear();
+    roomSelect.replaceChildren();
+    for (const r of msg.rooms) {
+      const id = new Uint8Array(r.id), hex = toHex(id);
+      rooms.set(hex, { id, name: r.name, members: new Set(r.members.map(m => toHex(new Uint8Array(m)))) });
+      roomSelect.appendChild(new Option(r.name, hex));
+    }
+    // Keep writing to the same room while this node is still in it.
+    if (rooms.has(was)) roomSelect.value = was;
+    roomSelect.hidden = rooms.size === 0;
+    openRoom();
   } else if (msg.type === "sys") {
     print(msg.text, "sys");
   } else if (msg.type === "render") {
@@ -237,22 +280,33 @@ window.addEventListener("message", (ev) => {
     if (p + pkLen > payload.length) return;
     const pk = payload.slice(p, p + pkLen); p += pkLen;
     const body = payload.slice(p);
-    if (type === CHAT_TYPE_TEXT) {
-      const isMe = myPk && arraysEqual(pk, myPk);
-      printMessage(shortPk(pk), new TextDecoder().decode(body), isMe ? "me" : "peer");
-    }
+    if (type !== CHAT_TYPE_ROOM_TEXT || body.length < 32) return;
+    // Not shown: a message for a room this node is not in, or from a peer who is not in it.
+    const isMe = myPk && arraysEqual(pk, myPk);
+    const room = rooms.get(toHex(body.slice(0, 32)));
+    if (!room || (!isMe && !room.members.has(toHex(pk)))) return;
+    printMessage(`#${room.name} ${shortPk(pk)}`, new TextDecoder().decode(body.slice(32)), isMe ? "me" : "peer");
   }
 });
+
+/** Tell the shell which room is written to, or that there is none. */
+function openRoom() {
+  const room = rooms.get(roomSelect.value);
+  msgInput.placeholder = room ? `Message #${room.name}` : "Join a room to write";
+  window.parent.postMessage(room ? { type: "conv", room: room.id } : { type: "conv" }, "*");
+}
+roomSelect.addEventListener("change", openRoom);
 
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = msgInput.value;
-  if (!text) return;
-  window.parent.postMessage({
-    type: "send",
-    chatType: CHAT_TYPE_TEXT,
-    body: new TextEncoder().encode(text),
-  }, "*");
+  const room = rooms.get(roomSelect.value);
+  if (!text || !room) return;
+  const content = new TextEncoder().encode(text);
+  const body = new Uint8Array(32 + content.length);
+  body.set(room.id, 0);
+  body.set(content, 32);
+  window.parent.postMessage({ type: "send", chatType: CHAT_TYPE_ROOM_TEXT, body, room: room.id }, "*");
   msgInput.value = "";
   msgInput.focus();
 });

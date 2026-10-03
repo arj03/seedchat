@@ -160,7 +160,7 @@
 
   <!-- ─── Network (relay) ──────────────────────────────────────────── -->
   <div id="panel-relay" class="panel hidden" role="tabpanel">
-    <p class="hint">Peers meet in a room on a relay and link through it, then move to a direct
+    <p class="hint">Peers meet in rooms on a relay and link through it, then move to a direct
       link. The relay forwards only encrypted bytes; once peers are directly connected it is no
       longer needed, and where a direct link cannot be made the link stays on the relay.</p>
 
@@ -169,19 +169,34 @@
       <input id="relay-url" type="text" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" />
     </label>
     <label class="field">
-      Room
-      <input id="relay-room" type="text" inputmode="text" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="global" />
-    </label>
-    <label class="field">
       Relay secret
       <input id="relay-secret" type="password" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="only for a private relay" />
     </label>
     <div class="row">
       <button id="connect-relay" class="primary" type="button">Connect</button>
-      <button id="new-room" type="button">Random</button>
-      <button id="copy-invite" type="button">Copy invite link</button>
       <span id="relay-status" class="sys relay-status">not connected</span>
     </div>
+
+    <section class="step">
+      <header class="step-head">
+        <span class="step-pip">#</span>
+        <h3 class="step-title">Rooms</h3>
+      </header>
+      <div class="step-body">
+        <ul id="room-list" class="app-list"></ul>
+        <p class="hint subtle">You can be in several rooms at once, and are linked to everyone in
+          each. <strong>Add peer</strong> beside someone in a room adds them to your peers
+          below: you stay linked whether or not you share a room. A room has no secret: whoever
+          has its name, or its link, can join. <strong>Random</strong> gives the name typed an
+          ending nobody can guess, for a room that should stay private.</p>
+        <div class="row">
+          <input id="relay-room" type="text" inputmode="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+                 aria-label="Room to join" placeholder="room name, or none for global" />
+          <button id="join-room" type="button">Join</button>
+          <button id="new-room" type="button">Random</button>
+        </div>
+      </div>
+    </section>
 
     <section class="step">
       <header class="step-head">
@@ -190,25 +205,50 @@
       </header>
       <div class="step-body">
         <ul id="peer-list" class="app-list">
-          <li class="empty-row">No peers linked yet.</li>
+          <li class="empty-row">Nobody yet: add a peer from a room, or by its link or key.</li>
         </ul>
-        <p class="hint subtle"><strong>direct</strong> is a link that has moved to WebRTC;
+        <p class="hint subtle">The peers you are connected to directly, by key, whether or not you
+          share a room. <strong>direct</strong> is a link that has moved to WebRTC;
           <strong>via relay</strong> is one the relay still forwards.</p>
+        <div class="row">
+          <input id="add-contact" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+                 aria-label="Contact link or key" placeholder="contact link, or key" />
+          <input id="add-contact-secret" type="password" autocapitalize="off" autocomplete="off" spellcheck="false"
+                 aria-label="Contact secret" placeholder="its contact secret, if it has one" />
+          <button id="add-contact-btn" type="button">Add peer</button>
+        </div>
+        <p class="hint subtle">A contact is reached directly, by its key, with no room needed. One
+          with a contact secret answers only a caller that presents it, so a contact with
+          <strong>no answer</strong> may need its secret entered on its row.</p>
       </div>
     </section>
-    <p class="hint" id="room-gate-hint">Pick a room name and share it with the peers you want to meet — only clients
-      in the same room see each other. Leave empty for the default <code>global</code> room
-      (allowed chars: <code>A-Z a-z 0-9 . _ -</code>).</p>
-    <p class="hint"><strong>Random</strong> mints a private room <em>and</em> a contact secret, then
-      <strong>Copy invite link</strong> gives you one URL carrying both. The secret lives in the link's
-      <code>#</code> fragment, which browsers never send to a server, so the relay forwards your
-      traffic without being able to join the room itself. A peer that cannot produce the secret
-      draws no response at all. Without one the room is open: anyone who learns its name can join.</p>
+
+    <section class="step">
+      <header class="step-head">
+        <span class="step-pip">✱</span>
+        <h3 class="step-title">My contact secret</h3>
+      </header>
+      <div class="step-body">
+        <input id="contact-secret" type="password" autocapitalize="off" autocomplete="off" spellcheck="false"
+               aria-label="My contact secret" placeholder="none: anyone with this node's key can connect" />
+        <div class="row">
+          <button id="set-contact" type="button">Set</button>
+          <button id="new-contact" type="button">New secret</button>
+          <button id="copy-contact" type="button">Copy contact link</button>
+        </div>
+        <p class="hint subtle" id="contact-hint"></p>
+      </div>
+    </section>
+
+    <p class="hint">Room names take <code>A-Z a-z 0-9 . _ -</code>. Joining with none typed takes
+      you to the default <code>global</code> room. Links carry what they share in the
+      <code>#</code> fragment, which browsers never send to a server, so the relay learns
+      neither a room's name nor a contact secret from one.</p>
     <p class="hint">Start a relay locally with <code>npm run relay</code>, or point at a
       public one your group trusts.</p>
     <p class="hint">A <strong>relay secret</strong> is the relay's own, not the room's: a relay started
       with <code>--secret</code> serves only clients that prove it, and the proof never sends the
-      secret. Get it from whoever runs the relay; it is not part of an invite link. Leave it empty
+      secret. Get it from whoever runs the relay; it is not part of any link. Leave it empty
       for an open relay.</p>
   </div>
 

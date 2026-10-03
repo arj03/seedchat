@@ -236,7 +236,7 @@
 
 <div id="layout">
   <nav id="side" aria-label="Conversations">
-    <h3>Room</h3>
+    <h3>Rooms</h3>
     <div id="room-list"></div>
     <h3>Direct</h3>
     <div id="direct-list"></div>
@@ -247,7 +247,7 @@
       <span id="conv-name"></span>
       <button id="leave-btn" type="button">Close</button>
     </div>
-    <div id="log"></div>
+    <div id="log"><div id="empty" class="sys"></div></div>
     <form id="form" autocomplete="off">
       <input id="msg" type="text" placeholder="Message" autocapitalize="sentences" />
       <button id="image-btn" type="button" title="Attach image" aria-label="Attach image">📎</button>
@@ -264,24 +264,29 @@
 //
 // Protocol with parent shell:
 //   parent → us: { type: "init",   pk: Uint8Array(32) }
-//   parent → us: { type: "peers",  peers: Uint8Array(32)[] }   (the currently linked peers)
+//   parent → us: { type: "rooms",  rooms: { id: Uint8Array(32), name: string, members: Uint8Array(32)[] }[] }
+//                  the rooms this node is in, and who the relay says is in each
+//   parent → us: { type: "peers",  peers: Uint8Array(32)[], contacts: Uint8Array(32)[] }
+//                  the currently linked peers, and the contacts, linked or not
 //   parent → us: { type: "render", payload: Uint8Array }
 //                  payload = [type u8][pk_len u8][pk ..][nick_len u8][nick ..][body ..]
 //   us → parent: { type: "ready" }
-//   us → parent: { type: "send", chatType: 0..4, body: Uint8Array, to?: Uint8Array(32) }
-//                  `to` sends to that one peer instead of every linked peer.
+//   us → parent: { type: "send", chatType: 2..6, body: Uint8Array, room?: Uint8Array(32), to?: Uint8Array(32) }
+//                  `room` sends to that room's members and `to` to that one peer. Neither,
+//                  which only the nick is sent with, sends to every linked peer.
+//   us → parent: { type: "conv", room?: Uint8Array(32), to?: Uint8Array(32) }
+//                  the conversation now open, which is who a call started from it is with
 //
-// Conversations. The ROOM is everyone linked (types 0/1). A DIRECT chat (type 3/4) goes to
-// one peer only and names that peer in its body, so the sender's own echo can be filed
-// under the right conversation. The body is not secret from the shell or the relay's peer,
-// but only the addressee is sent it.
-const CHAT_TYPE_TEXT  = 0x00;
-const CHAT_TYPE_IMAGE = 0x01;
+// Conversations. A ROOM message (type 5/6) names its room in its body and goes to that
+// room's members; one from a peer who is not in that room is dropped. A DIRECT chat
+// (type 3/4) goes to one peer only and names that peer in its body, so the sender's own
+// echo can be filed under the right conversation. The body is not secret from the shell
+// or the relay's peer, but only the addressee is sent it.
 const CHAT_TYPE_NICK  = 0x02;
 const CHAT_TYPE_DIRECT_TEXT  = 0x03;
 const CHAT_TYPE_DIRECT_IMAGE = 0x04;
-
-const ROOM = "room";
+const CHAT_TYPE_ROOM_TEXT    = 0x05;
+const CHAT_TYPE_ROOM_IMAGE   = 0x06;
 
 // Resize images to this width before sending so the JPEG-encoded bytes stay
 // under the 64 KB envelope cap.
@@ -302,6 +307,7 @@ const directList = document.getElementById("direct-list");
 const convName = document.getElementById("conv-name");
 const leaveBtn = document.getElementById("leave-btn");
 const menuBtn = document.getElementById("menu-btn");
+const emptyNote = document.getElementById("empty");
 let myPk = null;
 
 const enc = new TextEncoder();
@@ -327,14 +333,18 @@ function fromHex(hex) {
 }
 
 // ── who we know ─────────────────────────────────────────────────────────
-// pk hex → { id, pk, nick, linked }. Fed by the shell's peer list and by every render.
+// pk hex → { id, pk, nick, linked, contact }. Fed by the shell's peer list and by every
+// render.
 const people = new Map();
 function person(pk) {
   const id = toHex(pk);
   let p = people.get(id);
-  if (!p) { p = { id, pk, nick: "", linked: false }; people.set(id, p); }
+  if (!p) { p = { id, pk, nick: "", linked: false, contact: false }; people.set(id, p); }
   return p;
 }
+// The rooms this node is in, as the shell says: room id hex → { id, name, members },
+// `members` the key hex of everyone the relay lists there.
+const rooms = new Map();
 function personName(p) { return p.nick ? `${p.nick} (${shortPk(p.pk)})` : shortPk(p.pk); }
 function nameOfId(id) {
   const p = people.get(id);
@@ -342,11 +352,12 @@ function nameOfId(id) {
 }
 
 // ── conversations ───────────────────────────────────────────────────────
-// key "room" or "d:<pk hex>" → { key, kind, name, el, unread }
+// key "r:<room id hex>" or "d:<pk hex>" → { key, kind, name, el, unread }, `name` the id
+// after the prefix. `active` is the one open, or null while there is none to show.
 const convs = new Map();
 let active = null;
 
-const ROOM_KEY = ROOM;
+function roomKey(id) { return "r:" + id; }
 function directKey(id) { return "d:" + id; }
 
 function getConv(key) {
@@ -355,34 +366,45 @@ function getConv(key) {
   const el = document.createElement("div");
   el.hidden = true;
   logHost.appendChild(el);
-  c = { key, kind: key === ROOM_KEY ? "room" : "direct", name: key.slice(2), el, unread: 0 };
+  c = { key, kind: key[0] === "r" ? "room" : "direct", name: key.slice(2), el, unread: 0 };
   convs.set(key, c);
   renderSide();
   return c;
 }
 
 function convLabel(c) {
-  return c.kind === "room" ? "Everyone" : nameOfId(c.name);
+  return c.kind === "room" ? (rooms.get(c.name)?.name ?? "(left)") : nameOfId(c.name);
 }
 
+/** Open one conversation, and tell the shell which: a call started now is with it. */
 function openConv(key) {
   const c = getConv(key);
   if (active) active.el.hidden = true;
   active = c;
   c.unread = 0;
   c.el.hidden = false;
+  emptyNote.hidden = true;
   scrollToBottom();
-  leaveBtn.hidden = c.key === ROOM_KEY;
+  // A room is left on the shell's Network tab, not closed here.
+  leaveBtn.hidden = c.kind === "room";
   side.classList.remove("open");
+  window.parent.postMessage(c.kind === "room"
+    ? { type: "conv", room: fromHex(c.name) } : { type: "conv", to: fromHex(c.name) }, "*");
   renderSide();
 }
 
+/** Drop a conversation. With the open one gone, the first room takes its place. */
 function closeConv(c) {
-  if (c.key === ROOM_KEY) return;
   c.el.remove();
   convs.delete(c.key);
-  if (active === c) openConv(ROOM_KEY);
-  else renderSide();
+  if (active !== c) { renderSide(); return; }
+  active = null;
+  const first = [...rooms.keys()][0];
+  if (first) { openConv(roomKey(first)); return; }
+  emptyNote.hidden = false;
+  leaveBtn.hidden = true;
+  window.parent.postMessage({ type: "conv" }, "*");
+  renderSide();
 }
 
 function convButton(key, label, unread) {
@@ -403,14 +425,27 @@ function convButton(key, label, unread) {
   return b;
 }
 
+function sideNote(list, text) {
+  const none = document.createElement("div");
+  none.className = "sys";
+  none.style.padding = "0.2em 0.8em";
+  none.textContent = text;
+  list.appendChild(none);
+}
+
 function renderSide() {
   roomList.replaceChildren();
   directList.replaceChildren();
-  const room = convs.get(ROOM_KEY);
-  if (room) roomList.appendChild(convButton(ROOM_KEY, convLabel(room), room.unread));
-  // Everyone linked is one click from a direct chat, as well as everyone we have one with.
+  const joined = [...rooms.values()].sort((a, b) => a.name.localeCompare(b.name));
+  for (const room of joined) {
+    const id = toHex(room.id), c = convs.get(roomKey(id));
+    roomList.appendChild(convButton(roomKey(id), room.name, c ? c.unread : 0));
+  }
+  if (joined.length === 0) sideNote(roomList, "no room joined");
+  // Every contact and everyone linked is one click from a direct chat, as well as everyone
+  // we have one with.
   const ids = new Set();
-  for (const p of people.values()) if (p.linked) ids.add(p.id);
+  for (const p of people.values()) if (p.linked || p.contact) ids.add(p.id);
   for (const c of convs.values()) if (c.kind === "direct") ids.add(c.name);
   const rows = [...ids].map(id => ({ id, label: nameOfId(id) }));
   rows.sort((a, b) => a.label.localeCompare(b.label));
@@ -418,14 +453,8 @@ function renderSide() {
     const c = convs.get(directKey(id));
     directList.appendChild(convButton(directKey(id), label, c ? c.unread : 0));
   }
-  if (rows.length === 0) {
-    const none = document.createElement("div");
-    none.className = "sys";
-    none.style.padding = "0.2em 0.8em";
-    none.textContent = "no one linked yet";
-    directList.appendChild(none);
-  }
-  if (active) convName.textContent = convLabel(active);
+  if (rows.length === 0) sideNote(directList, "no one linked yet");
+  convName.textContent = active ? convLabel(active) : "";
 }
 
 // ── log rendering ───────────────────────────────────────────────────────
@@ -495,8 +524,9 @@ lightbox.addEventListener("click", () => {
   lightboxImg.src = "";
 });
 
-function send(chatType, body, to) {
+function send(chatType, body, { room, to } = {}) {
   const msg = { type: "send", chatType, body };
+  if (room) msg.room = room;
   if (to) msg.to = to;
   window.parent.postMessage(msg, "*");
 }
@@ -504,20 +534,26 @@ function send(chatType, body, to) {
 // Send text or an image into one conversation.
 function sendInto(c, isImage, content) {
   if (c.kind === "room") {
-    send(isImage ? CHAT_TYPE_IMAGE : CHAT_TYPE_TEXT, content);
+    const room = fromHex(c.name);
+    send(isImage ? CHAT_TYPE_ROOM_IMAGE : CHAT_TYPE_ROOM_TEXT, concat(room, content), { room });
   } else {
     const to = fromHex(c.name);
-    send(isImage ? CHAT_TYPE_DIRECT_IMAGE : CHAT_TYPE_DIRECT_TEXT, concat(to, content), to);
+    send(isImage ? CHAT_TYPE_DIRECT_IMAGE : CHAT_TYPE_DIRECT_TEXT, concat(to, content), { to });
   }
 }
 
 // Work out which conversation a render belongs to, and what its content is. Returns
-// null for a frame this page should not show: a direct message addressed to somebody else.
+// null for a frame this page should not show: a room message for a room this node is not
+// in, or from a peer who is not in it, and a direct message addressed to somebody else.
 function route(type, pk, body, isMe) {
   switch (type) {
-    case CHAT_TYPE_TEXT:
-    case CHAT_TYPE_IMAGE:
-      return { c: getConv(ROOM_KEY), image: type === CHAT_TYPE_IMAGE, content: body };
+    case CHAT_TYPE_ROOM_TEXT:
+    case CHAT_TYPE_ROOM_IMAGE: {
+      if (body.length < 32) return null;
+      const id = toHex(body.slice(0, 32)), room = rooms.get(id);
+      if (!room || (!isMe && !room.members.has(toHex(pk)))) return null;
+      return { c: getConv(roomKey(id)), image: type === CHAT_TYPE_ROOM_IMAGE, content: body.slice(32) };
+    }
     case CHAT_TYPE_DIRECT_TEXT:
     case CHAT_TYPE_DIRECT_IMAGE: {
       if (body.length < 32) return null;
@@ -538,13 +574,24 @@ window.addEventListener("message", (ev) => {
   if (!msg) return;
   if (msg.type === "init") {
     myPk = new Uint8Array(msg.pk);
-    print(`You are ${shortPk(myPk)}. Invite a peer to start chatting.`, "sys", getConv(ROOM_KEY));
+    emptyNote.textContent = `You are ${shortPk(myPk)}. Join a room on the Network tab, or add a contact, to start chatting.`;
+  } else if (msg.type === "rooms") {
+    rooms.clear();
+    for (const r of msg.rooms) {
+      const id = new Uint8Array(r.id);
+      rooms.set(toHex(id), { id, name: r.name, members: new Set(r.members.map((m) => toHex(new Uint8Array(m)))) });
+    }
+    // A room this node left takes its conversation with it.
+    for (const c of [...convs.values()]) if (c.kind === "room" && !rooms.has(c.name)) closeConv(c);
+    if (!active && rooms.size > 0) openConv(roomKey([...rooms.keys()][0]));
+    else renderSide();
   } else if (msg.type === "peers") {
-    for (const p of people.values()) p.linked = false;
+    for (const p of people.values()) p.linked = p.contact = false;
     for (const raw of msg.peers) person(new Uint8Array(raw)).linked = true;
+    for (const raw of msg.contacts ?? []) person(new Uint8Array(raw)).contact = true;
     renderSide();
   } else if (msg.type === "sys") {
-    print(msg.text, "sys");
+    if (active) print(msg.text, "sys");
   } else if (msg.type === "render") {
     const payload = new Uint8Array(msg.payload);
     if (payload.length < 3) return;
@@ -567,8 +614,16 @@ window.addEventListener("message", (ev) => {
     const tag = nick ? `${nick} (${shortPk(pk)})` : shortPk(pk);
     const cls = isMe ? "me" : "peer";
     if (type === CHAT_TYPE_NICK) {
-      const newNick = body.length > 0 ? dec.decode(body) : "(cleared)";
-      print(`${shortPk(pk)} is now ${newNick}`, "sys", getConv(ROOM_KEY));
+      // Said in every conversation the sender is part of: the rooms it is in, and a
+      // direct chat with it.
+      const said = body.length > 0 ? `${shortPk(pk)} is now known as ${dec.decode(body)}`
+        : `${shortPk(pk)} no longer has a nick`;
+      const id = toHex(pk);
+      for (const [roomId, room] of rooms) {
+        if (isMe || room.members.has(id)) print(said, "sys", getConv(roomKey(roomId)));
+      }
+      const direct = convs.get(directKey(id));
+      if (direct) print(said, "sys", direct);
       return;
     }
     const r = route(type, pk, body, isMe);
@@ -596,6 +651,7 @@ imageFile.addEventListener("change", async () => {
   imageFile.value = "";
   if (!file) return;
   const target = active;
+  if (!target) return;
   try {
     const bitmap = await createImageBitmap(file);
     const targetW = bitmap.width <= IMAGE_MAX_WIDTH ? bitmap.width : IMAGE_MAX_WIDTH;
@@ -626,13 +682,14 @@ imageFile.addEventListener("change", async () => {
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = msgInput.value;
-  if (!text) return;
+  if (!text || !active) return;
   sendInto(active, false, enc.encode(text));
   msgInput.value = "";
   msgInput.focus();
 });
 
-openConv(ROOM_KEY);
+leaveBtn.hidden = true;
+renderSide();
 window.parent.postMessage({ type: "ready" }, "*");
 msgInput.focus();
 </script>

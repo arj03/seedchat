@@ -217,7 +217,7 @@ const peerB = toHex(identityB.publicKey);
 // the pair. Through seedkernel's own seed→key-set derivation, the same call the browser
 // shell makes, so this test signs with the key set the shell would.
 const authorA = hybridAuthorKeysFromSeed(sodium, identityA.privateKey.slice(0, 32));
-const CONTACT = new Uint8Array(32).fill(7); // a "room secret" both ends share
+const CONTACT = new Uint8Array(32).fill(7); // each node's contact secret, which the other presents
 
 // What B's own loaded slots answered, filled in by each load's onInbound (seedkernel
 // §12.10) below — the shell itself serves no name any more, so there is no claims
@@ -367,10 +367,13 @@ try {
 
 // 5. dispatch: A's chat app sends a message, B renders it via its bound app's guest
 try {
-  const body = new TextEncoder().encode("hi there");
-  const chatBytes = new Uint8Array(1 + body.length);
-  chatBytes[0] = 0x00;
-  chatBytes.set(body, 1);
+  // Room text, the one frame chat v1 knows: [0x05][room 32][text].
+  const room = new Uint8Array(32).fill(5);
+  const text = new TextEncoder().encode("hi there");
+  const chatBytes = new Uint8Array(1 + room.length + text.length);
+  chatBytes[0] = 0x05;
+  chatBytes.set(room, 1);
+  chatBytes.set(text, 1 + room.length);
   // The send leaves through A's chat app, because that is the only thing that can send:
   // its guest's `handle` frames the transport's op wire and calls `_net`, on the local
   // `send` op. Same argument shape the browser shell builds (`sendFrame` in chat-shell.js).
@@ -386,11 +389,12 @@ try {
   // handed to the page that installed it — no second claim, no relay.
   await until(() => inbound.render !== null, 4000, "rendered message");
   const delivered = inbound.render;
-  // chat v1 render: [type 1][pk_len 1][pk 32][body]
-  assert(delivered[0] === 0x00, "render type");
+  // chat v1 render: [type 1][pk_len 1][pk 32][body], the body passed through
+  assert(delivered[0] === 0x05, "render type");
   assert(delivered[1] === 32, "render pk_len");
   assert(toHex(delivered.slice(2, 34)) === toHex(identityA.publicKey), "render sender pk = A's key");
-  assert(new TextDecoder().decode(delivered.slice(34)) === "hi there", "render body");
+  assert(toHex(delivered.slice(34, 66)) === toHex(room), "render room");
+  assert(new TextDecoder().decode(delivered.slice(66)) === "hi there", "render text");
   ok(`dispatch round-trip: A's app → _net → B's shell → B's chat app's guest → onInbound → ${delivered.length} render bytes`);
 } catch (err) { fail("chat dispatch round-trip", err); }
 
@@ -490,6 +494,20 @@ try {
   assert(!isChatApp(shape({ protocols: [CHAT_PROTO, "seedstore"] })), "an app claiming an extra protocol is refused");
   ok("the offer shape gate admits only network-only chat apps claiming the chat protocol");
 } catch (err) { fail("offer shape gate", err); }
+
+// 9. the two transport ops the page's rooms and contacts rest on: `welcome` names the
+//    room-mates, whose calls need no contact secret, and `forget` drops one peer and its
+//    links, which is how leaving a room hangs up without touching anyone else.
+try {
+  const welcomed = A.call(NET_PROTO, new OpArgs("welcome").blob(identityB.publicKey).build());
+  assert(welcomed !== null, "the transport answers `welcome`");
+  await welcomed;
+  assert((await peersOf(A)).includes(peerB), "welcoming a peer leaves its link up");
+  await A.call(NET_PROTO, new OpArgs("forget").blob(identityB.publicKey).build());
+  await until(async () => !(await peersOf(A)).includes(peerB) && !(await peersOf(B)).includes(peerA),
+    4000, "the forgotten peer's link to close at both ends");
+  ok("the transport welcomes room-mates, and forgets one peer without a reset");
+} catch (err) { fail("welcome and forget", err); }
 
 try { B.close(); } catch {}
 try { A.close(); } catch {}

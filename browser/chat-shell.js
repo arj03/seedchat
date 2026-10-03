@@ -22,7 +22,7 @@ import { combineChannels } from "seedkernel-wasm/socket-seam";
 // Rooms are this page's, not the transport's: it meets peers in a relay room with
 // seedrelay's room client and hands their keys to the transport, which knows only keys
 // and the relays that reach them.
-import { roomClient } from "seedrelay/rooms";
+import { roomClient, roomId } from "seedrelay/rooms";
 // Chat's own code. media-rtc.js is the call feature: audio and video ride peer
 // connections this page owns, signaled through the calls boot bundle below.
 import { MediaCalls } from "./media-rtc.js";
@@ -47,8 +47,17 @@ const relayUrlInput = document.getElementById("relay-url");
 const relayRoomInput = document.getElementById("relay-room");
 const relaySecretInput = document.getElementById("relay-secret");
 const relayConnectBtn = document.getElementById("connect-relay");
+const roomJoinBtn = document.getElementById("join-room");
 const relayNewRoomBtn = document.getElementById("new-room");
-const relayCopyInviteBtn = document.getElementById("copy-invite");
+const roomListEl = document.getElementById("room-list");
+const contactAddInput = document.getElementById("add-contact");
+const contactAddSecretInput = document.getElementById("add-contact-secret");
+const contactAddBtn = document.getElementById("add-contact-btn");
+const contactInput = document.getElementById("contact-secret");
+const contactSetBtn = document.getElementById("set-contact");
+const contactNewBtn = document.getElementById("new-contact");
+const contactCopyBtn = document.getElementById("copy-contact");
+const contactHint = document.getElementById("contact-hint");
 const relayStatus = document.getElementById("relay-status");
 const peerListEl = document.getElementById("peer-list");
 const appStatus = document.getElementById("app-status");
@@ -97,7 +106,8 @@ function showTab(name) {
     t.btn.classList.toggle("active", k === name);
     t.panel.classList.toggle("hidden", k !== name);
   }
-  if (name === "app") tabs.app.btn.classList.remove("unread");
+  // Whatever its dot was for, a message or an offer, is seen now.
+  tabs[name].btn.classList.remove("unread");
 }
 for (const [k, t] of Object.entries(tabs)) {
   t.btn.addEventListener("click", () => showTab(k));
@@ -126,6 +136,9 @@ function hexToBytes(hex) {
   return out;
 }
 
+/** 32 bytes as lowercase hex: a key or a contact secret. */
+const HEX32_RE = /^[0-9a-f]{64}$/;
+
 shellPrint("Starting the handler table...", "sys");
 // Core libsodium + ML-DSA-65, mixed onto `sodium` before anything below touches
 // it — bootShell's verifyBundle needs the PQ signature half for ANY bundle, and
@@ -146,22 +159,23 @@ await loadCrypto(sodium, new URL("./vendor/", import.meta.url));
 // open policy, so consent — not a static author allow-list — is this shell's gate.
 const pendingApprovals = new Set();
 let shell;
-/** The channel adapter bootShell constructs and returns — the sockets, and nothing that
- *  knows what a peer is. What the page still needs it for is `reset()`, a room rotation's
- *  sever. Anything peer-shaped is a question for the transport GUEST instead, asked through
- *  the shell (see linkedPeers). */
-let transport;
-// Room/rendezvous rotations sever the existing transport links and physical peer
-// connections while retaining the one ChannelFactory registered at boot.
-let transportSecret;
-let transportRoomUrl;
-// The relay room this page is in: its relay's origin, the room client there, and the room
-// name. `roomMembers` is who the room client last heard is in it, keys in hex.
-let rooms = null;
-const roomMembers = new Set();
-// The room's contact secret (see "Room secret" further down for the sharing UI).
-// It is applied to the transport guest before it joins a room (§12.6.3).
-let roomSecret = null;
+// The relay this page is on: its origin, its secret if it is private, and seedrelay's room
+// client there. null while it is on none: before Connect, and after Disconnect.
+let relay = null;
+// The rooms this page is in, by name: `id` is the room's id on the relay, in hex, and
+// `members` the keys the room client last heard are in it. A page may be in several.
+const joinedRooms = new Map();
+// Everyone this page wants a link to, by key in hex: its room-mates and its contacts, each
+// with how the call to it stands (`calls`, further down).
+const wanted = new Map();
+// What the app calls each peer, by key in hex: its nick, shown in the Network tab's lists
+// in place of the key.
+const peerNicks = new Map();
+// The notices peers are owed, by key in hex: true for one this node added, false for one
+// it removed. Each is sent once its peer is linked (`tellPeers`).
+const untoldPeers = new Map();
+// Peers this node removed and is about to hang up on, by key in hex: no longer listed.
+const leavingPeers = new Set();
 
 // ─── per-tab Ed25519 identity ──────────────────────────────────────────
 let myKeys;
@@ -188,11 +202,40 @@ const myPeerId = myKeys.publicKey;
 
 shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 
+// ─── rooms, contacts and the contact secret ────────────────────────────
+//
+// Two ways to be linked to a peer, and one gate:
+//
+//   A ROOM has no secret. Joining one is agreeing to be linked to everyone in it, and this
+//   page may be in several at once. The transport is told who the room-mates are
+//   (`welcome`), and answers their calls whether or not they hold the contact secret.
+//
+//   A CONTACT is one peer, by key, linked whatever room either is in: a direct connection.
+//   Calling a contact takes its contact secret, if it has one.
+//
+//   The CONTACT SECRET is this node's own (seedkernel §12.6.3): 32 bytes a caller must
+//   present to be answered at all, unless it is a room-mate. None, and anyone may call.
+//
+// `myContactSecret` is this node's, or null. `contacts` holds the contacts, by key in hex,
+// each with its contact secret or null. Both are kept with the identity, as the rooms are.
+const savedContact = sessionStorage.getItem("chat.contactSecret");
+let myContactSecret = savedContact && HEX32_RE.test(savedContact) ? hexToBytes(savedContact) : null;
+const contacts = new Map();
+try {
+  for (const [key, secret] of Object.entries(JSON.parse(sessionStorage.getItem("chat.contacts") ?? "{}"))) {
+    if (HEX32_RE.test(key)) contacts.set(key, HEX32_RE.test(secret) ? hexToBytes(secret) : null);
+  }
+} catch {}
+
+function saveContacts() {
+  sessionStorage.setItem("chat.contacts",
+    JSON.stringify(Object.fromEntries([...contacts].map(([k, s]) => [k, s ? bytesToHex(s) : ""]))));
+}
+
 // The tab's sockets, standing before the transport: bootShell registers its accept sink
 // while starting it, and RtcNetwork announces every data channel through that sink. The
 // transport itself opens the relay (a WebSocket), links through it, and drives the peer
 // connections.
-let relayConnection = null; // { base, room, label, url, joining } for the current room
 const net = combineChannels(new WsNetwork(), new RtcNetwork());
 
 // Assemble the shared shell now that the identity exists — via bootShell, the ONE
@@ -209,9 +252,10 @@ const net = combineChannels(new WsNetwork(), new RtcNetwork());
 // events then go only to whichever admitted slot owns the `link` binding, and
 // `shell.close()` closes the whole stack.
 //
-// Contact policy belongs to the signed transport guest. `connectRelay()` rotates its
-// `contact` setting before it joins a room; changing rooms still deliberately severs
-// existing links in `joinRtcRoom()`, without reloading the transport.
+// Contact policy belongs to the signed transport guest. This node's contact secret is
+// its config here, so the gate stands before anything can call, and `setMyContact`
+// changes it later with the guest's `contact` op. Who is linked follows the rooms and
+// contacts (`syncPeers`), a peer at a time, without reloading the transport.
 //
 // bootShell installs the seedkernel-shipped transport bundle at boot and
 // starts the ChannelFactory before returning. Connecting to a relay is the transport's
@@ -233,7 +277,10 @@ const booted = await bootShell({
   // The transport asks the relay a peer is linked through for STUN (§12.7). A chat room
   // keeps its members linked, so links do not idle out; the page redials a member whose
   // link drops (`pollPeerViews`).
-  transport: { channels: net, config: { linkIdleTimeoutMs: 0 } },
+  transport: {
+    channels: net,
+    config: { linkIdleTimeoutMs: 0, ...(myContactSecret ? { contactSecret: bytesToHex(myContactSecret) } : {}) },
+  },
   admit(v) {
     // The offers app is pinned: the exact author and app this PAGE was built with
     // (browser/offers-bundle.js, generated by scripts/build-boot-bundles.mjs), read off
@@ -250,7 +297,6 @@ const booted = await bootShell({
   },
 });
 shell = booted.shell;
-transport = booted.transport;
 
 // ─── boot the offers app ────────────────────────────────────────────────
 //
@@ -286,18 +332,49 @@ const offersApp = await shell.install(offersBundleBytes(), {
 // `call/v1`, the calls boot bundle's claim. A peer's signal reaches the page as that
 // load's `onInbound` answer, attributed by the channel it arrived on; ours leave through
 // the same app's `send` op, since only a guest can reach `_net`.
+//
+// It is the one channel two pages talk on directly, so it also carries what else they say
+// to each other (`onPageSignal`): `{ peer: true }` from a page that added this node as a
+// peer and `{ peer: false }` from one that removed it, and `{ nick }`, what a peer calls
+// itself.
 const callsApp = await shell.install(callsBundleBytes(), {
-  onInbound: (claim, from, answer) => { if (answer.length > 0) void media.onSignal(bytesToHex(from), answer); },
+  onInbound: (claim, from, answer) => { if (answer.length > 0) onPageSignal(bytesToHex(from), answer); },
 });
+
+/** Send one signal to a peer's page. */
+function sendSignal(peerId, signal) {
+  const arg = new Uint8Array(32 + signal.length);
+  arg.set(hexToBytes(peerId), 0);
+  arg.set(signal, 32);
+  return callsApp.invoke(writeOp(CALLS_OP_SEND, arg));
+}
+
+/** A signal from a peer's page, already attributed by the channel it arrived on. A peer
+ *  that added this node is added here too, and one that removed it is removed, so the two
+ *  ends agree on being peers; anything else is a call's (media-rtc.js). */
+function onPageSignal(from, bytes) {
+  let msg;
+  try { msg = JSON.parse(new TextDecoder().decode(bytes)); } catch { return; }
+  // What the peer calls itself, an empty nick for nothing: shown in place of its key.
+  if (typeof msg?.nick === "string") {
+    if (msg.nick) peerNicks.set(from, msg.nick.slice(0, 32)); else peerNicks.delete(from);
+    renderRoomList();
+    return;
+  }
+  if (typeof msg?.peer !== "boolean") { void media.onSignal(from, bytes); return; }
+  if (msg.peer && !contacts.has(from)) {
+    addContact(from, null, { tell: false });
+    shellPrint(`${peerLabel(from)} added you as a peer.`, "sys");
+  } else if (!msg.peer && contacts.has(from)) {
+    removeContact(from, { tell: false });
+    shellPrint(`${peerLabel(from)} removed you as a peer.`, "sys");
+  }
+}
+
 const media = new MediaCalls({
   myId: myPkHex,
   rtcConfig: RTC_CONFIG,
-  send: (peerId, signal) => {
-    const arg = new Uint8Array(32 + signal.length);
-    arg.set(hexToBytes(peerId), 0);
-    arg.set(signal, 32);
-    return callsApp.invoke(writeOp(CALLS_OP_SEND, arg));
-  },
+  send: sendSignal,
   onPeerClosed: (peerId) => {
     removeRemoteTile(peerId);
     updateCallStatus();
@@ -400,39 +477,91 @@ function updatePeerPill(routes) {
     : `Connected peers — ${open - relayed} direct, ${relayed} through the relay`;
 }
 
-// The Network tab's peer list: one row per linked peer, with how it is reached. Redrawn
-// only when the transport's answer changes, like the relay state below.
-let peersShown = "";
+// The Network tab's peer list: the peers this node is connected to directly, by key. That
+// is one row for every contact, linked or not, and for any linked peer in none of its
+// rooms, which is one that called this node directly. A room-mate that is neither is in
+// its room's list instead (`renderRoomList`). A row names the peer, by its nick if the
+// app knows one, and says how it is reached, or how the call to it stands. A contact with
+// no link takes its contact secret: the row's Connect calls it presenting what the field
+// holds. Rows are kept and changed in place, never redrawn, so a field being typed in
+// survives the poll.
+const PEER_STATES = {
+  direct: ["direct", "Linked peer to peer over WebRTC; the relay carries none of this traffic."],
+  relayed: ["via relay", "The relay forwards this link's encrypted bytes; no direct link has been made."],
+  calling: ["connecting…", "Calling this peer through the relay."],
+  silent: ["no answer", "This peer did not answer. It may be offline, or have a contact secret this node did not present."],
+  waiting: ["waiting", "Waiting for this peer to call."],
+};
+const peerRows = new Map(); // key hex to { li, name, secret, connect, remove, state, shown }
+const peerListEmpty = peerListEl.querySelector(".empty-row");
+
+function buildPeerRow(id) {
+  const li = document.createElement("li");
+  li.className = "peer-row";
+  const name = document.createElement("span");
+  name.className = "peer-row-id peer-row-name";
+  name.title = id;
+  const secret = document.createElement("input");
+  secret.type = "password";
+  secret.className = "peer-secret";
+  secret.placeholder = "contact secret, if it has one";
+  secret.autocomplete = "off";
+  secret.spellcheck = false;
+  secret.setAttribute("aria-label", `Contact secret of ${id.slice(0, 8)}`);
+  const connect = document.createElement("button");
+  connect.type = "button";
+  connect.className = "icon";
+  connect.textContent = "Connect";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "icon";
+  remove.textContent = "Remove peer";
+  remove.title = "Stop being a contact: the link goes unless you share a room.";
+  const state = document.createElement("span");
+  connect.addEventListener("click", () => connectPeer(id, secret));
+  secret.addEventListener("input", () => secret.setCustomValidity(""));
+  secret.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); connectPeer(id, secret); }
+  });
+  remove.addEventListener("click", () => removeContact(id));
+  secret.hidden = connect.hidden = remove.hidden = true;
+  li.append(name, secret, connect, remove, state);
+  return { li, name, secret, connect, remove, state, shown: "" };
+}
+
 function renderPeerList(routes) {
-  const sorted = [...routes].sort((a, b) => (a.id < b.id ? -1 : 1));
-  const shown = sorted.map((r) => r.id + (r.direct ? "+" : "-")).join();
-  if (shown === peersShown) return;
-  peersShown = shown;
-  peerListEl.innerHTML = "";
-  if (sorted.length === 0) {
-    const li = document.createElement("li");
-    li.className = "empty-row";
-    li.textContent = "No peers linked yet.";
-    peerListEl.appendChild(li);
-    return;
+  const linked = new Map(routes.map((r) => [r.id, r.direct]));
+  const ids = [...new Set([...linked.keys(), ...wanted.keys()])]
+    .filter((id) => contacts.has(id) || (linked.has(id) && roomsOf(id).length === 0 && !leavingPeers.has(id)))
+    .sort();
+  for (const [id, row] of peerRows) {
+    if (!ids.includes(id)) { row.li.remove(); peerRows.delete(id); }
   }
-  for (const { id, direct } of sorted) {
-    const li = document.createElement("li");
-    li.className = "peer-row";
-    const name = document.createElement("span");
-    name.className = "peer-row-id";
-    name.textContent = id.slice(0, 8);
-    name.title = id;
-    li.appendChild(name);
-    const route = document.createElement("span");
-    route.className = direct ? "peer-route direct" : "peer-route relayed";
-    route.textContent = direct ? "direct" : "via relay";
-    route.title = direct
-      ? "Linked peer to peer over WebRTC; the relay carries none of this traffic."
-      : "The relay forwards this link's encrypted bytes; no direct link has been made.";
-    li.appendChild(route);
-    peerListEl.appendChild(li);
-  }
+  peerListEmpty.hidden = ids.length > 0;
+  ids.forEach((id, i) => {
+    let row = peerRows.get(id);
+    if (!row) peerRows.set(id, row = buildPeerRow(id));
+    // After the empty row, in key order. A row already in place is not moved, which
+    // would take the focus from its field.
+    if (peerListEl.children[i + 1] !== row.li) peerListEl.insertBefore(row.li, peerListEl.children[i + 1] ?? null);
+    const isLinked = linked.has(id), isContact = contacts.has(id);
+    const label = peerLabel(id);
+    const state = isLinked ? (linked.get(id) ? "direct" : "relayed")
+      : wanted.get(id).silent ? "silent" : calls(id) ? "calling" : "waiting";
+    const shown = `${state} ${isContact} ${label}`;
+    if (shown === row.shown) return;
+    // The field holds what this node presents to the contact, shown again each time the
+    // row comes to need it.
+    const asks = isContact && !isLinked;
+    if (asks && row.secret.hidden) row.secret.value = contacts.get(id) ? bytesToHex(contacts.get(id)) : "";
+    row.secret.hidden = row.connect.hidden = !asks;
+    row.name.textContent = label;
+    // A contact is removed here; one is added from a room's list, or by its link or key.
+    row.remove.hidden = !isContact;
+    row.shown = shown;
+    row.state.className = `peer-route ${state}`;
+    [row.state.textContent, row.state.title] = PEER_STATES[state];
+  });
 }
 
 // ─── app registry ──────────────────────────────────────────────────────
@@ -758,7 +887,7 @@ async function handleOffer(bundleBytes, fromPkHex, recordKey) {
     fromPkHex,
   });
   renderOfferList();
-  tabs.apps.btn.classList.add("unread");
+  if (!tabs.apps.btn.classList.contains("active")) tabs.apps.btn.classList.add("unread");
   shellPrint(
     `${fromPkHex.slice(0, 8)} offers app "${meta.name || meta.id}" — see the Apps tab.`, "sys");
 }
@@ -832,35 +961,36 @@ function sendFrame(sender, peerId, proto, payload) {
   return appInvoke(sender, CHAT_OP_SEND, arg);
 }
 
-/** Fan one payload out to every linked peer.
+/** Fan one payload out to every linked peer, or to those it is for.
+ *
+ *  `among` narrows the fan-out to a room's members. `only` narrows it to one peer, a
+ *  direct message, and is sent linked or not: the transport dials a contact it has an
+ *  address for, and a peer it cannot reach is simply not reached.
  *
  *  `nickPrefix` is our current nick announcement, sent AHEAD of the payload to each peer
  *  that has not heard it yet (see lastSentNickBody). Once per peer, not once per message:
- *  chat v2 renders an announcement as a visible "… is now …" line, so re-sending it in
- *  front of every message would bury the conversation in its own presence traffic.
- *  `isNick` says the payload IS that announcement, so its recipients count as told.
+ *  chat v2 renders an announcement as a visible "… is now known as …" line, so re-sending it in
+ *  front of every message would bury the conversation in its own presence traffic. A peer
+ *  counts as told before the send, so `tellNick` does not tell it as well meanwhile.
  *
  *  The told-set is pruned against the peer list the TRANSPORT just answered with, which
  *  is what keeps this from being a peer mirror: nothing here observes a peer coming or
  *  going, and a peer that dropped and came back is simply absent from the set it is
  *  pruned against, so it is told again. */
-async function broadcastToPeers(proto, payload, { nickPrefix = null, isNick = false, only = null } = {}) {
+async function broadcastToPeers(proto, payload, { nickPrefix = null, only = null, among = null } = {}) {
   const key = shell.resolve(proto);
   if (!key) return; // nothing installed claims this protocol — nothing to send with
   const sender = installedApps.get(key);
   if (!sender) return;
   const peers = await linkedPeers();
   pruneNickTold(peers);
-  // `only` narrows the fan-out to one peer: a direct message. A peer that is not linked
-  // is simply not reached, exactly as a broadcast does not reach it.
-  for (const peerId of only ? peers.filter((p) => p === only) : peers) {
+  for (const peerId of only ? [only] : among ? peers.filter((p) => among.has(p)) : peers) {
     try {
       if (nickPrefix && !nickToldPeers.has(peerId)) {
-        await sendFrame(sender, peerId, proto, nickPrefix);
         nickToldPeers.add(peerId);
+        await sendFrame(sender, peerId, proto, nickPrefix);
       }
       await sendFrame(sender, peerId, proto, payload);
-      if (isNick) nickToldPeers.add(peerId);
     }
     catch (err) { shellPrint(`send to ${peerId.slice(0, 8)} failed: ${err.message}`, "err"); }
   }
@@ -1180,7 +1310,19 @@ window.addEventListener("message", async (ev) => {
       frame.contentWindow.postMessage({ type: "render", payload }, "*");
     }
     renderQueue.length = 0;
-    lastPeersKey = null; // the fresh page has not been told who is linked
+    // The fresh page has not been told who is linked, which rooms there are, or been
+    // heard on which conversation it has open.
+    lastPeersKey = lastRoomsKey = null;
+    openConv = undefined;
+    postRoomsToApp();
+    return;
+  }
+
+  // The conversation open in the app: a room, one peer, or none. A call started now is
+  // with it (`callPeers`).
+  if (msg.type === "conv") {
+    openConv = msg.room ? { room: bytesToHex(new Uint8Array(msg.room)) }
+      : msg.to ? { to: bytesToHex(new Uint8Array(msg.to)) } : null;
     return;
   }
 
@@ -1197,34 +1339,39 @@ window.addEventListener("message", async (ev) => {
     const chatBytes = new Uint8Array(1 + body.length);   // [chatType][body]
     chatBytes[0] = msg.chatType & 0xff;
     chatBytes.set(body, 1);
-    // Nick is application state, not a transport-link event. The latest announcement
-    // rides in front of a chat message for any peer that has not heard it — a peer that
-    // joined while we were idle learns the name before it renders that message — without
-    // mirroring peer lifecycle in this page. broadcastToPeers does the per-peer part.
-    const isNick = msg.chatType === 0x02;
+    // A nick is this node's state, not one message: kept, echoed locally, and told to
+    // every linked peer, now and as each one links (`tellNick`). A new one makes every
+    // peer's copy stale, so nobody counts as told any more.
+    if (msg.chatType === 0x02) {
+      lastSentNickBody = { proto, body };
+      nickToldPeers.clear();
+      pageNickTold.clear();
+      renderLocal(active, chatBytes);
+      tellNick(await linkedPeers());
+      return;
+    }
+    // The nick also rides in front of a chat message for a peer that has not heard it yet,
+    // one that linked since the last poll, so it learns the name before it renders the
+    // message. broadcastToPeers does the per-peer part.
     let nickPrefix = null;
-    if (!isNick && lastSentNickBody?.proto === proto) {
+    if (lastSentNickBody?.proto === proto) {
       nickPrefix = new Uint8Array(1 + lastSentNickBody.body.length);
       nickPrefix[0] = 0x02;
       nickPrefix.set(lastSentNickBody.body, 1);
     }
-    // A new nick makes every peer's copy stale, including peers this announcement is
-    // about to reach — cleared here, before the broadcast below re-adds them.
-    if (isNick) nickToldPeers.clear();
-    // Fire-and-forget to every linked peer over Transport — one plane.
+    // Fire-and-forget over Transport — one plane — to whom the message is for: one peer
+    // (`to`) or a room's members (`room`). With neither it goes to every linked peer, which
+    // is for an announcement like the nick, not for a message. A direct message makes its
+    // addressee a contact, so the link to it outlives any shared room.
     const only = msg.to ? bytesToHex(new Uint8Array(msg.to)) : null;
-    broadcastToPeers(proto, chatBytes, { nickPrefix, isNick, only });
+    if (only && !contacts.has(only)) addContact(only, null);
+    const among = msg.room ? membersOfRoom(bytesToHex(new Uint8Array(msg.room))) : null;
+    broadcastToPeers(proto, chatBytes, { nickPrefix, only, among });
     // Local echo: run through the app's guest, render if active. Not awaited —
     // the echo is a view concern, and the send has already gone out; letting it
     // gate the lines below would make a guest failure also drop the presence
     // cache. `renderLocal` reports its own failure.
     renderLocal(active, chatBytes);
-    if (isNick) {
-      // Chat v2's latest nick is application state. It prefixes our next ordinary
-      // message to any peer that has not heard it; no transport peer-up callback or
-      // client-side peer mirror is involved.
-      lastSentNickBody = { proto, body };
-    }
   }
 });
 
@@ -1245,64 +1392,116 @@ window.addEventListener("message", async (ev) => {
 // message author. No per-message signature.
 // ---------------------------------------------------------------------------
 
-let lastSentNickBody = null;   // {proto, body} — app-level prefix for our next message
-// The peers already carrying the nick above.
+let lastSentNickBody = null;   // {proto, body} — this node's nick, as its chat app last set it
+// The peers whose chat app already carries the nick above, and those whose page does: a
+// page shows it in its Network tab, whatever chat app it runs (`tellNick`).
 const nickToldPeers = new Set();
+const pageNickTold = new Set();
 
 /** Drop everyone the transport no longer counts as linked. This is the whole reason the
- *  told-set is not a peer mirror: it holds no opinion about peers, it is only ever
+ *  told-sets are not a peer mirror: they hold no opinion about peers, they are only ever
  *  narrowed to an answer the transport guest gave — so a peer that dropped and came back
  *  (a reloaded tab keeps its id but starts with an empty nick table) is simply absent and
  *  gets told again. Run on every answer the page asks for, the status poll's included, so
  *  the window in which a returning peer looks already-told is one poll interval. */
 function pruneNickTold(peers) {
-  if (nickToldPeers.size === 0) return;
+  if (nickToldPeers.size === 0 && pageNickTold.size === 0) return;
   const linked = new Set(peers);
-  for (const id of nickToldPeers) if (!linked.has(id)) nickToldPeers.delete(id);
+  for (const told of [nickToldPeers, pageNickTold]) {
+    for (const id of told) if (!linked.has(id)) told.delete(id);
+  }
 }
 
-// The room's contact secret: 32 bytes, or null for an open room — we answer anyone who
-// finds the room name. Set from the invite link's `#` fragment on load, or minted by
-// "Random"; the sharing machinery is further down, under "Room secret". Declared with
-// the other networking state near the top of the file, not here — see there for why.
+/** Give each linked peer that has not heard it this node's nick. Its page is told on the
+ *  pages' own channel, an empty nick for none, and shows it in its Network tab; its chat
+ *  app is sent the announcement, so a peer that links after the nick was set has it
+ *  without waiting for a message. A peer counts as told before the send, so nothing tells
+ *  it twice. */
+function tellNick(peers) {
+  pruneNickTold(peers);
+  const nick = lastSentNickBody ? new TextDecoder().decode(lastSentNickBody.body) : "";
+  const signal = new TextEncoder().encode(JSON.stringify({ nick }));
+  for (const peerId of peers) {
+    if (pageNickTold.has(peerId)) continue;
+    pageNickTold.add(peerId);
+    void sendSignal(peerId, signal).catch(() => pageNickTold.delete(peerId));
+  }
+  if (!lastSentNickBody) return;
+  const { proto, body } = lastSentNickBody;
+  const key = shell.resolve(proto);
+  const sender = key ? installedApps.get(key) : null;
+  if (!sender) return;
+  const frame = new Uint8Array(1 + body.length);
+  frame[0] = 0x02;
+  frame.set(body, 1);
+  for (const peerId of peers) {
+    if (nickToldPeers.has(peerId)) continue;
+    nickToldPeers.add(peerId);
+    void sendFrame(sender, peerId, proto, frame).catch(() => nickToldPeers.delete(peerId));
+  }
+}
 
-// Changing the rendezvous room or contact secret does NOT reload the transport bundle or
-// replace its sockets. `connectRelay` rotates the guest-owned gate before joining.
-// A room change then severs every link — the relay's and the peers' — leaving the
-// transport guest and the socket sink standing; a call follows the linked set as it
-// changes. Rejoining the same room keeps the registration.
+// Nothing here reloads the transport bundle or replaces its sockets: the page says who it
+// wants linked, and the transport links them, a peer at a time (`syncPeers`).
 //
 // `relaySecret` is a private relay's (seedrelay's `--secret`), or null for an open one. It
-// is the relay operator's credential, not the room's, so it never rides in an invite link.
+// is the relay operator's credential, so it never rides in a link that is shared.
 // The room client and the transport each prove it with BLAKE2b, and never send it.
-async function joinRtcRoom(origin, room, relaySecret) {
-  const secret = roomSecret ?? undefined;
-  const url = `${origin}/${room}`;
-  if (transportRoomUrl !== undefined && (transportRoomUrl !== url || transportSecret !== secret)) {
-    transport.reset();
-  }
-  transportRoomUrl = url;
-  transportSecret = secret;
-  if (rooms?.origin !== origin || rooms.relaySecret !== relaySecret) {
-    rooms?.client.close();
-    roomMembers.clear();
+
+/** One op of the transport's. The page has nothing to do about one it refuses. */
+function netOp(op) {
+  const answer = shell.call(NET_PROTO, op.build());
+  return answer ? answer.catch(() => {}) : Promise.resolve();
+}
+
+/** A room's name as people say it: without the random suffix "Random" gives one. */
+function friendlyRoom(name) {
+  return name.replace(/-[0-9a-f]{32}$/, "") || name;
+}
+
+/** Who the relay says is in the joined room with this id; nobody for a room not joined. */
+function membersOfRoom(id) {
+  for (const r of joinedRooms.values()) if (r.id === id) return r.members;
+  return new Set();
+}
+
+/** The names of the joined rooms `key` is in. */
+function roomsOf(key) {
+  return [...joinedRooms].filter(([, r]) => r.members.has(key)).map(([name]) => name);
+}
+
+/** The joined rooms changed: keep them, show them, and bring the links in step. */
+function roomsChanged() {
+  sessionStorage.setItem("chat.rooms", JSON.stringify([...joinedRooms.keys()]));
+  renderRoomList();
+  syncPeers();
+}
+
+/** Be on the relay at `origin`: the room client in every joined room, and the transport
+ *  registered there, so this node's key can be called. Answers the relay's state as
+ *  `pollRelay` reads it. */
+async function joinRelay(origin, relaySecret) {
+  if (relay?.origin !== origin || relay.relaySecret !== relaySecret) {
+    // The old relay's rooms are left, and their members heard leaving.
+    relay?.client.close();
     const client = roomClient({
       relay: origin,
       publicKey: myKeys.publicKey,
       sign: (m) => sodium.crypto_sign_detached(m, myKeys.privateKey),
       ...(relaySecret ? { secret: relaySecret, blake2b: (m) => sodium.crypto_generichash(64, m) } : {}),
-      onMember: (_room, key, present) => void onRoomMember(origin, key, present),
-      onRefused: (name) => shellPrint(`Room ${name} is full; try again later.`, "err"),
+      onMember: onRoomMember,
+      onRefused: (name) => {
+        shellPrint(`Room ${friendlyRoom(name)} is full; try again later.`, "err");
+        joinedRooms.delete(name);
+        roomsChanged();
+      },
     });
-    rooms = { origin, relaySecret, client, room: null };
+    relay = { origin, relaySecret, client };
+    showRelayButton();
+    for (const name of joinedRooms.keys()) await client.join(name);
+    // Contacts are called through this relay now.
+    syncPeers();
   }
-  if (rooms.room !== room) {
-    if (rooms.room !== null) await rooms.client.leave(rooms.room);
-    rooms.room = room;
-    await rooms.client.join(room);
-  }
-  // The transport registers this node's key on the relay, so room members can call it,
-  // and answers the relay's state as `pollRelay` reads it.
   const op = new OpArgs("relay").text(origin);
   if (relaySecret) op.text(relaySecret);
   const answer = shell.call(NET_PROTO, op.build());
@@ -1310,15 +1509,184 @@ async function joinRtcRoom(origin, room, relaySecret) {
   return (await answer)[0];
 }
 
-// A key the room client heard join or leave. A member is reached through the relay, under
-// the room's contact secret, which its members share.
-async function onRoomMember(origin, key, present) {
+/** Join the room `name`, beside any this page is already in. */
+async function joinRoom(name) {
+  if (joinedRooms.has(name)) return;
+  joinedRooms.set(name, { id: await roomId(name), members: new Set() });
+  roomsChanged();
+  await relay?.client.join(name);
+}
+
+/** Leave one room, and hang up on everyone it was the only reason to be linked to. */
+async function leaveRoom(name) {
+  if (!joinedRooms.has(name)) return;
+  const before = [...wanted.keys()];
+  await relay?.client.leave(name);
+  joinedRooms.delete(name);
+  roomsChanged();
+  hangUpUnwanted(before);
+}
+
+/** What a peer is shown as: the nick the app knows it by, or the start of its key. */
+function peerLabel(key) {
+  return peerNicks.get(key) ?? key.slice(0, 8);
+}
+
+/** Make `key` a contact, with its contact secret or null: linked whether or not a room is
+ *  shared. A new one is told, once it is linked, so it is this node's peer at both ends;
+ *  `tell: false` is for one that said so itself. */
+function addContact(key, secret, { tell = true } = {}) {
   if (key === myPkHex) return;
-  if (!present) { roomMembers.delete(key); return; }
-  roomMembers.add(key);
-  const secret = roomSecret ?? new Uint8Array(0);
-  const answer = shell.call(NET_PROTO, new OpArgs("addr").blob(hexToBytes(key)).blob(secret).text(`relay+${origin}`).build());
-  try { await answer; } catch {}
+  if (!contacts.has(key)) {
+    if (tell) untoldPeers.set(key, true); else untoldPeers.delete(key);
+  }
+  leavingPeers.delete(key);
+  contacts.set(key, secret);
+  saveContacts();
+  renderRoomList();
+  syncPeers();
+}
+
+/** Stop `key` being a contact, and tell it, unless it said so itself. */
+function removeContact(key, { tell = true } = {}) {
+  const before = [...wanted.keys()];
+  // One never told it was added has nothing to hear.
+  const knows = untoldPeers.get(key) !== true;
+  untoldPeers.delete(key);
+  contacts.delete(key);
+  saveContacts();
+  renderRoomList();
+  syncPeers();
+  if (!tell || !knows) { hangUpUnwanted(before); return; }
+  leavingPeers.add(key);
+  void tellRemoved(key, before);
+}
+
+/** The notice one page sends another: it added it as a peer, or removed it. */
+const peerNotice = (added) => new TextEncoder().encode(JSON.stringify({ peer: added }));
+
+/** How long a peer told it was removed has to hang up, before this node does. The
+ *  transport drops what is still queued on a link it closes, so a link closed right behind
+ *  the notice would take the notice with it, and the peer would go on listing this node. */
+const HANG_UP_GRACE_MS = 1500;
+
+/** Tell `key` this node removed it, then hang up on those of `before` no longer wanted. One
+ *  with no link is owed the notice until it has one (`tellPeers`): a send would dial it. */
+async function tellRemoved(key, before) {
+  let told = false;
+  try {
+    if ((await linkedPeers()).includes(key)) {
+      await sendSignal(key, peerNotice(false));
+      told = true;
+    }
+  } catch { /* not told: owed, below */ }
+  if (told) await new Promise((r) => setTimeout(r, HANG_UP_GRACE_MS));
+  else if (!contacts.has(key)) untoldPeers.set(key, false);
+  leavingPeers.delete(key);
+  hangUpUnwanted(before);
+}
+
+/** Send each linked peer the notice it is owed: that this node added it, or removed it. */
+function tellPeers(linked) {
+  for (const [key, added] of [...untoldPeers]) {
+    if (!linked.includes(key)) continue;
+    untoldPeers.delete(key);
+    void sendSignal(key, peerNotice(added)).catch(() => {});
+    if (added) continue;
+    // A removed peer that linked again, still listing this node: it hangs up once it has
+    // heard, and this node does after the grace.
+    leavingPeers.add(key);
+    setTimeout(() => { leavingPeers.delete(key); hangUpUnwanted([key]); }, HANG_UP_GRACE_MS);
+  }
+}
+
+/** Close the links to those of `before` this page no longer wants. Only what the user did
+ *  here hangs up, leaving a room or removing a contact: a peer merely heard leaving hangs
+ *  up itself, and one whose relay dropped has not gone anywhere. */
+function hangUpUnwanted(before) {
+  for (const key of before) {
+    if (!wanted.has(key)) void netOp(new OpArgs("forget").blob(hexToBytes(key)));
+  }
+}
+
+// A key the room client heard join or leave a room. One that joins is waited for afresh.
+function onRoomMember(room, key, present) {
+  const r = joinedRooms.get(room);
+  if (!r || key === myPkHex) return;
+  if (present) { r.members.add(key); wanted.delete(key); }
+  else r.members.delete(key);
+  renderRoomList();
+  syncPeers();
+}
+
+/** Bring the transport in step with who this page wants linked: its room-mates and its
+ *  contacts. Room-mates are welcomed, so their calls need no contact secret, and every
+ *  wanted peer gets its address. */
+function syncPeers() {
+  const mates = new Set();
+  for (const r of joinedRooms.values()) for (const key of r.members) mates.add(key);
+  void netOp(new OpArgs("welcome").blob(hexToBytes([...mates].join(""))));
+  const want = new Set([...mates, ...contacts.keys()]);
+  for (const key of [...wanted.keys()]) if (!want.has(key)) wanted.delete(key);
+  for (const key of want) {
+    if (!wanted.has(key)) wanted.set(key, { since: performance.now(), silent: false, late: false });
+    teachPeer(key);
+  }
+  postRoomsToApp();
+}
+
+/** How long a wanted peer may stay unlinked before the wait for it is over: one this node
+ *  calls then reads as `silent` and is left alone, and one that was to call is `late`.
+ *  Just under the transport's handshake deadline, so a node that answers nothing, as one
+ *  whose contact secret was not presented does, is called once. */
+const CALL_PATIENCE_MS = 9000;
+
+/** Whether this node calls `key`. It calls a contact, which may not know to call back. Of
+ *  two room-mates the smaller key calls, so a pair dials once, and the larger one when the
+ *  smaller is late. A peer that gave no answer is left alone until its row's Connect, or
+ *  until it calls or joins a room again. */
+function calls(key) {
+  const w = wanted.get(key);
+  if (!w || w.silent) return false;
+  return contacts.has(key) || myPkHex < key || w.late;
+}
+
+/** What a call presents to a node with no contact secret, or to a room-mate, which
+ *  welcomes this node: 32 zero bytes. Not an empty blob, which the transport reads as
+ *  "present this node's own". */
+const NO_SECRET = new Uint8Array(32);
+
+/** Give the transport its address for `key`: the contact secret to present, and the relay
+ *  to call it through. A key this node does not call has no destination, and none has one
+ *  while this page is on no relay, which the transport then leaves alone (`ready` dials
+ *  only what has one). */
+function teachPeer(key) {
+  const secret = roomsOf(key).length > 0 ? NO_SECRET : contacts.get(key) ?? NO_SECRET;
+  void netOp(new OpArgs("addr").blob(hexToBytes(key)).blob(secret)
+    .text(relay && calls(key) ? `relay+${relay.origin}` : ""));
+}
+
+/** A contact row's Connect: call `key` again, presenting what its field holds as the
+ *  contact secret, or none for an empty one. */
+function connectPeer(key, field) {
+  const typed = field.value.trim().toLowerCase();
+  if (typed !== "" && !HEX32_RE.test(typed)) {
+    field.setCustomValidity("A contact secret is 64 hex characters.");
+    field.reportValidity();
+    return;
+  }
+  wanted.delete(key);
+  addContact(key, typed === "" ? null : hexToBytes(typed));
+}
+
+/** Set this node's own contact secret, or with null open it to any caller. Links already
+ *  up stay, and room-mates are answered either way. */
+async function setMyContact(secret) {
+  await setTransportContact(secret);
+  myContactSecret = secret;
+  if (secret) sessionStorage.setItem("chat.contactSecret", bytesToHex(secret));
+  else sessionStorage.removeItem("chat.contactSecret");
+  updateContactHint();
 }
 
 // Boot the app registry now that the shell exists: render the (empty) lists, then
@@ -1336,9 +1704,10 @@ restoreOffers().catch((err) =>
 
 // ─── live audio/video calls ────────────────────────────────────────────
 //
-// Calls ride peer connections of their own, one per linked peer, through MediaCalls
-// (./media-rtc.js), signaled over the calls boot bundle. media.start publishes our
-// camera/mic to every linked peer, and pollPeerViews keeps it following the linked set;
+// Calls ride peer connections of their own, one per peer in the call, through MediaCalls
+// (./media-rtc.js), signaled over the calls boot bundle. A call is with the conversation
+// open in the app when it starts: media.start publishes our camera/mic to that room's
+// linked members, or to that one peer, and pollPeerViews keeps it following them (`callPeers`);
 // endCall hangs up with every peer. Remote tracks arrive via the onTrack callback wired
 // on `media` above and land in a per-peer tile keyed by pubkey hex; a tile is cleaned up
 // when its track ends or its media connection closes.
@@ -1353,6 +1722,21 @@ const videoTiles   = document.getElementById("video-tiles");
 let localStream = null;
 let micEnabled = true;
 const remoteTiles = new Map(); // pkHex -> { wrap, video, stream }
+// The conversation open in the app, `{ room }` or `{ to }` by id in hex, null for none, and
+// undefined for an app that never says. `callScope` is what it was when the call in
+// progress started.
+let openConv;
+let callScope;
+
+/** Who of the linked peers the call in progress is with: a room's members, or one peer.
+ *  A call from an app that never says which conversation is open is with everyone linked. */
+function callPeers(linked) {
+  if (callScope === undefined) return linked;
+  if (callScope === null) return [];
+  if (callScope.to) return linked.filter((p) => p === callScope.to);
+  const members = membersOfRoom(callScope.room);
+  return linked.filter((p) => members.has(p));
+}
 
 async function updateCallStatus(peerCount) {
   if (!localStream) {
@@ -1363,7 +1747,7 @@ async function updateCallStatus(peerCount) {
     callStatus.textContent = n > 0 ? `receiving from ${n} peer${n === 1 ? "" : "s"}` : "idle";
     callBar.classList.toggle("idle", n === 0);
   } else {
-    const n = peerCount ?? (await linkedPeers()).length;
+    const n = peerCount ?? callPeers(await linkedPeers()).length;
     // Re-read after the await: a hang-up while the transport was answering means there is no
     // call to report on any more, and the idle branch above has already had the last word.
     if (!localStream) return;
@@ -1463,8 +1847,10 @@ async function startCall() {
   callEndBtn.disabled = false;
   callStartBtn.disabled = true;
   ensureLocalTile();
-  // Published to every linked peer now, and to any that links later (pollPeerViews).
-  media.start(localStream.getTracks().map((track) => ({ track, stream: localStream })), await linkedPeers());
+  // Published to the open conversation's linked peers now, and to any of them that links
+  // later (pollPeerViews).
+  callScope = openConv;
+  media.start(localStream.getTracks().map((track) => ({ track, stream: localStream })), callPeers(await linkedPeers()));
   const joined = remoteTiles.size > 0;
   updateCallStatus();
   shellPrint(joined ? "Joined the call." : "Call started.", "sys");
@@ -1513,60 +1899,92 @@ if (navigator.connection && typeof navigator.connection.addEventListener === "fu
 }
 
 // Room names stay URL-safe identifier characters, length 1..128, so they read cleanly in
-// the relay URL and invite links; the relay itself sees only a hash of the name. Empty
-// input is allowed and means "use the default room".
+// the relay URL and room links; the relay itself sees only a hash of the name.
 const ROOM_NAME_RE = /^[A-Za-z0-9._-]{1,128}$/;
+// The room joined when none is named: where two tabs on a laptop meet.
 const DEFAULT_ROOM = "global";
 
-// The relay's origin and the room to join there. A URL typed with a path names its room
-// (lets them paste a full `ws://host:8080/my-room` URL in just the URL field if they
-// prefer); otherwise the room field does, and an empty one names the default room.
-function parseRelay(base, room) {
+// The relay's origin, and the room a URL typed with a path names (lets them paste a full
+// `ws://host:8080/my-room` URL in just the URL field if they prefer).
+function parseRelay(base) {
   let u;
   try { u = new URL(base); } catch { return null; }
   if (u.protocol !== "ws:" && u.protocol !== "wss:") return null;
-  const path = decodeURIComponent(u.pathname.replace(/^\/+|\/+$/g, ""));
-  return { origin: `${u.protocol}//${u.host}`, room: path || room || DEFAULT_ROOM };
+  return { origin: `${u.protocol}//${u.host}`, room: decodeURIComponent(u.pathname.replace(/^\/+|\/+$/g, "")) };
 }
 
+// The relay as last joined, for the status line and a reload: { base, url, relaySecret,
+// joining }.
+let relayJoin = null;
+
+/** Whether `room` is a name a room can have, saying so when it is not. */
+function roomNameOk(room) {
+  if (ROOM_NAME_RE.test(room)) return true;
+  shellPrint("Room name must match [A-Za-z0-9._-] (up to 128 chars).", "err");
+  return false;
+}
+
+/** "Connect": be on the relay in the URL field, where this node's key can be called and
+ *  its contacts reached, and in the rooms already joined. No room is needed for it; a URL
+ *  typed with a path joins the room it names. */
 async function connectRelay() {
   const base = relayUrlInput.value.trim();
   if (!base) { shellPrint("Enter a relay URL.", "err"); return; }
-  const room = relayRoomInput.value.trim();
-  if (room && !ROOM_NAME_RE.test(room)) {
-    shellPrint("Room name must match [A-Za-z0-9._-] (up to 128 chars).", "err");
-    return;
-  }
-  const target = parseRelay(base, room);
+  const target = parseRelay(base);
   if (!target) { shellPrint("Relay URL must be ws:// or wss://.", "err"); return; }
-  const url = `${target.origin}/${target.room}`;
-  // Keep the address bar in step with a hand-typed room, so "Copy invite link" (and the
-  // browser's own copy-URL) always describe the room we are actually joining.
-  syncHash();
-  updateRoomGateHint();
-  const label = room || DEFAULT_ROOM;
+  if (target.room && !roomNameOk(target.room)) return;
   const relaySecret = relaySecretInput.value.trim() || null;
+  const join = relayJoin = { base, url: target.origin, relaySecret, joining: true };
   try {
-    // Apply the gate before joining: no link can arrive under the previous room's
-    // credential.
-    await setTransportContact(roomSecret);
-    relayConnection = { base, room, label, url, relaySecret, joining: true };
     RTC_CONFIG.iceServers = [{ urls: `stun:${new URL(base).hostname}:${RELAY_STUN_PORT}` }];
     relayShown = -1;
     relayStatus.textContent = "connecting...";
-    setRelayPill("connecting", `room ${label}`);
-    shellPrint(`Joining ${url} (room: ${label})...`, "sys");
-    relayShown = await joinRtcRoom(target.origin, target.room, relaySecret);
-    relayConnection.joining = false;
-    showRelayState(relayShown);
+    setRelayPill("connecting", "connecting");
+    shellPrint(`Connecting to ${target.origin}...`, "sys");
+    if (target.room) await joinRoom(target.room);
+    const state = await joinRelay(target.origin, relaySecret);
+    if (relayJoin !== join) return; // disconnected meanwhile, or connecting elsewhere
+    join.joining = false;
+    relayShown = state;
+    showRelayState(state);
   }
   catch (err) {
-    if (relayConnection) relayConnection.joining = false;
+    if (relayJoin !== join) return;
+    join.joining = false;
     relayStatus.textContent = "error";
     setRelayPill("err", "relay error");
-    relayConnectBtn.disabled = false;
     shellPrint(`Relay connection failed: ${err?.message ?? err}`, "err");
   }
+}
+
+/** "Disconnect": be on no relay. The rooms keep their names for the next Connect, with
+ *  nobody heard in them, so the links they were the reason for are closed; a contact
+ *  already linked stays linked. */
+async function disconnectRelay() {
+  if (!relay) return;
+  const before = [...wanted.keys()];
+  const { client } = relay;
+  relay = null;
+  relayJoin = null;
+  relayShown = 0;
+  showRelayButton();
+  // The room client hears every member leave as it closes (`onRoomMember`), and with no
+  // relay a contact has no address to be called at.
+  client.close();
+  syncPeers();
+  hangUpUnwanted(before);
+  // A reload stays off the relay too.
+  sessionStorage.removeItem("chat.relayUrl");
+  sessionStorage.removeItem("chat.relaySecret");
+  await netOp(new OpArgs("relay").text(""));
+  showRelayState(0);
+  shellPrint("Disconnected from the relay.", "sys");
+}
+
+/** The relay button is the way out while this page is on a relay, or trying to be. */
+function showRelayButton() {
+  relayConnectBtn.textContent = relay ? "Disconnect" : "Connect";
+  relayConnectBtn.classList.toggle("primary", !relay);
 }
 
 // The relay link is the transport's, so its state is asked of the transport: 0 none
@@ -1578,142 +1996,251 @@ async function pollRelay() {
   try {
     const answer = shell.call(NET_PROTO, new OpArgs("relayState").build());
     const state = answer ? (await answer)[0] : 0;
-    if (state !== relayShown && !relayConnection?.joining) { relayShown = state; showRelayState(state); }
+    if (state !== relayShown && !relayJoin?.joining) { relayShown = state; showRelayState(state); }
   } catch {}
   setTimeout(pollRelay, 1000);
 }
 
+/** The joined rooms in a few words, for the pill and the status line. */
+function roomsLabel() {
+  const names = [...joinedRooms.keys()].map(friendlyRoom);
+  return names.length === 0 ? "no room" : names.length === 1 ? `room ${names[0]}` : `${names.length} rooms`;
+}
+
+/** Show the relay as connected: the pill names the rooms, or just says so with none. */
+function showConnected() {
+  relayStatus.textContent = `connected · ${roomsLabel()}`;
+  setRelayPill("ok", joinedRooms.size === 0 ? "connected" : roomsLabel());
+}
+
 function showRelayState(state) {
-  const current = relayConnection;
+  const current = relayJoin;
   if (!current || state === 0) {
     relayStatus.textContent = "disconnected";
     setRelayPill("off", "no relay");
-    relayConnectBtn.disabled = false;
     return;
   }
-  const { base, room, label, url, relaySecret } = current;
+  const { base, url, relaySecret } = current;
   if (state === 1) {
-    shellPrint(`Relay link up — room ${label}, waiting for peers.`, "sys");
-    relayStatus.textContent = `connected · room ${label}`;
-    setRelayPill("ok", `room ${label}`);
-    relayConnectBtn.disabled = false;
-    // Remember the room so a reload picks it back up automatically.
+    shellPrint(`Relay link up — ${roomsLabel()}.`, "sys");
+    showConnected();
+    // Remember the relay so a reload picks it, and the rooms, back up automatically.
     sessionStorage.setItem("chat.relayUrl", base);
-    sessionStorage.setItem("chat.relayRoom", room);
-    // The secret belongs to the room, so it is saved and cleared with it — a reload must
-    // not rejoin a gated room having forgotten the credential, nor keep a stale secret
-    // after moving to an open one.
-    if (roomSecret) sessionStorage.setItem("chat.roomSecret", bytesToHex(roomSecret));
-    else sessionStorage.removeItem("chat.roomSecret");
     // The relay secret belongs to the relay, so it is saved and cleared with the relay.
     if (relaySecret) sessionStorage.setItem("chat.relaySecret", relaySecret);
     else sessionStorage.removeItem("chat.relaySecret");
   } else {
     relayStatus.textContent = "unreachable — retrying";
     setRelayPill("err", "relay down");
-    relayConnectBtn.disabled = false;
     // A private relay drops a node without its secret, which reads here as unreachable.
     shellPrint(`Relay unreachable — is one running at ${url}, and if it is private, is the relay secret right? ` +
       "Retrying; existing P2P links are unaffected.", "err");
   }
 }
+
+/** "Join": be in the room typed, or the default one with none typed, beside any already
+ *  joined. A page on no relay yet connects to the one in the URL field as well. */
+async function joinTypedRoom() {
+  const room = relayRoomInput.value.trim() || DEFAULT_ROOM;
+  if (!roomNameOk(room)) return;
+  try {
+    shellPrint(`Joining room ${friendlyRoom(room)}...`, "sys");
+    await joinRoom(room);
+    relayRoomInput.value = "";
+  }
+  catch (err) {
+    shellPrint(`Could not join room ${friendlyRoom(room)}: ${err?.message ?? err}`, "err");
+    return;
+  }
+  if (!relay) await connectRelay();
+}
+
 pollRelay();
-relayConnectBtn.addEventListener("click", connectRelay);
-relayUrlInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { e.preventDefault(); connectRelay(); }
-});
-relayRoomInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { e.preventDefault(); connectRelay(); }
-});
-relaySecretInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { e.preventDefault(); connectRelay(); }
-});
+relayConnectBtn.addEventListener("click", () => (relay ? disconnectRelay() : connectRelay()));
+roomJoinBtn.addEventListener("click", joinTypedRoom);
+for (const [field, act] of [[relayUrlInput, connectRelay], [relaySecretInput, connectRelay], [relayRoomInput, joinTypedRoom]]) {
+  field.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); act(); }
+  });
+}
 
-// ── Room secret: the credential that rides in the invite link ────────────────
-//
-// The room NAME is routing — the relay needs it to forward our signaling, so it is
-// necessarily visible to whoever runs the relay. The room SECRET is the credential, and
-// it travels in the URL fragment (`#`), which browsers never put on the wire. So one
-// pasteable link carries both halves while the relay only ever learns the half it needs.
-// That is the whole point: a relay you do not control can carry your signaling without
-// being able to join the conversation.
-//
-// `roomSecret` itself is declared up with the networking section (see there for
-// why). null ⇒ open room: we answer anyone who finds the name. Fine for `global`
-// on a laptop, not for anything else.
+// The Network tab's room list: each joined room with who else is in it, a link to share it
+// by, and the way out of it.
+function renderRoomList() {
+  roomListEl.replaceChildren();
+  if (joinedRooms.size === 0) {
+    const li = document.createElement("li");
+    li.className = "empty-row";
+    li.textContent = "No room joined.";
+    roomListEl.appendChild(li);
+  }
+  for (const [name, r] of joinedRooms) {
+    const li = document.createElement("li");
+    li.className = "peer-row room-row";
+    const label = document.createElement("span");
+    label.className = "peer-row-id";
+    label.textContent = friendlyRoom(name);
+    label.title = name;
+    const count = document.createElement("span");
+    count.className = "peer-row-where";
+    count.textContent = r.members.size === 0 ? "no other peers"
+      : r.members.size === 1 ? "1 other peer" : `${r.members.size} other peers`;
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "icon";
+    copy.textContent = "Copy link";
+    copy.addEventListener("click", () => void copyOrPrint(roomLink(name),
+      `Link to room ${friendlyRoom(name)} copied. Anyone with it can join.`, "link"));
+    const leave = document.createElement("button");
+    leave.type = "button";
+    leave.className = "icon";
+    leave.textContent = "Leave";
+    leave.addEventListener("click", () => void leaveRoom(name));
+    li.append(label, count, copy, leave);
+    // Who they are, a line each under the room. One that is not a contact yet is made one
+    // from here, and is then in the peer list.
+    if (r.members.size > 0) {
+      const members = document.createElement("div");
+      members.className = "room-members";
+      for (const key of [...r.members].sort()) {
+        const member = document.createElement("div");
+        member.className = "room-member";
+        const id = document.createElement("span");
+        id.className = "peer-row-id";
+        id.textContent = peerLabel(key);
+        id.title = key;
+        member.appendChild(id);
+        if (!contacts.has(key)) {
+          const add = document.createElement("button");
+          add.type = "button";
+          add.className = "icon";
+          add.textContent = "Add peer";
+          add.title = "Make this peer a contact: stay linked whether or not you share a room.";
+          add.addEventListener("click", () => addContact(key, null));
+          member.appendChild(add);
+        }
+        members.appendChild(member);
+      }
+      li.appendChild(members);
+    }
+    roomListEl.appendChild(li);
+  }
+  if (relay && relayShown === 1) showConnected();
+}
 
-/** Read `#room=<name>&s=<64 hex>` from the current URL. Both parts optional. */
-function inviteFromHash() {
-  const raw = location.hash.startsWith("#") ? location.hash.slice(1) : location.hash;
-  if (!raw) return {};
-  const q = new URLSearchParams(raw);
-  const room = q.get("room") ?? undefined;
-  const s = q.get("s") ?? undefined;
+// ── Links: a room to meet in, a contact to reach ─────────────────────────────
+//
+// A room link is `#room=<name>`. The name is all there is to a room, so whoever has the
+// link can join it, and a room meant to stay private wants a name nobody can guess, which
+// "Random" gives it. A contact link is `#pk=<key>` and, from a node with a contact secret,
+// `&s=<secret>`: how to reach one node directly. Both ride in the URL fragment (`#`),
+// which browsers never put on the wire, so the relay learns neither a room's name nor a
+// secret from a link.
+
+/** Read `room=<name>` and `pk=<64 hex>[&s=<64 hex>]` from a link, or from its fragment. */
+function parseLink(text) {
+  const q = new URLSearchParams(text.slice(text.indexOf("#") + 1));
+  const room = q.get("room") ?? "";
+  const pk = (q.get("pk") ?? "").toLowerCase(), s = (q.get("s") ?? "").toLowerCase();
   return {
-    room: room && ROOM_NAME_RE.test(room) ? room : undefined,
-    secret: s && /^[0-9a-f]{64}$/i.test(s) ? hexToBytes(s.toLowerCase()) : undefined,
+    room: ROOM_NAME_RE.test(room) ? room : undefined,
+    contact: HEX32_RE.test(pk) ? { key: pk, secret: HEX32_RE.test(s) ? hexToBytes(s) : null } : undefined,
   };
 }
 
-/** Mirror the current room + secret into the address bar without adding history
- *  entries, so a reload or a "copy URL" from the browser chrome keeps working. */
-function syncHash() {
-  const room = relayRoomInput.value.trim();
-  const q = new URLSearchParams();
-  if (room) q.set("room", room);
-  if (roomSecret) q.set("s", bytesToHex(roomSecret));
-  const hash = q.toString();
-  history.replaceState(null, "", hash ? `#${hash}` : location.pathname + location.search);
+const pageUrl = () => location.origin + location.pathname + location.search;
+const roomLink = (name) => `${pageUrl()}#${new URLSearchParams({ room: name })}`;
+/** This node's contact link: its key, and its contact secret when it has one. */
+function contactLink() {
+  const q = new URLSearchParams({ pk: myPkHex });
+  if (myContactSecret) q.set("s", bytesToHex(myContactSecret));
+  return `${pageUrl()}#${q}`;
 }
 
-/** Reflect gated/open in the panel, since a wrong or missing secret has no error path —
- *  a refused peer is simply one that never appears. Telling the user which mode they are
- *  in is the only warning we can give. */
-function updateRoomGateHint() {
-  const el = document.getElementById("room-gate-hint");
-  if (!el) return;
-  el.innerHTML = roomSecret
-    ? "This room is <strong>gated</strong> — peers need the secret from your invite link. " +
-      "Share the link, not just the room name."
-    : "This room is <strong>open</strong> — anyone who learns the name can join. " +
-      "Press <strong>Random</strong> for a private room with a secret.";
+/** Say what this node's contact secret does, since a caller without it has no error path —
+ *  it is simply a peer that never links. */
+function updateContactHint() {
+  contactHint.innerHTML = myContactSecret
+    ? "Someone who is not in a room with you must present this node's <strong>contact secret</strong> " +
+      "to connect. <strong>Copy contact link</strong> carries it, with your key."
+    : "This node has <strong>no contact secret</strong>: anyone on the relay who has its key can connect. " +
+      "Set one to answer only your room-mates and whoever you give it to.";
 }
 
-// "Random": mint a private room AND its secret together. 64 bits of room name is plenty
-// to keep two rooms from colliding; the secret is a full 32 bytes because it is the
-// actual credential and is never guessed at, only pasted. Lowercase hex throughout so
-// both round-trip through case-insensitive copy paths (URLs, chat clients) unchanged.
-relayNewRoomBtn.addEventListener("click", async () => {
-  const bytes = new Uint8Array(8);
+// "Random": a room nobody can guess. A room's name is all it takes to join it, so a private
+// one wants 16 random bytes (seedrelay's README). They follow the name typed, which is how
+// the room is shown. Lowercase hex so it round-trips through case-insensitive copy paths
+// (URLs, chat clients) unchanged.
+relayNewRoomBtn.addEventListener("click", () => {
+  const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
-  relayRoomInput.value = bytesToHex(bytes);
-  roomSecret = new Uint8Array(32);
-  crypto.getRandomValues(roomSecret);
-  try { await setTransportContact(roomSecret); }
-  catch (err) { shellPrint(`Could not rotate room secret: ${err.message}`, "err"); }
-  syncHash();
-  updateRoomGateHint();
-  shellPrint("New private room + secret minted — use \"Copy invite link\" to share both.", "sys");
+  const name = friendlyRoom(relayRoomInput.value.trim()).slice(0, 95) || "room";
+  relayRoomInput.value = `${name}-${bytesToHex(bytes)}`;
+  shellPrint("Private room name minted — press Join, then share its link.", "sys");
   relayRoomInput.focus();
-  relayRoomInput.select();
 });
 
-// The invite link is page URL + `#room=…&s=…`. Clipboard access can be denied or absent
-// (file://, older browsers), so fall back to printing it into the shell log where it can
-// still be selected by hand — never leave the user with a button that silently does
-// nothing.
-relayCopyInviteBtn.addEventListener("click", async () => {
-  syncHash();
-  const link = location.href;
+/** Copy `text`, or failing that print it. Clipboard access can be denied or absent
+ *  (file://, older browsers), so fall back to the shell log, where it can still be
+ *  selected by hand — never leave the user with a button that silently does nothing. */
+async function copyOrPrint(text, copied, what) {
   try {
-    await navigator.clipboard.writeText(link);
-    shellPrint(roomSecret
-      ? "Invite link copied — it carries the room AND its secret. Anyone with it can join."
-      : "Invite link copied (open room — no secret; press \"Random\" for a private one).", "sys");
+    await navigator.clipboard.writeText(text);
+    shellPrint(copied, "sys");
   } catch {
-    shellPrint(`Copy failed — here is the link: ${link}`, "sys");
+    shellPrint(`Copy failed — here is the ${what}: ${text}`, "sys");
   }
+}
+
+/** Apply what the contact secret field holds: 64 hex characters, or nothing for none. */
+async function applyContactField() {
+  const typed = contactInput.value.trim().toLowerCase();
+  if (typed !== "" && !HEX32_RE.test(typed)) {
+    contactInput.setCustomValidity("A contact secret is 64 hex characters, or empty for none.");
+    contactInput.reportValidity();
+    return;
+  }
+  try { await setMyContact(typed === "" ? null : hexToBytes(typed)); }
+  catch (err) { shellPrint(`Could not set the contact secret: ${err.message}`, "err"); }
+}
+contactInput.addEventListener("input", () => contactInput.setCustomValidity(""));
+contactInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); void applyContactField(); }
 });
+contactSetBtn.addEventListener("click", () => void applyContactField());
+contactNewBtn.addEventListener("click", () => {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  contactInput.value = bytesToHex(bytes);
+  void applyContactField();
+});
+contactCopyBtn.addEventListener("click", () => void copyOrPrint(contactLink(), myContactSecret
+  ? "Contact link copied — it carries this node's key and contact secret. Anyone with it can connect to you."
+  : "Contact link copied — this node's key; it has no contact secret.", "link"));
+
+/** "Add peer", under the peer list: a contact link, or a key with its contact secret beside
+ *  it if it has one. */
+function addContactFromFields() {
+  const typed = contactAddInput.value.trim();
+  const linked = parseLink(typed).contact;
+  const key = linked ? linked.key : typed.toLowerCase();
+  const secret = contactAddSecretInput.value.trim().toLowerCase();
+  const refuse = (field, why) => { field.setCustomValidity(why); field.reportValidity(); };
+  if (!HEX32_RE.test(key)) return refuse(contactAddInput, "A contact is a contact link, or a key of 64 hex characters.");
+  if (key === myPkHex) return refuse(contactAddInput, "That is this node's own key.");
+  if (secret !== "" && !HEX32_RE.test(secret)) return refuse(contactAddSecretInput, "A contact secret is 64 hex characters.");
+  wanted.delete(key);
+  addContact(key, secret !== "" ? hexToBytes(secret) : linked?.secret ?? null);
+  contactAddInput.value = contactAddSecretInput.value = "";
+  shellPrint(`Contact ${key.slice(0, 8)} added.`, "sys");
+}
+contactAddBtn.addEventListener("click", addContactFromFields);
+for (const field of [contactAddInput, contactAddSecretInput]) {
+  field.addEventListener("input", () => field.setCustomValidity(""));
+  field.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); addContactFromFields(); }
+  });
+}
 
 // Default relay URL: same host the page is loaded from (so phones loading
 // the shell off a desktop's LAN IP get the right pre-fill out of the box).
@@ -1727,46 +2254,67 @@ function defaultRelayUrl() {
   return `ws://${host}:8080`;
 }
 
-// Auto-reconnect to the last relay that successfully accepted us. This is
-// the other half of the reload story: rejoining the room announces our key to
+// Auto-reconnect to the last relay that successfully accepted us, in the rooms we were
+// in. This is the other half of the reload story: rejoining a room announces our key to
 // its members, and the transport links each of them with our new tab.
 const savedRelayUrl = sessionStorage.getItem("chat.relayUrl");
-const savedRelayRoom = sessionStorage.getItem("chat.relayRoom");
-const savedRoomSecret = sessionStorage.getItem("chat.roomSecret");
 const savedRelaySecret = sessionStorage.getItem("chat.relaySecret");
 relayUrlInput.value = savedRelayUrl || defaultRelayUrl();
-if (savedRelayRoom) relayRoomInput.value = savedRelayRoom;
 if (savedRelaySecret) relaySecretInput.value = savedRelaySecret;
-if (savedRoomSecret && /^[0-9a-f]{64}$/.test(savedRoomSecret)) roomSecret = hexToBytes(savedRoomSecret);
+if (myContactSecret) contactInput.value = bytesToHex(myContactSecret);
+let savedRooms = [];
+try { savedRooms = JSON.parse(sessionStorage.getItem("chat.rooms") ?? "[]"); } catch {}
 
-// An invite link WINS over the saved session: following someone's link is an explicit
-// instruction to join their room, whereas sessionStorage is just where we happened to be
-// last. Taking the room without its secret (or vice versa) would produce a peer that
-// cannot link and cannot be told why, so the two move together — an invite naming a room
-// with no `s` means that room is open, and must clear any secret we were holding.
-const invite = inviteFromHash();
-if (invite.room !== undefined || invite.secret !== undefined) {
-  if (invite.room !== undefined) relayRoomInput.value = invite.room;
-  roomSecret = invite.secret ?? null;
-  shellPrint(invite.secret
-    ? `Invite link: room "${relayRoomInput.value || DEFAULT_ROOM}" (gated).`
-    : `Invite link: room "${relayRoomInput.value || DEFAULT_ROOM}" (open — no secret).`, "sys");
+// A link that was followed: its room is joined beside the saved ones, and its contact
+// added. Nothing of it stays in the address bar, a contact secret least of all.
+const followed = parseLink(location.hash);
+if (followed.room) {
+  savedRooms.push(followed.room);
+  shellPrint(`Room link: ${friendlyRoom(followed.room)}.`, "sys");
 }
-updateRoomGateHint();
-syncHash();
+if (followed.contact && followed.contact.key !== myPkHex) {
+  if (!contacts.has(followed.contact.key)) untoldPeers.set(followed.contact.key, true);
+  contacts.set(followed.contact.key, followed.contact.secret);
+  saveContacts();
+  shellPrint(`Contact link: ${followed.contact.key.slice(0, 8)}` +
+    (followed.contact.secret ? ", with its contact secret." : "."), "sys");
+}
+if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+for (const name of savedRooms) {
+  if (typeof name === "string" && ROOM_NAME_RE.test(name)) joinedRooms.set(name, { id: await roomId(name), members: new Set() });
+}
+updateContactHint();
+roomsChanged();
 if (savedRelayUrl) connectRelay();
 
 // Presentation-only polling: authenticated peer truth stays in the transport guest. The
 // page asks for the current set to render counts and routes; it never mirrors transitions or
 // drives reconnection/fan-out from a client-side Set.
-// The linked set, handed to the app's page so it can offer a direct chat with someone who
-// has not spoken yet. Presentation only, like the pill: posted when the set changes.
+// The linked set and the contacts, handed to the app's page so it can offer a direct chat
+// with someone who has not spoken yet. Presentation only, like the pill: posted when
+// either changes.
 let lastPeersKey = null;
 function postPeersToApp(peers) {
-  const key = [...peers].sort().join(",");
+  const key = [...peers].sort().join(",") + "|" + [...contacts.keys()].sort().join(",");
   if (!iframeReady || !frame.contentWindow || key === lastPeersKey) return;
   lastPeersKey = key;
-  frame.contentWindow.postMessage({ type: "peers", peers: peers.map(hexToBytes) }, "*");
+  frame.contentWindow.postMessage(
+    { type: "peers", peers: peers.map(hexToBytes), contacts: [...contacts.keys()].map(hexToBytes) }, "*");
+}
+
+// The joined rooms and who the relay says is in each, handed to the app's page: it files a
+// room message under its room, and drops one whose sender is not in that room. Posted when
+// they change.
+let lastRoomsKey = null;
+function postRoomsToApp() {
+  const key = JSON.stringify([...joinedRooms].map(([name, r]) => [name, [...r.members].sort()]));
+  if (!iframeReady || !frame.contentWindow || key === lastRoomsKey) return;
+  lastRoomsKey = key;
+  frame.contentWindow.postMessage({
+    type: "rooms",
+    rooms: [...joinedRooms].map(([name, r]) =>
+      ({ id: hexToBytes(r.id), name: friendlyRoom(name), members: [...r.members].map(hexToBytes) })),
+  }, "*");
 }
 
 async function pollPeerViews() {
@@ -1776,17 +2324,35 @@ async function pollPeerViews() {
   try {
     const routes = await peerRoutes();
     const peers = routes.map((r) => r.id);
-    // A room member this node calls (the smaller key calls, so a pair dials once) and has
-    // no link to is dialed: `ready` dials every address the transport holds.
-    if ([...roomMembers].some((m) => myPkHex < m && !peers.includes(m))) {
-      void shell.call(NET_PROTO, new OpArgs("ready").u32(0).build())?.catch(() => {});
+    // A wanted peer this node calls (`calls`) and has no link to is dialed: `ready` dials
+    // every address the transport holds a destination for. One that has not linked within
+    // CALL_PATIENCE_MS is silent, and left alone until its row's Connect, or until it
+    // calls or joins a room again. A room-mate that was to call and has not is late, and
+    // this node then calls it instead.
+    const t = performance.now();
+    let dial = false;
+    for (const [key, w] of wanted) {
+      if (peers.includes(key)) { w.since = null; w.silent = w.late = false; continue; }
+      w.since ??= t;
+      const waited = t - w.since >= CALL_PATIENCE_MS;
+      if (calls(key)) {
+        if (!waited) dial = true;
+        else { w.silent = true; teachPeer(key); }
+      } else if (waited && !w.silent) {
+        w.late = true;
+        w.since = t;
+        teachPeer(key);
+      }
     }
+    if (dial && relay) void netOp(new OpArgs("ready").u32(0));
+    tellPeers(peers);
     updatePeerPill(routes);
     renderPeerList(routes);
-    pruneNickTold(peers);
+    tellNick(peers);
     postPeersToApp(peers);
-    media.sync(peers);
-    if (localStream) await updateCallStatus(peers.length);
+    postRoomsToApp();
+    media.sync(callPeers(peers));
+    if (localStream) await updateCallStatus(callPeers(peers).length);
   } catch {}
   setTimeout(pollPeerViews, 750);
 }

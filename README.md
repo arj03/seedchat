@@ -68,7 +68,7 @@ npm run relay
 npm run serve        # → http://localhost:3000/chat-shell.html
 ```
 
-Open the page in two tabs or two browsers and connect both to the same room on the
+Open the page in two tabs or two browsers and join the same room in both on the
 **Network** tab. Then load a chat app (below) in each.
 
 | Script | What it does |
@@ -104,22 +104,40 @@ only that) — and this shell checks it exactly (`isChatApp` in
 `browser/chat-app.js`), so it will not install an app claiming reach it did not ask
 for.
 
-**Rooms and invite links.** The `seedrelay` server is partitioned into **rooms**
-(`ws://host:8080/<room>`, default `global`), set on the **Network** tab. A room can
-be *open* or *gated*:
+**Rooms, contacts and the contact secret.** On the **Network** tab, **Connect** puts
+this node on the relay in the URL field, where its key can be called. That needs no room.
+The button then reads **Disconnect**, which leaves the relay: rooms keep their names for
+the next Connect, the links they were the reason for close, and a contact already linked
+stays linked. From the relay there are two ways to be linked to a peer, and one gate:
 
-- An **open** room answers anyone who learns its name. Fine for `global` on a laptop.
-- **Random** mints a private room name *and* a 32-byte contact secret, and the
-  transport refuses peers that don't present it. **Copy invite link** produces
-  `…/chat-shell.html#room=<name>&s=<hex>`. The secret rides in the URL fragment,
-  which browsers never send over the network, so the relay learns the room name it
-  needs for routing and never the credential. A peer with a wrong or missing secret
-  is refused silently: it just never appears.
+- A **room** has no secret. Joining one is agreeing to be linked to everyone in it, and
+  you can be in several at once: type a name and press **Join** (with none typed, the
+  default `global`), which also connects a node that is on no relay yet. Whoever has a
+  room's name can join it, so **Random** gives the name typed an ending nobody can guess,
+  `cats-5c1e…`, shown as `cats`. Each room lists the other peers in it, and has a
+  **Copy link** (`…/chat-shell.html#room=<name>`) and a **Leave**; leaving closes only the
+  links that room was the reason for. The relay keeps no list of rooms a client could
+  read, and sees a hash of each name, never the name.
+- A **contact** is one peer you link to directly, by its key, whether or not you share a
+  room. The Peers list holds them, not your room-mates, each by its nick if it has set
+  one and by its key otherwise. It is easiest with someone you share a room with:
+  **Add peer** beside them in the room's list makes them a contact, as sending them a
+  direct message does. For anyone else, **Add peer** under the Peers list takes a contact
+  link, or a key with its contact secret if it has one. Either way the other end is told
+  once it is linked, and lists you as its peer too; **Remove peer** undoes it at both ends.
+- The **contact secret** (*My contact secret*) is this node's own. With one set, a caller
+  who is not in a room with you must present it to be answered at all; a wrong or missing
+  one is refused silently, and shows on the caller's side as `no answer`. Your room-mates
+  never need it. **Copy contact link** gives `…#pk=<your key>&s=<your secret>`.
+
+Links carry what they share in the URL fragment, which browsers never send over the
+network. A room message goes only to that room's members, a direct message only to its
+addressee, and a call is with the conversation open when it starts.
 
 **Private relays.** A relay started with `--secret` (seedrelay's
 [Private relays](https://github.com/arj03/seedrelay#private-relays)) serves only
 clients that know its secret. Enter it in the **Relay secret** field on the Network
-tab. It belongs to the relay, not the room, so it is not part of an invite link: get
+tab. It belongs to the relay, not to a room or a node, so it is not part of any link: get
 it from whoever runs the relay. The room client and the transport each prove it with
 BLAKE2b and never send it; whoever sees a registration can still test guesses at it,
 so a relay's secret must be long and random.
@@ -129,10 +147,11 @@ runs end to end through the relay, so a relay can see which keys meet and refuse
 forward, but can never read the traffic or impersonate a peer. WebRTC signaling rides the
 peers' own authenticated link, so no relay or room member sees SDP or candidates.
 
-**Direct or relayed.** The **Network** tab lists each linked peer with how it is
+**Direct or relayed.** The Peers list on the **Network** tab shows how each of them is
 reached: `direct` once its link has moved to WebRTC, `via relay` while the relay still
 forwards it, which is where a link stays when no direct one can be made. The peer pill
-in the top bar counts the relayed ones and turns green once every link is direct.
+in the top bar counts every link, room-mates' too, says how many are relayed, and turns
+green once every link is direct.
 
 **Other devices.** `localhost` is a secure context, so plain HTTP is enough for WebRTC
 when both tabs are on this machine. Reaching the shell from another device needs HTTPS
@@ -142,13 +161,13 @@ when both tabs are on this machine. Reaching the shell from another device needs
 
 | Path | What it is |
 | --- | --- |
-| `assembly/chat-app-v1/` | v1 handler — text only. `index.ts` is the pure transform, `ui.html` is the iframe UI embedded into the module as a custom section. |
-| `assembly/chat-app-v2/` | v2 handler — text + image + nick, plus direct chats. Same shape; upgrading v1→v2 is a re-admit at the same name under the same key. |
+| `assembly/chat-app-v1/` | v1 handler — text only, written to one room at a time. `index.ts` is the pure transform, `ui.html` is the iframe UI embedded into the module as a custom section. |
+| `assembly/chat-app-v2/` | v2 handler — text + image + nick, in several rooms and in direct chats. Same shape; upgrading v1→v2 is a re-admit at the same name under the same key. |
 | `asconfig.chat-app-v*.json` | AssemblyScript compiler config for each handler (`build/chat-app-v*.wasm`). |
 | `browser/chat-shell.*` | The browser shell: identity, admission policy, the transport, offers and calls boot loads, the sockets the transport's WebRTC mesh runs over, the sandboxed iframe. The inline import map in `chat-shell.html` names the seedkernel surface. |
 | `browser/chat-app.js` | The chat app *shape*, in one place: the guest's source, the `chat` protocol id, and its reach — no host service at all and one co-resident guest, the network (`guest.requires` is exactly `_net`). `scripts/build-app-bundle.mjs` and `scripts/smoke.mjs` author bundles from it; the shell gates received Offers against it with `isChatApp`. |
 | `browser/offers-app.js` | The offers app *shape*: the `offer/v1` id, the app id `offers`, its one-service authority (`fs` — a host service, so it really is a `guest.requires` entry), and its guest source — a keyspace and a claim, no module. `scripts/build-boot-bundles.mjs` signs it into the boot bundle. |
-| `browser/calls-app.js` | The calls app *shape*: the `call/v1` id, the app id `calls`, its one reach (`_net`), and its guest source — a claim that hands a peer's call signal to the page, and a `send` op that puts the page's on the wire. |
+| `browser/calls-app.js` | The calls app *shape*: the `call/v1` id, the app id `calls`, its one reach (`_net`), and its guest source — a claim that hands a peer's call signal to the page, and a `send` op that puts the page's on the wire. What else two pages tell each other rides it too: `{ peer }`, that one added or removed the other as a peer, and `{ nick }`, what a peer calls itself. |
 | `browser/media-rtc.js` | The call feature: `MediaCalls`, one `RTCPeerConnection` per peer that the page owns, beside the transport's, with perfect negotiation signaled over `call/v1`. Live media is chat's own — the host holds only the transport's connections. |
 | `scripts/embed-ui.mjs` | Appends a `ui` custom section to a built `.wasm`. |
 | `scripts/embed-meta.mjs` | Appends an `app_meta` JSON custom section (id, name, version, description). |
@@ -221,14 +240,15 @@ part is chat's own format, and the host never reads it:
 
 | `chatType` | Body | Supported by |
 | --- | --- | --- |
-| `0x00` text | UTF-8 text | v1, v2 |
-| `0x01` image | JPEG bytes | v2 |
 | `0x02` nick | UTF-8 nick for this sender | v2 |
 | `0x03` / `0x04` direct text / image | `[to 32][content]` | v2 |
+| `0x05` room text | `[room 32][content]`, `room` the room's id on the relay | v1, v2 |
+| `0x06` room image | `[room 32][content]` | v2 |
 
-**Output (the render bytes)** is whatever your UI knows how to draw. Return `0` to
-render nothing. Unknown `chatType`s should render nothing, which is how v1 stays
-silent on v2's image and nick frames:
+A message is written to a room or to one peer, never to everyone linked. A node can be in
+several rooms at once, so a room message names its room. **Output (the render bytes)** is
+whatever your UI knows how to draw. Return `0` to render nothing. Unknown `chatType`s
+should render nothing, which is how v1 stays silent on every v2 frame but room text:
 
 ```
 v1:  [chatType u8][pkLen u8][pk …][body …]
@@ -247,8 +267,10 @@ keys. It talks to the shell only via `postMessage`:
 | UI → shell | `{ type: "ready" }` | Sent once on load. The shell replies with `init`, then flushes any queued renders. |
 | shell → UI | `{ type: "init", pk: Uint8Array(32) }` | This tab's own public key. |
 | shell → UI | `{ type: "render", payload: Uint8Array }` | One set of render bytes from your module. This covers both inbound frames and the local echo of your own sends. |
-| UI → shell | `{ type: "send", chatType: number, body: Uint8Array, to?: Uint8Array(32) }` | Send `[chatType][body]` under the `chat` protocol to every linked peer, or only to `to` when given, and echo it locally through the module. |
-| shell → UI | `{ type: "peers", peers: Uint8Array(32)[] }` | The currently linked peers, posted when the set changes. |
+| UI → shell | `{ type: "send", chatType: number, body: Uint8Array, room?: Uint8Array(32), to?: Uint8Array(32) }` | Send `[chatType][body]` under the `chat` protocol, and echo it locally through the module: to the linked members of the joined room with id `room`, or to the one peer `to` (which makes it a contact). With neither it goes to every linked peer, which is for an announcement like the nick, not for a message. |
+| UI → shell | `{ type: "conv", room?: Uint8Array(32), to?: Uint8Array(32) }` | The conversation now open, a room or one peer, or neither for none. A call started from the shell is with it; an app that never says calls every linked peer. |
+| shell → UI | `{ type: "rooms", rooms: { id: Uint8Array(32), name: string, members: Uint8Array(32)[] }[] }` | The rooms this node is in and who the relay lists in each, posted when either changes. |
+| shell → UI | `{ type: "peers", peers: Uint8Array(32)[], contacts: Uint8Array(32)[] }` | The currently linked peers, and the contacts, linked or not, posted when either changes. |
 
 ### 3. Metadata and signing
 
@@ -330,10 +352,12 @@ Three properties serve as the summary; the details live in the seedkernel docs:
   `bootShell`'s channel adapter, built around a WebSocket and the platform's
   `RtcNetwork`, combined and supplied as `transport.channels`; transport policy and its
   defaults belong to the signed bundle, as do the address book and contact gate,
-  which live in that bundle's own realm rather than under the adapter. Chat rotates
-  the gate with the transport's local `contact` operation (the room secret), registers
-  on the relay with its `relay` operation, and hands it each room member as a `relay+`
-  address with `addr`; the transport links to them through the relay and moves each
+  which live in that bundle's own realm rather than under the adapter. Chat sets
+  the gate, this node's own contact secret, with the transport's local `contact`
+  operation, and names its room-mates with `welcome`, so their calls pass it. It
+  registers on the relay with the `relay` operation, hands the transport each room-mate
+  and contact it calls as a `relay+` address with `addr`, and drops a peer it no longer
+  wants with `forget`; the transport links to them through the relay and moves each
   link to WebRTC itself
   (§12.6, §12.7, [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)).
 - **The offers and calls apps get a pin, chat's own half of it.** `offer/v1` carries a
@@ -373,9 +397,11 @@ out here.
   are missing or misnamed; see [Prerequisites](#prerequisites).
 - **`npm run smoke` can't find `build/chat-app-v1.wasm` or a boot bundle.**
   Run `npm run build` first.
-- **Peers never appear.** Both tabs must use the same relay URL and room. In a
-  gated room they must also hold the same secret, so share the invite link rather
-  than the room name: a peer with the wrong secret is refused without any error.
+- **Peers never appear.** Both tabs must use the same relay URL and be in the same room.
+- **A contact shows `no answer`.** It is offline or on another relay, or it has a contact
+  secret this node did not present, or presented wrongly, which is refused without any
+  error. Get its contact link, or its secret, enter the secret on its row and press
+  **Connect**. A room-mate needs no secret.
 - **The relay reads as unreachable, but it is running.** It may be private: a relay
   started with `--secret` drops a client without its secret, or with another one.
   Enter the relay's secret in the **Relay secret** field.

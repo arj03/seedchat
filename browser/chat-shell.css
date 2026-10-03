@@ -226,7 +226,7 @@
     font-size: 0.85em;
     color: var(--muted);
   }
-  input[type=text], textarea {
+  input[type=text], input[type=password], textarea {
     width: 100%;
     font-family: var(--mono);
     background: var(--panel-2);
@@ -237,7 +237,7 @@
     font-size: 0.95em;
     min-height: 40px;
   }
-  input[type=text]:focus, textarea:focus {
+  input[type=text]:focus, input[type=password]:focus, textarea:focus {
     outline: none;
     border-color: var(--accent);
     background: #181c22;
@@ -528,7 +528,7 @@
   .field-label-sm { font-size: 0.8em; }
   .relay-status   { font-size: 0.82em; }
 
-  /* ── network panel: linked peers ──────────────────────────────────── */
+  /* ── network panel: the room's peers ──────────────────────────────── */
   .peer-row {
     display: flex;
     align-items: center;
@@ -540,6 +540,14 @@
     padding: 0.5em 0.8em;
   }
   .peer-row-id { color: var(--peer); }
+  /* A peer's name takes the room its row has left, so what follows sits at the end. */
+  .peer-row-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .peer-route {
     font-size: 0.78em;
     padding: 0.05em 0.5em;
@@ -549,6 +557,45 @@
   }
   .peer-route.direct  { color: var(--ok);   border-color: #2d4d3a; background: #14241a; }
   .peer-route.relayed { color: var(--warn); border-color: #4d4023; background: #2a2410; }
+  .peer-route.calling,
+  .peer-route.waiting { color: var(--muted); }
+  .peer-route.silent  { color: var(--err);  border-color: #4d2828; background: #2a1414; }
+  /* Where a peer is known from: its rooms, or that it is a contact. */
+  .peer-row-where {
+    flex: 1;
+    min-width: 0;
+    color: var(--muted);
+    font-size: 0.82em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* A room's row lists who is in it under the room, a line each. */
+  .room-row { flex-wrap: wrap; }
+  .room-members {
+    flex-basis: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+    font-size: 0.9em;
+  }
+  .room-member {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6em;
+    min-height: 2em;
+    padding-left: 0.8em;
+  }
+  .row > input { flex: 1; min-width: 12em; width: auto; }
+  /* A contact with no link takes its contact secret in its row. */
+  .peer-row .peer-secret {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    padding: 0.35em 0.6em;
+    font-size: 0.82em;
+  }
 
   /* ── apps panel ───────────────────────────────────────────────────── */
   .dropzone {

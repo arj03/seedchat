@@ -1,4 +1,4 @@
-// Chat backend v1 — text-only.
+// Chat backend v1 — text only, written to a room.
 //
 // A pure-transform handler (seedkernel PROTOCOL §4): the host stages the input
 // at `scratch`, calls `handle`, and reads the render bytes back from `scratch`.
@@ -6,8 +6,11 @@
 // prepended by the host (the AKE channel already authenticated it), and the
 // render bytes are the return value the chat page forwards to the iframe.
 //
-// Input:   [pk 32][type u8][body ..]   type = 0x00 (text)
+// Input:   [pk 32][type u8][body ..]   type = 0x05 (room text), body = [room 32][utf-8 text]
 // Render:  [type u8][pk_len u8][pk ..][body ..]
+//
+// The module passes the body through untouched; which room a message is in is the page's
+// to read.
 
 // The layout literals — the host prepends the 32-byte sender pk, and the app
 // may start its bookkeeping at offset 0 of private memory (the module reserves
@@ -32,7 +35,7 @@ export function handle(input_len: i32): i32 {
   // Input: [pk PK_LEN][type u8][body]. The host prepends the authenticated sender pk.
   if (input_len < PK_LEN + 1) return 0;
   const type = load<u8>(scratch + PK_LEN);
-  if (type != 0) return 0;                  // v1 only knows text
+  if (type != 5) return 0;                  // v1 only knows room text
   const bodyLen = input_len - PK_LEN - 1;
 
   // Stage the input into priv so we can rebuild scratch as the render output.
