@@ -25,6 +25,10 @@
 // what they are called: its rooms, peers and contacts, and each one's nick. An app is told
 // them (the context) and does not keep its own.
 //
+// A call is the shell's too, because a view cannot hold one: its sandbox gives it an opaque
+// origin, which a browser grants no camera or microphone. The shell holds the media
+// (media-rtc.js), and a view says only which conversation is open (`conv`).
+//
 // No imports: the shell's vendored runtime and the offline builder both load this file, and
 // the hash a consent names is passed in (`bundleDigest`) rather than reached for.
 

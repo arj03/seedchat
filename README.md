@@ -151,8 +151,24 @@ stays linked. From the relay there are two ways to be linked to a peer, and one 
   never need it. **Copy contact link** gives `…#pk=<your key>&s=<your secret>`.
 
 Links carry what they share in the URL fragment, which browsers never send over the
-network. A room message goes only to that room's members, a direct message only to its
-addressee, and a call is with the conversation open when it starts.
+network. A room message goes only to that room's members, and a direct message only to its
+addressee.
+
+**Calls.** The call bar above the app on the **App** tab is the shell's, not the app's.
+**Start call** asks for the camera and microphone and publishes them to the conversation
+open in the app: a room's linked members, or the one peer of a direct chat. With no app
+shown, or one that never says which conversation is open, a call is with every linked
+peer. A peer that is not in the call sees those who are, and its button reads **Join
+call**. Media rides peer connections the page owns, one per peer, beside the transport's
+and asking the same relay for STUN. Their signaling rides the node's authenticated
+channel, so a call needs no relay once the peers are linked, and nobody on the relay can
+inject into one.
+
+A call is the shell's because an app cannot hold one. A view's sandbox gives it an opaque
+origin, which cannot be granted the camera or microphone: `getUserMedia` fails there in
+Chromium with a `SecurityError`, whatever the iframe's `allow` says. So the shell holds
+the media, and a view only says which conversation is open (`conv`, under
+[The view](#3-the-view-uihtml)).
 
 **Private relays.** A relay started with `--secret` (seedrelay's
 [Private relays](https://github.com/arj03/seedrelay#private-relays)) serves only
@@ -315,9 +331,10 @@ tab, and a nick is set there. A contact's secret is never in it.
 ### 3. The view: `ui.html`
 
 A self-contained HTML page. The shell loads it into an iframe sandboxed `allow-scripts
-allow-forms` from a `blob:` URL, so it has no access to the page's keys. Each installed
-app has its own, kept until the app is removed or replaced. It talks to the shell only
-via `postMessage`:
+allow-forms` from a `blob:` URL, so it has no access to the page's keys. The same opaque
+origin is refused the camera and microphone, which is why a call is the shell's. Each
+installed app has its own, kept until the app is removed or replaced. It talks to the
+shell only via `postMessage`:
 
 | Direction | Message | Meaning |
 | --- | --- | --- |

@@ -1591,6 +1591,10 @@ restoreOffers().catch((err) =>
 // endCall hangs up with every peer. Remote tracks arrive via the onTrack callback wired
 // on `media` above and land in a per-peer tile keyed by pubkey hex; a tile is cleaned up
 // when its track ends or its media connection closes.
+//
+// All of it is here rather than in an app's view because a view cannot capture: its
+// sandbox gives it an opaque origin, and `getUserMedia` fails there with a SecurityError
+// whatever the iframe's `allow` says.
 
 const callBar      = document.getElementById("call-bar");
 const callStartBtn = document.getElementById("call-start");
