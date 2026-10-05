@@ -30,13 +30,19 @@ const root = join(__dirname, "..");
 const toHex = (b) => Buffer.from(b).toString("hex");
 const fromHex = (h) => Uint8Array.from(Buffer.from(h, "hex"));
 
+/** What stands in front of each guest: seedkernel's op-frame, then the network library
+ *  every guest that reaches `_net` shares (assembly/guest-lib/net.js). LF, because these
+ *  bytes are signed and a checkout's line endings are the machine's. */
+const prelude = guestOpFraming()
+  + readFileSync(join(root, "assembly", "guest-lib", "net.js"), "utf8").replace(/\r\n/g, "\n");
+
 /** Each boot bundle: a guest-only bundle, a claim and a reach. `name` names the files;
  *  `constant` the generated module's exports. */
 const BUNDLES = [
   { name: "offers", constant: "OFFERS", app: OFFERS_APP, protocols: [OFFER_PROTO],
-    guestSource: offersGuestSource(), guestRequires: OFFERS_REQUIRES },
+    guestSource: offersGuestSource(prelude), guestRequires: OFFERS_REQUIRES },
   { name: "calls", constant: "CALLS", app: CALLS_APP, protocols: [CALL_PROTO],
-    guestSource: callsGuestSource(guestOpFraming), guestRequires: CALLS_REQUIRES },
+    guestSource: callsGuestSource(prelude), guestRequires: CALLS_REQUIRES },
 ];
 
 const sodium = await loadCrypto();
@@ -96,7 +102,7 @@ export function ${b.name}BundleBytes() {
   return decoded.slice();
 }
 /** The author this bundle is signed by (hex) — what \`admit\` pins the boot load to
- *  (chat-shell.js), read off the artifact rather than restated by hand. */
+ *  (shell.js), read off the artifact rather than restated by hand. */
 export const ${b.constant}_AUTHOR_HEX = "${toHex(author)}";
 /** The app name this bundle's manifest declares — what \`admit\` checks beside the author. */
 export const ${b.constant}_APP = ${JSON.stringify(manifest.app)};

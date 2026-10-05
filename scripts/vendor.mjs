@@ -1,5 +1,5 @@
 // Copy seedkernel's built host into browser/vendor/ so a plain static server can
-// serve chat with no bundler. The import map in chat-shell.html points at these
+// serve chat with no bundler. The import map in shell.html points at these
 // files; nothing else in this repo reaches into node_modules.
 //
 // This is deliberately a dumb copy of `build-min` wholesale: shell-core.js and
@@ -146,7 +146,7 @@ copyFileSync(roomsSrc, resolve(vendor, "seedrelay", "rooms.mjs"));
 // layer around it is the npm package quickjs-emscripten-core. safe-js.js names
 // both as bare specifiers ("seedkernel-wasm/quickjs" and
 // "quickjs-emscripten-core"), so each lands in its own vendored dir with an
-// import-map entry in chat-shell.html.
+// import-map entry in shell.html.
 //
 // Within a dir the files find each other: variant.mjs pulls ./ffi.mjs and
 // ./emscripten-module.mjs relatively, and the emscripten glue fetches
@@ -197,4 +197,4 @@ console.log("vendored seedkernel-wasm -> browser/vendor/");
 console.log("serve it:   npm run serve        (re-vendors + http-server with caching OFF)");
 console.log("  ── DO NOT use a plain `http-server` without -c-1: its default max-age=3600 makes");
 console.log("     the browser keep a STALE vendor/host after a rebuild → confusing errors.");
-console.log("  relay + shell:  npm run relay  →  http://localhost:3000/chat-shell.html");
+console.log("  relay + shell:  npm run relay  →  http://localhost:3000/shell.html");

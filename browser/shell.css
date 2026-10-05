@@ -440,7 +440,7 @@
   }
   .tile.local .tile-label { color: var(--me); }
 
-  #app-frame {
+  .app-frame {
     flex: 1;
     width: 100%;
     min-height: 200px;
@@ -448,7 +448,7 @@
     background: var(--bg);
     display: block;
   }
-  #app-frame.hidden { display: none; }
+  .app-frame.hidden { display: none; }
   .empty-state.hidden { display: none; }
 
   /* diagnostics disclosure */

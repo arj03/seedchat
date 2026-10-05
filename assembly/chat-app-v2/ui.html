@@ -61,19 +61,7 @@
     flex: 1;
     min-width: 0;
   }
-  #nick {
-    font-family: var(--mono);
-    background: var(--panel-2);
-    color: var(--text);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    padding: 0.35em 0.55em;
-    font-size: 0.85em;
-    width: 100%;
-    max-width: 16em;
-    min-height: 32px;
-  }
-  #nick:focus { outline: none; border-color: var(--me); background: #181c22; }
+  #me { color: var(--me); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   #layout { flex: 1; min-height: 0; display: flex; }
   #side {
@@ -229,8 +217,8 @@
 <header>
   <span class="badge">chat-app v2</span>
   <div id="nick-row">
-    <span>nick:</span>
-    <input id="nick" type="text" maxlength="32" placeholder="press Enter to set" autocapitalize="off" autocomplete="off" />
+    <span>you:</span>
+    <span id="me"></span>
   </div>
 </header>
 
@@ -262,27 +250,31 @@
 <script>
 // chat-app v2 UI. Loaded into a sandboxed iframe by the shell.
 //
-// Protocol with parent shell:
-//   parent → us: { type: "init",   pk: Uint8Array(32) }
-//   parent → us: { type: "rooms",  rooms: { id: Uint8Array(32), name: string, members: Uint8Array(32)[] }[] }
-//                  the rooms this node is in, and who the relay says is in each
-//   parent → us: { type: "peers",  peers: Uint8Array(32)[], contacts: Uint8Array(32)[] }
-//                  the currently linked peers, and the contacts, linked or not
-//   parent → us: { type: "render", payload: Uint8Array }
-//                  payload = [type u8][pk_len u8][pk ..][nick_len u8][nick ..][body ..]
-//   us → parent: { type: "ready" }
-//   us → parent: { type: "send", chatType: 2..6, body: Uint8Array, room?: Uint8Array(32), to?: Uint8Array(32) }
-//                  `room` sends to that room's members and `to` to that one peer. Neither,
-//                  which only the nick is sent with, sends to every linked peer.
-//   us → parent: { type: "conv", room?: Uint8Array(32), to?: Uint8Array(32) }
+// With the shell (browser/app-api.js), by postMessage:
+//   us → shell: { type: "ready" }
+//   us → shell: { type: "call", bytes }        a frame for this app's guest, which sends it
+//   us → shell: { type: "conv", room?: hex, to?: hex }
 //                  the conversation now open, which is who a call started from it is with
+//   us → shell: { type: "contact", peer: hex } make a peer a contact, ahead of a direct
+//                                              message to it
+//   shell → us: { type: "render", payload }    what this app's guest answered
+//
+// With this app's guest (guest.js), as bytes the shell does not read. A frame is
+// [type u8][body], and the guest knows who each type goes to. A render is one of:
+//   [0][JSON]      the node's context, ids in hex:
+//                  { me, nick, rooms: [{ id, name, members }], linked, contacts, nicks }
+//   [type u8][pk_len u8][pk ..][body ..]
+//                  a frame as the module drew it, a peer's or this node's own
+//
+// What a peer is called is not in a frame. A nick is the shell's: this node's own is set
+// on its Network tab, and every peer's arrives in the context.
 //
 // Conversations. A ROOM message (type 5/6) names its room in its body and goes to that
-// room's members; one from a peer who is not in that room is dropped. A DIRECT chat
+// room's members; the guest draws one only from a peer who is in that room. A DIRECT chat
 // (type 3/4) goes to one peer only and names that peer in its body, so the sender's own
 // echo can be filed under the right conversation. The body is not secret from the shell
 // or the relay's peer, but only the addressee is sent it.
-const CHAT_TYPE_NICK  = 0x02;
+const RENDER_CONTEXT  = 0x00;
 const CHAT_TYPE_DIRECT_TEXT  = 0x03;
 const CHAT_TYPE_DIRECT_IMAGE = 0x04;
 const CHAT_TYPE_ROOM_TEXT    = 0x05;
@@ -296,7 +288,7 @@ const IMAGE_TARGET_BYTES = 50 * 1024;
 const logHost = document.getElementById("log");
 const form = document.getElementById("form");
 const msgInput = document.getElementById("msg");
-const nickInput = document.getElementById("nick");
+const meLabel = document.getElementById("me");
 const imageBtn = document.getElementById("image-btn");
 const imageFile = document.getElementById("image-file");
 const lightbox = document.getElementById("lightbox");
@@ -309,6 +301,8 @@ const leaveBtn = document.getElementById("leave-btn");
 const menuBtn = document.getElementById("menu-btn");
 const emptyNote = document.getElementById("empty");
 let myPk = null;
+// What this node calls itself, as the context says: "" for nothing.
+let myNick = "";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -333,8 +327,8 @@ function fromHex(hex) {
 }
 
 // ── who we know ─────────────────────────────────────────────────────────
-// pk hex → { id, pk, nick, linked, contact }. Fed by the shell's peer list and by every
-// render.
+// pk hex → { id, pk, nick, linked, contact }. Fed by the node's context, and by a render
+// from someone it does not list.
 const people = new Map();
 function person(pk) {
   const id = toHex(pk);
@@ -342,7 +336,7 @@ function person(pk) {
   if (!p) { p = { id, pk, nick: "", linked: false, contact: false }; people.set(id, p); }
   return p;
 }
-// The rooms this node is in, as the shell says: room id hex → { id, name, members },
+// The rooms this node is in, as the context says: room id hex → { id, name, members },
 // `members` the key hex of everyone the relay lists there.
 const rooms = new Map();
 function personName(p) { return p.nick ? `${p.nick} (${shortPk(p.pk)})` : shortPk(p.pk); }
@@ -389,7 +383,7 @@ function openConv(key) {
   leaveBtn.hidden = c.kind === "room";
   side.classList.remove("open");
   window.parent.postMessage(c.kind === "room"
-    ? { type: "conv", room: fromHex(c.name) } : { type: "conv", to: fromHex(c.name) }, "*");
+    ? { type: "conv", room: c.name } : { type: "conv", to: c.name }, "*");
   renderSide();
 }
 
@@ -524,34 +518,37 @@ lightbox.addEventListener("click", () => {
   lightboxImg.src = "";
 });
 
-function send(chatType, body, { room, to } = {}) {
-  const msg = { type: "send", chatType, body };
-  if (room) msg.room = room;
-  if (to) msg.to = to;
-  window.parent.postMessage(msg, "*");
+/** Hand this app's guest one frame, [type][body]. It knows who each type is for, sends it,
+ *  and answers the frame drawn as this node's own, which comes back as a render. */
+function send(chatType, body) {
+  window.parent.postMessage({ type: "call", bytes: concat(Uint8Array.of(chatType), body) }, "*");
 }
 
-// Send text or an image into one conversation.
+// Send text or an image into one conversation: the frame's body starts with the room's
+// id, or the key of the peer it is for.
 function sendInto(c, isImage, content) {
+  const head = fromHex(c.name);
   if (c.kind === "room") {
-    const room = fromHex(c.name);
-    send(isImage ? CHAT_TYPE_ROOM_IMAGE : CHAT_TYPE_ROOM_TEXT, concat(room, content), { room });
+    send(isImage ? CHAT_TYPE_ROOM_IMAGE : CHAT_TYPE_ROOM_TEXT, concat(head, content));
   } else {
-    const to = fromHex(c.name);
-    send(isImage ? CHAT_TYPE_DIRECT_IMAGE : CHAT_TYPE_DIRECT_TEXT, concat(to, content), { to });
+    // A direct message makes its addressee a contact, so the link to it outlives any
+    // shared room. Contacts are the shell's, so it is asked, ahead of the frame.
+    window.parent.postMessage({ type: "contact", peer: c.name }, "*");
+    send(isImage ? CHAT_TYPE_DIRECT_IMAGE : CHAT_TYPE_DIRECT_TEXT, concat(head, content));
   }
 }
 
 // Work out which conversation a render belongs to, and what its content is. Returns
-// null for a frame this page should not show: a room message for a room this node is not
-// in, or from a peer who is not in it, and a direct message addressed to somebody else.
+// null for a frame this page has nowhere to file: a room message for a room this node is
+// not in, and a direct message addressed to somebody else. Whether a peer may write to a
+// room is not asked here: the guest draws a room message only from a peer who is in it.
 function route(type, pk, body, isMe) {
   switch (type) {
     case CHAT_TYPE_ROOM_TEXT:
     case CHAT_TYPE_ROOM_IMAGE: {
       if (body.length < 32) return null;
-      const id = toHex(body.slice(0, 32)), room = rooms.get(id);
-      if (!room || (!isMe && !room.members.has(toHex(pk)))) return null;
+      const id = toHex(body.slice(0, 32));
+      if (!rooms.has(id)) return null;
       return { c: getConv(roomKey(id)), image: type === CHAT_TYPE_ROOM_IMAGE, content: body.slice(32) };
     }
     case CHAT_TYPE_DIRECT_TEXT:
@@ -568,78 +565,77 @@ function route(type, pk, body, isMe) {
   return null;
 }
 
+/** Say that `id` has a new nick, in every conversation it is part of: the rooms it is in,
+ *  and a direct chat with it. */
+function sayNick(id, nick, isMe) {
+  const said = nick ? `${id.slice(0, 8)} is now known as ${nick}` : `${id.slice(0, 8)} no longer has a nick`;
+  for (const [roomId, room] of rooms) {
+    if (isMe || room.members.has(id)) print(said, "sys", getConv(roomKey(roomId)));
+  }
+  const direct = convs.get(directKey(id));
+  if (direct) print(said, "sys", direct);
+}
+
+/** The node's context: who this node is and what it calls itself, the rooms it is in and
+ *  who is in each, the linked peers, the contacts, and what each peer calls itself. */
+function onContext(ctx) {
+  // The first context is where things stand, not news: nobody's nick is announced for it.
+  const first = !myPk;
+  if (first) {
+    myPk = fromHex(ctx.me);
+    emptyNote.textContent = `You are ${shortPk(myPk)}. Join a room on the Network tab, or add a contact, to start chatting.`;
+  }
+  rooms.clear();
+  for (const r of ctx.rooms) rooms.set(r.id, { id: fromHex(r.id), name: r.name, members: new Set(r.members) });
+  for (const p of people.values()) p.linked = p.contact = false;
+  for (const id of ctx.linked) person(fromHex(id)).linked = true;
+  for (const id of ctx.contacts) person(fromHex(id)).contact = true;
+  // Nicks are the shell's, a peer's and this node's own alike.
+  for (const id of Object.keys(ctx.nicks)) person(fromHex(id));
+  for (const p of people.values()) {
+    const nick = ctx.nicks[p.id] ?? "";
+    if (nick === p.nick) continue;
+    p.nick = nick;
+    if (!first) sayNick(p.id, nick, false);
+  }
+  if (ctx.nick !== myNick) {
+    myNick = ctx.nick;
+    if (!first) sayNick(ctx.me, myNick, true);
+  }
+  meLabel.textContent = myNick ? `${myNick} (${shortPk(myPk)})` : `${shortPk(myPk)} — set a nick on the Network tab`;
+  // A room this node left takes its conversation with it.
+  for (const c of [...convs.values()]) if (c.kind === "room" && !rooms.has(c.name)) closeConv(c);
+  if (!active && rooms.size > 0) openConv(roomKey([...rooms.keys()][0]));
+  else renderSide();
+}
+
+/** One frame as the module drew it, a peer's or this node's own. */
+function onFrame(payload) {
+  if (payload.length < 2) return;
+  let p = 0;
+  const type  = payload[p++];
+  const pkLen = payload[p++];
+  if (p + pkLen > payload.length) return;
+  const pk = payload.slice(p, p + pkLen); p += pkLen;
+  const body = payload.slice(p);
+  const isMe = !!myPk && arraysEqual(pk, myPk);
+  // The sender's nick is the context's, whoever drew the frame.
+  const nick = isMe ? myNick : person(pk).nick;
+  const tag = nick ? `${nick} (${shortPk(pk)})` : shortPk(pk);
+  const cls = isMe ? "me" : "peer";
+  const r = route(type, pk, body, isMe);
+  if (!r) return;
+  if (r.image) appendImage(r.c, pk, tag, r.content, cls);
+  else printMessage(r.c, pk, tag, dec.decode(r.content), cls);
+}
+
 window.addEventListener("message", (ev) => {
   if (ev.source !== window.parent) return;
   const msg = ev.data;
-  if (!msg) return;
-  if (msg.type === "init") {
-    myPk = new Uint8Array(msg.pk);
-    emptyNote.textContent = `You are ${shortPk(myPk)}. Join a room on the Network tab, or add a contact, to start chatting.`;
-  } else if (msg.type === "rooms") {
-    rooms.clear();
-    for (const r of msg.rooms) {
-      const id = new Uint8Array(r.id);
-      rooms.set(toHex(id), { id, name: r.name, members: new Set(r.members.map((m) => toHex(new Uint8Array(m)))) });
-    }
-    // A room this node left takes its conversation with it.
-    for (const c of [...convs.values()]) if (c.kind === "room" && !rooms.has(c.name)) closeConv(c);
-    if (!active && rooms.size > 0) openConv(roomKey([...rooms.keys()][0]));
-    else renderSide();
-  } else if (msg.type === "peers") {
-    for (const p of people.values()) p.linked = p.contact = false;
-    for (const raw of msg.peers) person(new Uint8Array(raw)).linked = true;
-    for (const raw of msg.contacts ?? []) person(new Uint8Array(raw)).contact = true;
-    renderSide();
-  } else if (msg.type === "sys") {
-    if (active) print(msg.text, "sys");
-  } else if (msg.type === "render") {
-    const payload = new Uint8Array(msg.payload);
-    if (payload.length < 3) return;
-    let p = 0;
-    const type  = payload[p++];
-    const pkLen = payload[p++];
-    if (p + pkLen > payload.length) return;
-    const pk = payload.slice(p, p + pkLen); p += pkLen;
-    if (p >= payload.length) return;
-    const nLen = payload[p++];
-    if (p + nLen > payload.length) return;
-    const nick = nLen > 0 ? dec.decode(payload.slice(p, p + nLen)) : "";
-    p += nLen;
-    const body = payload.slice(p);
-    const isMe = !!myPk && arraysEqual(pk, myPk);
-    if (!isMe) {
-      const who = person(pk);
-      if (nick !== who.nick) { who.nick = nick; renderSide(); }
-    }
-    const tag = nick ? `${nick} (${shortPk(pk)})` : shortPk(pk);
-    const cls = isMe ? "me" : "peer";
-    if (type === CHAT_TYPE_NICK) {
-      // Said in every conversation the sender is part of: the rooms it is in, and a
-      // direct chat with it.
-      const said = body.length > 0 ? `${shortPk(pk)} is now known as ${dec.decode(body)}`
-        : `${shortPk(pk)} no longer has a nick`;
-      const id = toHex(pk);
-      for (const [roomId, room] of rooms) {
-        if (isMe || room.members.has(id)) print(said, "sys", getConv(roomKey(roomId)));
-      }
-      const direct = convs.get(directKey(id));
-      if (direct) print(said, "sys", direct);
-      return;
-    }
-    const r = route(type, pk, body, isMe);
-    if (!r) return;
-    if (r.image) appendImage(r.c, pk, tag, r.content, cls);
-    else printMessage(r.c, pk, tag, dec.decode(r.content), cls);
-  }
-});
-
-nickInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-    const trimmed = nickInput.value.slice(0, 32);
-    send(CHAT_TYPE_NICK, enc.encode(trimmed));
-    msgInput.focus();
-  }
+  if (!msg || msg.type !== "render") return;
+  const payload = new Uint8Array(msg.payload);
+  if (payload[0] === RENDER_CONTEXT) onContext(JSON.parse(dec.decode(payload.subarray(1))));
+  else onFrame(payload);
 });
 
 leaveBtn.addEventListener("click", () => { if (active) closeConv(active); });

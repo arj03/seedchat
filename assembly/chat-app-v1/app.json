@@ -1,0 +1,12 @@
+{
+  "app": "chat",
+  "api": 1,
+  "name": "Chat",
+  "version": "v1",
+  "description": "text only",
+  "protocols": ["chat"],
+  "requires": ["_net"],
+  "guest": ["../guest-lib/net.js", "../chat-lib/chat-guest.js", "guest.js"],
+  "ui": "ui.html",
+  "modules": { "chat": "../../build/chat-app-v1.wasm" }
+}

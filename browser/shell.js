@@ -1,12 +1,12 @@
 // seedkernel is a dependency, not a sibling directory. Every specifier below is
 // a *published* entry point of seedkernel-wasm (its package.json "exports"), so
 // this file can only reach what seedkernel has deliberately made public — the
-// import map in chat-shell.html resolves them to the vendored build. If a future
+// import map in shell.html resolves them to the vendored build. If a future
 // seedkernel change breaks chat, it broke a public export, which is the point.
 import sodium from "seedkernel-wasm/libsodium";
 // bootShell is the assembly itself (§12.9): platform members defaulted, the
 // transport bundle pinned to its own author, the channel adapter built from the
-// `transport` options passed to it. Chat's admit is then ONLY its consent gate —
+// `transport` options passed to it. The page's admit is then ONLY its consent gate —
 // who may be the network is the assembly's, so nobody can lose it by forgetting it.
 import { bootShell } from "seedkernel-wasm/shell-core";
 // `writeOp` frames an app's own local op; `OpArgs` writes the transport bundle's op
@@ -23,13 +23,16 @@ import { combineChannels } from "seedkernel-wasm/socket-seam";
 // seedrelay's room client and hands their keys to the transport, which knows only keys
 // and the relays that reach them.
 import { roomClient, roomId } from "seedrelay/rooms";
-// Chat's own code. media-rtc.js is the call feature: audio and video ride peer
+// The shell's own code. media-rtc.js is the call feature: audio and video ride peer
 // connections this page owns, signaled through the calls boot bundle below.
 import { MediaCalls } from "./media-rtc.js";
-import { isChatApp, CHAT_OP_SEND, CHAT_OP_RENDER, NET_PROTO } from "./chat-app.js";
+// The contract with the apps this shell hosts: what it reads off a bundle, what it lets one
+// reach, and the two ops it calls on an app's guest. Nothing in it, or in this file, knows
+// what any one app does.
+import { APP_GRANTS, APP_OP_CONTEXT, APP_OP_UI, NET_PROTO, appFacts, bundleDigest, contextJson } from "./app-api.js";
 // The offers app: a second boot bundle, loaded right below alongside the transport —
 // see "boot the offers app" further down for why a bundle rather than a page-held name.
-import { OFFER_PROTO, OFFERS_KEY_PREFIX } from "./offers-app.js";
+import { OFFERS_KEY_PREFIX, OFFERS_OP_SEND } from "./offers-app.js";
 import { offersBundleBytes, OFFERS_AUTHOR_HEX, OFFERS_APP } from "./offers-bundle.js";
 // The calls app: a third boot bundle, the signaling path for a call's media.
 import { CALLS_OP_SEND } from "./calls-app.js";
@@ -58,10 +61,13 @@ const contactSetBtn = document.getElementById("set-contact");
 const contactNewBtn = document.getElementById("new-contact");
 const contactCopyBtn = document.getElementById("copy-contact");
 const contactHint = document.getElementById("contact-hint");
+const nickInput = document.getElementById("nick");
+const nickSetBtn = document.getElementById("set-nick");
 const relayStatus = document.getElementById("relay-status");
 const peerListEl = document.getElementById("peer-list");
 const appStatus = document.getElementById("app-status");
-const frame = document.getElementById("app-frame");
+const appPanel = document.getElementById("panel-app");
+const diagnostics = appPanel.querySelector("details.diagnostics");
 const appEmpty = document.getElementById("app-empty");
 const aboutBtn = document.getElementById("about-toggle");
 const aboutPanel = document.getElementById("about");
@@ -85,7 +91,7 @@ function showAppsNotice(text, kind = "err") {
   if (appsNoticeTimer) clearTimeout(appsNoticeTimer);
   appsNoticeTimer = setTimeout(() => { appsNotice.hidden = true; }, 6000);
   // Make sure the panel is visible — if the user dropped a file from the
-  // Chat tab via the toolbar shortcut, surface the result where they'll see it.
+  // App tab via the toolbar shortcut, surface the result where they'll see it.
   showTab("apps");
 }
 
@@ -154,10 +160,13 @@ await loadCrypto(sodium, new URL("./vendor/", import.meta.url));
 // defined above reach it through `shell`.
 //
 // Ongoing-consent admission (§12.4): the user approves each unique bundle before it
-// runs. `pendingApprovals` holds the module hashes the user has consented to; the
-// shell's `admit` callback consumes one (one-shot) on install. The shell runs under an
-// open policy, so consent — not a static author allow-list — is this shell's gate.
+// runs. `pendingApprovals` holds the digests of the bundles the user has consented to
+// (`bundleDigest`, app-api.js: the whole bundle, guest included); the shell's `admit`
+// callback consumes one (one-shot) on install. The shell runs under an open policy, so
+// consent — not a static author allow-list — is this shell's gate.
 const pendingApprovals = new Set();
+/** The one system hash (seedkernel's BLAKE2b-256), with its crypto bound. */
+const digest = (bytes) => genesisHash(sodium, bytes);
 let shell;
 // The relay this page is on: its origin, its secret if it is private, and seedrelay's room
 // client there. null while it is on none: before Connect, and after Disconnect.
@@ -168,9 +177,16 @@ const joinedRooms = new Map();
 // Everyone this page wants a link to, by key in hex: its room-mates and its contacts, each
 // with how the call to it stands (`calls`, further down).
 const wanted = new Map();
-// What the app calls each peer, by key in hex: its nick, shown in the Network tab's lists
-// in place of the key.
+// The linked peers, by key in hex, as the last poll heard them of the transport: what the
+// apps are told is linked (`postContext`). Presentation only, like the peer pill.
+let linkedNow = [];
+// What each peer calls itself, by key in hex: its nick, shown in the Network tab's lists in
+// place of the key, and told to every app (`contextNow`). A peer's own word for itself.
 const peerNicks = new Map();
+/** The longest nick kept, a peer's or this node's. */
+const MAX_NICK = 32;
+// What this node calls itself: its nick, or "" for none. Kept with the identity.
+let myNick = (sessionStorage.getItem("chat.nick") ?? "").slice(0, MAX_NICK);
 // The notices peers are owed, by key in hex: true for one this node added, false for one
 // it removed. Each is sent once its peer is linked (`tellPeers`).
 const untoldPeers = new Map();
@@ -196,9 +212,6 @@ if (stored) {
   }));
 }
 const myPkHex = bytesToHex(myKeys.publicKey);
-// Local rendering gets the same attribution shape as an inbound frame: the authenticated
-// peer identity, not a bundle-author id. This tab does not author bundles at runtime.
-const myPeerId = myKeys.publicKey;
 
 shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 
@@ -262,7 +275,7 @@ const net = combineChannels(new WsNetwork(), new RtcNetwork());
 // `relay` op: it registers there, joins the room and links the peers it meets.
 //
 // The realm engine every app's guest runs in — the transport bundle's, the offers
-// app's, and each chat app's — is bootShell's default (safe-js), imported lazily on
+// app's, and each installed app's — is bootShell's default (safe-js), imported lazily on
 // the first realm.
 //
 // The page serves no name of its own: dispatch is a single claim → bundle
@@ -290,9 +303,11 @@ const booted = await bootShell({
     // decide, the same reasoning that keeps the transport off the consent path.
     if (bytesToHex(v.author) === OFFERS_AUTHOR_HEX && v.manifest.app === OFFERS_APP) return true;
     if (bytesToHex(v.author) === CALLS_AUTHOR_HEX && v.manifest.app === CALLS_APP) return true;
-    const bytesHashHex = v.modules.length > 0 ? bytesToHex(genesisHash(sodium, v.modules[0].wasm)) : "";
-    if (!pendingApprovals.has(bytesHashHex)) return false;
-    pendingApprovals.delete(bytesHashHex);
+    // Every other bundle is an app the user consented to, named by the digest of all of it:
+    // a consent to one guest admits no other beside the same module.
+    const hash = bytesToHex(bundleDigest(v, digest));
+    if (!pendingApprovals.has(hash)) return false;
+    pendingApprovals.delete(hash);
     return true;
   },
 });
@@ -304,8 +319,9 @@ shell = booted.shell;
 // would handle it is the thing being offered — so until an offer is accepted there is
 // no app to route it to, and something already installed at boot has to own the name
 // (browser/offers-app.js). A second boot bundle, loaded here right beside the
-// transport: it needs no network, but is loaded separately because it is chat's second
-// pinned boot bundle rather than part of bootShell's transport assembly.
+// transport, separately because it is the page's own pinned boot bundle rather than part
+// of bootShell's transport assembly. It owns `offer/v1` both ways: a peer's offer arrives
+// through it, and this node's own leave through its `send` op (`offerApp`).
 //
 // `onInbound` is the one gap a single claim → bundle-slot map leaves open (seedkernel
 // §12.10): the wire consumes a delivery's answer on its way back out, so the page's own
@@ -355,10 +371,12 @@ function sendSignal(peerId, signal) {
 function onPageSignal(from, bytes) {
   let msg;
   try { msg = JSON.parse(new TextDecoder().decode(bytes)); } catch { return; }
-  // What the peer calls itself, an empty nick for nothing: shown in place of its key.
+  // What the peer calls itself, an empty nick for nothing: shown in place of its key, by
+  // this page and by every app.
   if (typeof msg?.nick === "string") {
-    if (msg.nick) peerNicks.set(from, msg.nick.slice(0, 32)); else peerNicks.delete(from);
+    if (msg.nick) peerNicks.set(from, msg.nick.slice(0, MAX_NICK)); else peerNicks.delete(from);
     renderRoomList();
+    postContext();
     return;
   }
   if (typeof msg?.peer !== "boolean") { void media.onSignal(from, bytes); return; }
@@ -480,8 +498,8 @@ function updatePeerPill(routes) {
 // The Network tab's peer list: the peers this node is connected to directly, by key. That
 // is one row for every contact, linked or not, and for any linked peer in none of its
 // rooms, which is one that called this node directly. A room-mate that is neither is in
-// its room's list instead (`renderRoomList`). A row names the peer, by its nick if the
-// app knows one, and says how it is reached, or how the call to it stands. A contact with
+// its room's list instead (`renderRoomList`). A row names the peer, by its nick if it has
+// told one, and says how it is reached, or how the call to it stands. A contact with
 // no link takes its contact secret: the row's Connect calls it presenting what the field
 // holds. Rows are kept and changed in place, never redrawn, so a field being typed in
 // survives the poll.
@@ -566,196 +584,273 @@ function renderPeerList(routes) {
 
 // ─── app registry ──────────────────────────────────────────────────────
 //
-// An "app" is an ordinary signed bundle (§12.4): a signed `manifest.bundle`
-// envelope plus the app's WASM module and its guest program in one blob. That blob
-// IS the bundle format — the same bytes seedstore's flagship deployment loads from
-// disk, so a chat app is just a guest that calls its one module and needs no
-// chat-specific install format, domain, or peek/unwrap code. The shell's
-// `install` (the shared install path) authenticates the author's signature
-// over the manifest, which commits to the guest's and module's genesisHash, so the
-// blob survives any number of transitive relays and still authenticates against its
-// original author — exactly the store-and-forward property an Offer needs. The local
-// "add app" flow and the peer-to-peer Offer below carry the identical bundle.
+// An "app" is an ordinary signed bundle (§12.4): a signed manifest, the app's guest
+// program and its WASM modules in one blob. That blob IS the bundle format — the same
+// bytes seedstore's flagship deployment loads from disk, so an app here needs no install
+// format of its own. The shell's `install` (the shared install path) authenticates the
+// author's signatures over the whole body, so the blob survives any number of transitive
+// relays and still authenticates against its original author — exactly the
+// store-and-forward property an Offer needs. The local "add app" flow and the
+// peer-to-peer Offer below carry the identical bundle.
 //
-// The module's WASM carries two embedded custom sections the runtime ignores but
-// this shell reads: "app_meta" (JSON — id, name, version) and "ui" (HTML rendered
-// in the sandboxed iframe). The signed manifest's `app` is the id, and it is also the
-// key the app lands under (seedkernel §12.4): one slot per label on a node, whoever
-// authored it.
+// What this shell READS of an app is in its signed manifest (`appFacts`, app-api.js): its
+// name and version for a row, the protocols it claims and what it reaches for the consent
+// that row asks, and its view, an HTML page. The manifest's `app` is the label, and it is
+// also the key the app lands under (seedkernel §12.4): one slot per label on a node,
+// whoever authored it.
 //
-// The key is node-local. Two peers need not agree on it: a CHAT frame carries a
-// *protocol id*, and each side resolves that to whichever app it installed that claims
-// it — so two peers running different authors' chat apps interoperate as long as both
-// speak the protocol.
+// What an app DOES is its guest's, and the shell never reads it. Three things reach a
+// guest, each as bytes: a peer's frame under a protocol the app claims, with the sender
+// the channel authenticated in front; the node's context; and whatever the app's own view
+// sent. Each answer is render bytes, and goes to the view. So the format of a frame, of a
+// render and of what a view asks its guest are all the app's own, and an app changes them
+// by shipping a new bundle, with nothing here to change beside it.
 //
-// An app's module is a PURE TRANSFORM: the guest hands it `senderPk ‖ chatType ‖
-// body` and it returns the render bytes for the iframe. The guest — not the WASM
-// and not the host — does all the I/O: the host authenticates the sender via the
-// AKE channel, invokes the app's guest `handle` entrypoint (the same seam a
-// local `invoke` takes), and the guest drives its module by naming it on the
-// same seam (§12.2). Inbound delivery and local echo both cross the guest, so
-// chat's whole app logic is the one-line forwarding guest it ships in the bundle.
+// The key is node-local. Two peers need not agree on it: a frame carries a *protocol
+// id*, and each side resolves that to whichever app it installed that claims it — so two
+// peers running different authors' apps interoperate as long as both speak the protocol.
 //
-// `installedApps` keeps the per-app state we need to re-mount the UI, send
-// updates, and re-broadcast the packed bundle transitively (`bundleBytes` is the
-// signed bundle blob — the author's manifest signature intact — and is what every
-// "Offer" hands to a peer). Apps received via Offer keep the original author's
-// manifest signature: we never re-sign a bundle.
-// Keyed by the app label — the key the host installs a slot under (§12.4). A node
-// holds one slot per label, so two authors' "chat" apps contend for it: the second
+// `installedApps` keeps the per-app state: the handle into its guest, its view, and the
+// packed bundle (`bundleBytes` is the signed blob — the author's manifest signature
+// intact — and is what every "Offer" hands to a peer). Apps received via Offer keep the
+// original author's signature: we never re-sign a bundle.
+// Keyed by the app label — the key the host installs a slot under (§12.4). A node holds
+// one slot per label, so two authors' apps under one label contend for it: the second
 // lands only by replacing the first.
 const installedApps = new Map();   // app label → AppRecord
+// The app shown in the App tab, by label, or null. Every installed app runs; this is only
+// whose view is in front.
 let activeAppKey = null;
 
-// Protocol routing (§12.10) — there is no table here and no bind button. Every chat
-// bundle's manifest CLAIMS the chat protocol (CHAT_PROTO, chat-app.js), and the load
-// that admits it is what routes the id to it: installing an app is what makes it the
-// one this node chats with, and a claim has one holder, so another chat app lands only
-// by replacing it. `shell.resolve` answers who holds it; the Apps panel below reads that
-// rather than storing anything.
+// Protocol routing (§12.10) — there is no table here and no bind button. A bundle's
+// manifest CLAIMS its protocols, and the load that admits it is what routes each id to
+// it. A claim has one holder, so an app claiming an id another app holds lands only by
+// replacing it. `shell.resolve` answers who holds one; the Apps panel reads the claim off
+// the manifest rather than storing anything.
 
 const STORE = "apps.v2";
 
-// ── shell frame wire format ─────────────────────────────────────────────
+// ── an app's guest ──────────────────────────────────────────────────────
 //
-// Messages ride the Transport request plane: a chat message is a req with a protocol
-// id in the frame, and the receiving shell resolves that to the app claiming it. There
-// is no chat-specific framing at all — one plane, one dispatch scheme (§12.10).
+// The shell's two ops into a guest (app-api.js), and nothing else: `ctx`, the node's
+// context, and `ui`, bytes from the app's own view. Messages ride the Transport request
+// plane under the protocol the app claims, and reach the guest without the shell seeing
+// them; there is no app-specific framing here at all.
 
-// ── iframe bridge ──────────────────────────────────────────────────────
-//
-// The app transform returns render bytes; the shell posts them to the iframe.
-// Renders that arrive before the iframe says "ready" are queued so a hot-swap
-// doesn't drop the first message.
-let iframeReady = false;
-const renderQueue = [];
+/** One local op into `rec`'s guest: the install's handle loops back through `handle`,
+ *  with the host's caller id in front of the op, framed by seedkernel's op-frame. The op
+ *  NAME is the contract's; the bytes behind it are the app's. */
+function invokeApp(rec, op, bytes) {
+  return rec.invoke(writeOp(op, bytes));
+}
 
-function deliverRender(payload) {
-  if (iframeReady && frame.contentWindow) {
-    frame.contentWindow.postMessage({ type: "render", payload }, "*");
-  } else {
-    renderQueue.push(payload);
+/** The node's context, as every app's guest is told it (`contextJson`, app-api.js): who
+ *  this node is and what it calls itself, its rooms and who the relay says is in each, the
+ *  linked peers, the contacts, and what each peer calls itself. All of it is the shell's
+ *  to know, and none of it is a secret: a contact's secret stays here. */
+function contextNow() {
+  return contextJson({
+    me: myPkHex,
+    nick: myNick,
+    rooms: [...joinedRooms].map(([name, r]) =>
+      ({ id: r.id, name: friendlyRoom(name), members: [...r.members].sort() })),
+    linked: [...linkedNow].sort(),
+    contacts: [...contacts.keys()].sort(),
+    nicks: Object.fromEntries([...peerNicks].sort(([a], [b]) => (a < b ? -1 : 1))),
+  });
+}
+
+/** Tell one app's guest the context, and hand its view the answer. */
+async function tellContext(rec, json) {
+  rec.ctx = json;
+  try {
+    deliverRender(rec, await invokeApp(rec, APP_OP_CONTEXT, new TextEncoder().encode(json)), { isContext: true });
   }
-  for (const [k, t] of Object.entries(tabs)) {
-    if (k !== "app" && t.btn.classList.contains("active")) {
-      tabs.app.btn.classList.add("unread");
-      break;
-    }
+  catch (err) { shellPrint(`${rec.name}: ${err.message}`, "err"); }
+}
+
+/** Tell every app whose guest has not heard the context as it now stands. Called wherever
+ *  it may have changed: a room joined or left, a member heard, a contact added, a peer
+ *  linked, a nick told. A guest is told once per change, however often this is called. */
+function postContext() {
+  const json = contextNow();
+  for (const rec of installedApps.values()) if (rec.ctx !== json) void tellContext(rec, json);
+}
+
+// ── an app's view ───────────────────────────────────────────────────────
+//
+// A view is the app's own HTML page in a sandboxed iframe, loaded from a `blob:` URL: an
+// opaque origin with no access to this page's DOM or keys, which reaches the shell only by
+// postMessage. Each installed app has its own, made when the app is installed and kept
+// until it is removed or replaced. The app shown is the one whose frame is in front; one
+// that is not still hears from its guest, so its view is current when it is opened.
+//
+// allow-forms lets a view use a normal <form> element for its input. A view still
+// preventDefault()s in its submit handler so no actual navigation happens; the null
+// sandbox origin contains anything the form could attempt regardless.
+
+/** Renders held for a view that has not said it is ready; past this the oldest go. */
+const MAX_QUEUED_RENDERS = 512;
+
+function mountView(rec) {
+  if (!rec.ui) return;
+  const frame = document.createElement("iframe");
+  frame.className = "app-frame hidden";
+  frame.setAttribute("sandbox", "allow-scripts allow-forms");
+  frame.title = `${rec.name} UI`;
+  rec.blobUrl = URL.createObjectURL(new Blob([rec.ui], { type: "text/html" }));
+  frame.src = rec.blobUrl;
+  appPanel.insertBefore(frame, diagnostics);
+  rec.frame = frame;
+}
+
+function unmountView(rec) {
+  if (!rec.frame) return;
+  rec.frame.remove();
+  URL.revokeObjectURL(rec.blobUrl);
+  rec.frame = rec.blobUrl = null;
+  rec.ready = false;
+  rec.queue.length = 0;
+}
+
+/** Hand an app's view the render bytes its guest answered. The shell does not read them.
+ *
+ *  Renders that arrive before the view says "ready" are queued, so an app just installed
+ *  does not drop its first message. A context answer is not: `viewReady` gives the view
+ *  the context as it then stands, ahead of the queue, and an older one behind it would
+ *  put the view back. `fromPeer` is an answer to a peer's frame, which is what the App
+ *  tab's unread dot is for when the user is looking at another tab. */
+function deliverRender(rec, payload, { fromPeer = false, isContext = false } = {}) {
+  if (!rec.ui || payload.length === 0) return;
+  if (rec.ready) rec.frame.contentWindow.postMessage({ type: "render", payload }, "*");
+  else if (!isContext) {
+    rec.queue.push(payload);
+    if (rec.queue.length > MAX_QUEUED_RENDERS) rec.queue.shift();
+  }
+  if (fromPeer && rec.key === activeAppKey && !tabs.app.btn.classList.contains("active")) {
+    tabs.app.btn.classList.add("unread");
   }
 }
 
-// ── parsing the wasm artifact ──────────────────────────────────────────
-async function readWasmSections(wasmBytes) {
-  const mod = await WebAssembly.compile(wasmBytes);
-  const ui = WebAssembly.Module.customSections(mod, "ui");
-  const meta = WebAssembly.Module.customSections(mod, "app_meta");
-  let parsedMeta = null;
-  if (meta.length > 0) {
-    try { parsedMeta = JSON.parse(new TextDecoder().decode(new Uint8Array(meta[0]))); }
-    catch { parsedMeta = null; }
+/** A view said it is ready. Its guest is told the context, and the view is handed that
+ *  answer first and then what arrived while it loaded, in order: a message is drawn by a
+ *  view that already knows the room it is in. */
+async function viewReady(rec) {
+  const frame = rec.frame;
+  const json = contextNow();
+  rec.ctx = json;
+  let context = new Uint8Array(0);
+  try { context = await invokeApp(rec, APP_OP_CONTEXT, new TextEncoder().encode(json)); }
+  catch (err) { shellPrint(`${rec.name}: ${err.message}`, "err"); }
+  if (!frame || rec.frame !== frame) return; // removed or replaced meanwhile
+  rec.ready = true;
+  for (const payload of [context, ...rec.queue.splice(0)]) {
+    if (payload.length > 0) frame.contentWindow.postMessage({ type: "render", payload }, "*");
   }
-  const uiHtml = ui.length > 0 ? new TextDecoder().decode(new Uint8Array(ui[0])) : null;
-  return { meta: parsedMeta, uiHtml };
 }
 
-// ── extract metadata from a bundle blob ──────────────────────────────────
+// ── reading a bundle ────────────────────────────────────────────────────
 //
-// Read app + module metadata off a bundle for the UI and the approval gate, through
-// the shared §12.4 verify path: both signatures authenticate the entire body before
-// its manifest, guest, or modules are read.
-// Returns null on anything malformed, unauthentic, or not the demo's one-module
-// app shape.
-function peekMeta(bundleBytes) {
+// Read an app's facts off a bundle for the UI and the consent gate, through the shared
+// §12.4 verify path: both signatures authenticate the entire body before its manifest is
+// read. Throws, saying why, for anything malformed, unauthentic, or not an app this shell
+// runs (`appFacts`). That check is what keeps an Offer from installing authority behind a
+// consent row: `guest.requires` is where a bundle's reach is written down, and this is the
+// one place on the install path that reads it.
+function peekBundle(bundleBytes) {
   let v;
   try { v = verifyBundle(sodium, bundleBytes); }
-  catch { return null; }
-  // One module, and a guest reaching the network and nothing else (chat-app.js). The
-  // requires check is what keeps an Offer from installing authority behind a consent
-  // row that only shows a name: `guest.requires` is where a bundle's reach is
-  // written down, and this is the one place on the install path that reads it.
-  if (!isChatApp(v.manifest)) return null;
-  const mod = v.manifest.modules[0];
-  const wasm = v.modules[0].wasm;
-  if (!wasm || wasm.length === 0) return null;
-  // `protocols` rides along because it is what the bundle will SERVE once admitted
-  // (§12.10) — the same manifest read that gates the install answers "and what does it
-  // take over", so the UI never re-parses the envelope to find out.
+  catch { throw new Error("not a valid app bundle (.skb)"); }
   return {
-    app: v.manifest.app, moduleName: mod.name, moduleHash: bytesToHex(genesisHash(sodium, wasm)), wasm, authorPk: v.author,
-    protocols: v.manifest.protocols ?? [],
+    app: v.manifest.app,
+    authorPk: v.author,
+    // What a consent to this bundle names, and what tells two bundles apart.
+    hash: bytesToHex(bundleDigest(v, digest)),
+    ...appFacts(v.manifest),
   };
 }
 
-// Admit a bundle the user has already consented to. Calls the shared §12.4 installer,
-// which verifies the bundle signatures, checks the admit gate, and stands the slot.
-// Returns the UI AppRecord.
+// Install a bundle the user has consented to: by dropping it, by accepting its offer, or
+// by having installed it before a reload. Calls the shared §12.4 installer, which
+// verifies the bundle signatures, checks the admit gate, and stands the slot. Returns the
+// AppRecord.
 async function applyAppBundle(bundleBytes) {
-  // Pre-peek metadata for the UI record: app_meta, ui, handler name, app label.
-  const peeked = peekMeta(bundleBytes);
-  if (!peeked) throw new Error("not a valid app bundle");
-  const { meta, uiHtml } = await readWasmSections(peeked.wasm);
-  if (!meta) throw new Error("bundle module has no app_meta");
+  const peeked = peekBundle(bundleBytes);
   // The label this bundle installs under (§12.4) — a fact of the signed manifest, so the
-  // page has it BEFORE the install, and the onInbound closure below just closes over it
-  // rather than waiting for a handle to fill it in.
+  // page has it BEFORE the install, and the onInbound closure below just closes over the
+  // record rather than waiting for a handle to fill it in.
   const key = peeked.app;
   // Taking a standing label over takes its data and signing scope with it. The app's own
   // author shipping its next version is the one-click upgrade; a different author's
   // bundle under the same label is asked about by name.
   const standing = installedApps.get(key);
   if (standing && bytesToHex(standing.authorPk) !== bytesToHex(peeked.authorPk)
-      && !confirm(`Replace ${standing.name} ${standing.version} with ${meta.name || peeked.app} ${meta.version || ""} ` +
+      && !confirm(`Replace ${standing.name} ${standing.version} with ${peeked.name} ${peeked.version} ` +
         `by a different author (${bytesToHex(peeked.authorPk).slice(0, 12)}…)?`)) {
     throw new Error("replacing an app from a different author was declined");
   }
 
-  const loaded = await shell.install(bundleBytes, {
-    // Naming no predecessor takes a FREE label and refuses a standing one (§12.4), so a
-    // bundle under a label already here — chat v1 → v2, or another author's chat — says
-    // which slot it retires. The user's app row IS that question, and it is all that
-    // separates a first install here from an upgrade.
-    replaces: standing ? key : undefined,
-    // Protocol routing (seedkernel §12.10): the render bytes ARE this app's own answer
-    // to the frame it just served, and the installer that mounted it receives them right
-    // here, off its own install — no second claim, and no 32-byte comparison against a
-    // caller id. Painting them only when this app is the one currently shown in the
-    // iframe is a plain equality against `key` above, because the page already knows
-    // which app THIS install is.
-    onInbound: (claim, from, answer) => {
-      if (answer.length > 0 && key === activeAppKey) deliverRender(new Uint8Array(answer));
-    },
-  });
-
   const record = {
-    id: peeked.app,
     key,
-    /** The install's handle — the one loopback `invoke`, bound to this app's slot. */
-    invoke: (arg) => loaded.invoke(arg),
-    /** The manifest's signed claim (§12.10) — what this app serves when nothing
-     *  later has taken the id over. The app row reads it against `shell.resolve`. */
+    name: peeked.name,
+    version: peeked.version,
+    description: peeked.description,
+    /** The manifest's signed claim (§12.10) and reach (§12.2), which its row shows. */
     protocols: peeked.protocols,
-    name: meta.name || peeked.app,
-    version: meta.version || "",
-    description: meta.description || "",
-    authorPk: loaded.author.slice(),
-    // Already-verified in peekMeta's verifyBundle call — reuse it rather than
-    // re-hashing wasm bytes we just proved match this exact hash.
-    bytesHash: hexToBytes(peeked.moduleHash),
+    requires: peeked.requires,
+    authorPk: peeked.authorPk.slice(),
+    hash: peeked.hash,
     bundleBytes: bundleBytes.slice(),
-    moduleName: peeked.moduleName,
-    uiHtml,
+    ui: peeked.ui,
+    /** The install's handle — the one loopback `invoke`, bound to this app's slot. */
+    invoke: null,
+    // Its view: the frame, whether it has said it is ready, and the renders held until then.
+    frame: null,
+    blobUrl: null,
+    ready: false,
+    queue: [],
+    /** The context its guest was last told, as JSON. */
+    ctx: null,
+    /** The conversation its view says is open, `{ room }` or `{ to }` by id in hex, null
+     *  for none, and undefined for a view that never says. */
+    conv: undefined,
   };
+
+  // The consent is one-shot (`admit`), and withdrawn if the install does not take it.
+  pendingApprovals.add(peeked.hash);
+  let loaded;
+  try {
+    loaded = await shell.install(bundleBytes, {
+      // Naming no predecessor takes a FREE label and refuses a standing one (§12.4), so a
+      // bundle under a label already here — an app's next version, or another author's
+      // app — says which slot it retires. The user's app row IS that question, and it is
+      // all that separates a first install here from an upgrade.
+      replaces: standing ? key : undefined,
+      // Protocol routing (seedkernel §12.10): the render bytes ARE this app's own answer
+      // to the frame it just served, and the installer that mounted it receives them
+      // right here, off its own install — no second claim, and no 32-byte comparison
+      // against a caller id, because the page already knows which app THIS install is.
+      onInbound: (claim, from, answer) => deliverRender(record, new Uint8Array(answer), { fromPeer: true }),
+    });
+  } finally {
+    pendingApprovals.delete(peeked.hash);
+  }
+  record.invoke = (arg) => loaded.invoke(arg);
+
+  if (standing) unmountView(standing);
   installedApps.set(key, record);
+  mountView(record);
+  // Its guest starts with no context: tell it, without waiting for its view to load.
+  postContext();
   persistInstalledApps();
   renderAppList();
   return record;
 }
 
 // ── persistence ────────────────────────────────────────────────────────
-// The packed bundle is the only piece of app state we need — the
-// installed app and the uiHtml both derive from it. We keep them in sessionStorage so a reload
-// within the same tab keeps the user's app set and lets transitive offers
-// continue to work.
+// The packed bundle is the only piece of app state we need — the installed app and its
+// view both derive from it. We keep them in sessionStorage so a reload within the same
+// tab keeps the user's app set and lets transitive offers continue to work.
 function persistInstalledApps() {
   try {
     const arr = [];
@@ -776,60 +871,41 @@ async function restoreInstalledApps() {
   try { arr = JSON.parse(sessionStorage.getItem(STORE + ".bundles") || "[]"); }
   catch { return; }
   if (!Array.isArray(arr)) return;
+  // Read before the replay: each install below saves the app set as it then stands, with
+  // no app shown yet.
+  const saved = sessionStorage.getItem(STORE + ".active");
   // Replaying the bundles in the order they were stored reproduces the routing exactly:
   // each one lands on its own label and claims exactly what its manifest names, and a
   // contest with an already-restored app is refused rather than resolved by order
   // (§12.10). So there is nothing else to restore, and no order-dependent outcome to
-  // reproduce beyond the list itself.
+  // reproduce beyond the list itself. A restored app cleared the consent gate when it was
+  // installed, which is the consent `applyAppBundle` installs it under.
   for (const raw of arr) {
-    try {
-      const bundleBytes = new Uint8Array(raw);
-      const peeked = peekMeta(bundleBytes);
-      if (!peeked) continue;
-      // A restored app cleared the consent gate when it was installed — wave it through.
-      pendingApprovals.add(peeked.moduleHash);
-      await applyAppBundle(bundleBytes);
-    } catch (err) {
-      shellPrint(`Could not restore an app: ${err.message}`, "err");
-    }
+    try { await applyAppBundle(new Uint8Array(raw)); }
+    catch (err) { shellPrint(`Could not restore an app: ${err.message}`, "err"); }
   }
-  const saved = sessionStorage.getItem(STORE + ".active");
   if (saved && installedApps.has(saved)) setActiveApp(saved);
 }
 
-// ── active-app iframe mount ────────────────────────────────────────────
+// ── the app shown ──────────────────────────────────────────────────────
 function setActiveApp(key) {
   const rec = installedApps.get(key);
   if (!rec) return;
-  if (!rec.uiHtml) {
-    shellPrint(`${rec.name} has no UI; cannot mount.`, "err");
+  if (!rec.frame) {
+    shellPrint(`${rec.name} has no UI to show.`, "err");
     return;
   }
   activeAppKey = key;
-  iframeReady = false;
-  renderQueue.length = 0;
-  if (frame.dataset.blobUrl) URL.revokeObjectURL(frame.dataset.blobUrl);
-  const uiBlob = new Blob([rec.uiHtml], { type: "text/html" });
-  const uiUrl  = URL.createObjectURL(uiBlob);
-  frame.dataset.blobUrl = uiUrl;
-  frame.src = uiUrl;
-  frame.classList.remove("hidden");
+  for (const r of installedApps.values()) r.frame?.classList.toggle("hidden", r !== rec);
   appEmpty.classList.add("hidden");
   appStatus.textContent = `${rec.name} ${rec.version}`.trim();
   persistInstalledApps();
   renderAppList();
 }
 
-function unmountActiveApp() {
+function showNoApp() {
   activeAppKey = null;
-  iframeReady = false;
-  renderQueue.length = 0;
-  frame.src = "about:blank";
-  if (frame.dataset.blobUrl) {
-    URL.revokeObjectURL(frame.dataset.blobUrl);
-    delete frame.dataset.blobUrl;
-  }
-  frame.classList.add("hidden");
+  for (const r of installedApps.values()) r.frame?.classList.add("hidden");
   appEmpty.classList.remove("hidden");
   appStatus.textContent = "no app loaded";
   persistInstalledApps();
@@ -839,9 +915,9 @@ function unmountActiveApp() {
 //
 // An offer is a packed app bundle forwarded over a data channel on `offer/v1`, the
 // offers app's own claim (browser/offers-app.js) — any peer who holds the bundle can
-// forward it (transitive offer), and the manifest inside carries the original
-// author's signature over the module hash, so the recipient still authenticates
-// against the author (peekMeta verifies it).
+// forward it (transitive offer), and the bundle carries the original author's signatures
+// over all of it, so the recipient still authenticates against the author (peekBundle
+// verifies it).
 //
 // The relaying peer is identified by the AKE channel, not a signature — the frame is
 // unsigned; the bundle's own manifest signature is the load-bearing authentication.
@@ -850,46 +926,33 @@ function unmountActiveApp() {
 // same three things, because both read them off the same kind of record.
 //
 // Keyed by the offers app's OWN record key (`OFFERS_KEY_PREFIX + hex`, the blake2b-256
-// of the whole blob) rather than the module hash: it is already the fs key the record
-// lives under, so accepting or dismissing an offer can delete it with no second
-// derivation.
+// of the whole blob): it is already the fs key the record lives under, so accepting or
+// dismissing an offer can delete it with no second derivation.
 const pendingOffers = new Map();   // recordKey → { bundleBytes, peeked, fromPkHex }
 
 async function handleOffer(bundleBytes, fromPkHex, recordKey) {
-  const peeked = peekMeta(bundleBytes);
-  if (!peeked) return;
-  const { wasm, app: id, moduleHash, authorPk } = peeked;
-  const bytesHash = hexToBytes(moduleHash);
-
-  let meta = null;
-  try { meta = (await readWasmSections(wasm)).meta; } catch {}
-  if (!meta) {
-    shellPrint(`Offer from ${fromPkHex.slice(0, 8)} dropped: bundle module has no app_meta`, "err");
+  let peeked;
+  try { peeked = peekBundle(bundleBytes); }
+  catch (err) {
+    shellPrint(`Offer from ${fromPkHex.slice(0, 8)} dropped: ${err.message}`, "err");
     return;
   }
-  meta = { ...meta, id };
 
-  // Already running these exact bytes ⇒ nothing to offer. An update ships a new module
-  // hash, so it still surfaces for consent (installs are consent-gated, §12.4); only a
-  // redundant re-offer of what the user already has installed is dropped, so it never
-  // shows a pointless Install row. The record stays in the offers app's fs either way —
-  // the guest's own dedupe (browser/offers-app.js) already keeps it from growing on a
-  // repeat delivery of the identical bytes.
+  // Already running this exact bundle ⇒ nothing to offer. An update differs somewhere, in
+  // its guest or a module or its view, so its digest differs and it still surfaces for
+  // consent (installs are consent-gated, §12.4); only a redundant re-offer of what the
+  // user already has installed is dropped, so it never shows a pointless Install row. The
+  // record stays in the offers app's fs either way — the guest's own dedupe
+  // (browser/offers-app.js) already keeps it from growing on a repeat delivery of the
+  // identical bytes.
   for (const rec of installedApps.values()) {
-    if (rec.bytesHash && bytesToHex(rec.bytesHash) === moduleHash) return;
+    if (rec.hash === peeked.hash) return;
   }
   if (pendingOffers.has(recordKey)) return;
-  pendingOffers.set(recordKey, {
-    bundleBytes: bundleBytes.slice(),
-    // Keep the fields buildOfferRow renders (author + module hash) plus the moduleHash
-    // acceptOffer adds to pendingApprovals.
-    peeked: { moduleHash, meta, authorPk, bytesHash },
-    fromPkHex,
-  });
+  pendingOffers.set(recordKey, { bundleBytes: bundleBytes.slice(), peeked, fromPkHex });
   renderOfferList();
   if (!tabs.apps.btn.classList.contains("active")) tabs.apps.btn.classList.add("unread");
-  shellPrint(
-    `${fromPkHex.slice(0, 8)} offers app "${meta.name || meta.id}" — see the Apps tab.`, "sys");
+  shellPrint(`${fromPkHex.slice(0, 8)} offers app "${peeked.name}" — see the Apps tab.`, "sys");
 }
 
 /** Everything the offers app's fs already holds, replayed into the pending-offer list
@@ -907,7 +970,6 @@ async function restoreOffers() {
 async function acceptOffer(recordKey) {
   const offer = pendingOffers.get(recordKey);
   if (!offer) return;
-  pendingApprovals.add(offer.peeked.moduleHash);
   try {
     const rec = await applyAppBundle(offer.bundleBytes);
     pendingOffers.delete(recordKey);
@@ -918,7 +980,6 @@ async function acceptOffer(recordKey) {
     shellPrint(`Installed ${rec.name} ${rec.version} from offer.`, "sys");
     setActiveApp(rec.key);
   } catch (err) {
-    pendingApprovals.delete(offer.peeked.moduleHash);
     shellPrint(`Install from offer failed: ${err.message}`, "err");
     showAppsNotice(`Install from offer failed: ${err.message}`, "err");
   }
@@ -930,99 +991,26 @@ function dismissOffer(recordKey) {
   renderOfferList();
 }
 
-// ── sending ─────────────────────────────────────────────────────────────────
+// ── offering an app ─────────────────────────────────────────────────────
 //
-// Every outbound frame leaves through an APP's guest, because that is the only thing
-// that can send: the host's driver holds sockets and no request face at all, and the
-// network is the transport, reached by calling the id it claims (§12.10). So the shell asks
-// an app it has installed to put the frame on the wire — a loopback `invoke` with the
-// `send` op, whose argument the guest's `handle` reads (chat-app.js).
-//
-// `sender` is which app does the asking, and it is a real choice rather than a detail.
-// For a chat frame it is the app that CLAIMS the protocol, so the app the message is
-// about is the app that speaks; for an Offer — a bundle in transit, on a local service
-// claim no peer can reach — it is the app being offered, which is by definition
-// installed here.
-/** One local op into `rec`'s app: the record's handle loops back through `handle`,
- *  with the host's caller id in front of THIS app's own op framing - composed by the
- *  seedkernel's op-frame (content, not host-seam metadata) and never read by it. The op NAME is
- *  the app's vocabulary. */
-function appInvoke(rec, op, arg) {
-  return rec.invoke(writeOp(op, arg));
-}
+// Every outbound frame leaves through a guest, because that is the only thing that can
+// send: the host's driver holds sockets and no request face at all, and the network is
+// the transport, reached by calling the id it claims (§12.10). An app's own frames leave
+// through its own guest, and the shell never sees them. The shell's own are two: a call's
+// signals, through the calls app (`sendSignal`), and an Offer, through the offers app,
+// which owns `offer/v1` in both directions. No app's guest is borrowed to carry either.
 
-function sendFrame(sender, peerId, proto, payload) {
-  const protoBytes = new TextEncoder().encode(proto);
-  const arg = new Uint8Array(32 + 1 + protoBytes.length + payload.length);
-  arg.set(hexToBytes(peerId), 0);
-  arg[32] = protoBytes.length;
-  arg.set(protoBytes, 33);
-  arg.set(payload, 33 + protoBytes.length);
-  return appInvoke(sender, CHAT_OP_SEND, arg);
-}
-
-/** Fan one payload out to every linked peer, or to those it is for.
- *
- *  `among` narrows the fan-out to a room's members. `only` narrows it to one peer, a
- *  direct message, and is sent linked or not: the transport dials a contact it has an
- *  address for, and a peer it cannot reach is simply not reached.
- *
- *  `nickPrefix` is our current nick announcement, sent AHEAD of the payload to each peer
- *  that has not heard it yet (see lastSentNickBody). Once per peer, not once per message:
- *  chat v2 renders an announcement as a visible "… is now known as …" line, so re-sending it in
- *  front of every message would bury the conversation in its own presence traffic. A peer
- *  counts as told before the send, so `tellNick` does not tell it as well meanwhile.
- *
- *  The told-set is pruned against the peer list the TRANSPORT just answered with, which
- *  is what keeps this from being a peer mirror: nothing here observes a peer coming or
- *  going, and a peer that dropped and came back is simply absent from the set it is
- *  pruned against, so it is told again. */
-async function broadcastToPeers(proto, payload, { nickPrefix = null, only = null, among = null } = {}) {
-  const key = shell.resolve(proto);
-  if (!key) return; // nothing installed claims this protocol — nothing to send with
-  const sender = installedApps.get(key);
-  if (!sender) return;
-  const peers = await linkedPeers();
-  pruneNickTold(peers);
-  for (const peerId of only ? [only] : among ? peers.filter((p) => among.has(p)) : peers) {
-    try {
-      if (nickPrefix && !nickToldPeers.has(peerId)) {
-        nickToldPeers.add(peerId);
-        await sendFrame(sender, peerId, proto, nickPrefix);
-      }
-      await sendFrame(sender, peerId, proto, payload);
-    }
-    catch (err) { shellPrint(`send to ${peerId.slice(0, 8)} failed: ${err.message}`, "err"); }
-  }
-}
-
-async function renderLocal(rec, payload) {
-  const input = new Uint8Array(myPeerId.length + payload.length);
-  input.set(myPeerId, 0);
-  input.set(payload, myPeerId.length);
-  // The local echo runs through the app's guest like an inbound frame does — the
-  // guest `handle` forwards to the module by name (§12.2), under the
-  // same seam a peer's request would take. Which means it can fail the same way,
-  // so it reports rather than rejecting into a caller that has nowhere to put it.
-  let render;
-  try { render = await appInvoke(rec, CHAT_OP_RENDER, input); }
-  catch (err) { shellPrint(`local echo failed: ${err.message}`, "err"); return; }
-  if (render) deliverRender(new Uint8Array(render));
-}
-
-// Broadcast the stored bundle for `id` to every open peer. Anyone who receives
-// this can forward it to others — that's transitivity for free.
+// Send the stored bundle for `key` to every linked peer. Anyone who receives this can
+// forward it to others — that's transitivity for free.
 async function offerApp(key) {
   const rec = installedApps.get(key);
   if (!rec) return;
   const linked = await linkedPeers();
   for (const peerId of linked) {
-    // The offered app carries its own offer: `offer/v1` is the OFFERS BUNDLE's claim
-    // (the app that would handle it is the thing being offered), so there is no app to
-    // resolve it to — the one we know is installed is the one whose bytes are in the
-    // frame. The sender is still the chat app regardless: the page has no send of its
-    // own, only a guest can call `_net` (§12.10), and this is the guest already on hand.
-    try { await sendFrame(rec, peerId, OFFER_PROTO, rec.bundleBytes); }
+    const arg = new Uint8Array(32 + rec.bundleBytes.length);
+    arg.set(hexToBytes(peerId), 0);
+    arg.set(rec.bundleBytes, 32);
+    try { await offersApp.invoke(writeOp(OFFERS_OP_SEND, arg)); }
     catch (err) { shellPrint(`offer to ${peerId.slice(0, 8)} failed: ${err.message}`, "err"); }
   }
   const n = linked.length;
@@ -1034,6 +1022,78 @@ async function offerApp(key) {
 }
 
 // ── apps panel UI ──────────────────────────────────────────────────────
+//
+// An installed app's row and an offered one's are the same row, with different buttons:
+// both say what the bundle is and, the part a consent rests on, what it serves and what
+// it reaches. `app` is the facts `peekBundle` read off the signed manifest, which an
+// AppRecord carries too.
+
+/** The top of a row: the app's name, version and description, as its author wrote them. */
+function appRowHead(li, app) {
+  const head = document.createElement("div");
+  head.className = "app-row-head";
+  const nm = document.createElement("span");
+  nm.className = "app-row-name";
+  nm.textContent = app.name;
+  head.appendChild(nm);
+  if (app.version) {
+    const v = document.createElement("span");
+    v.className = "app-row-version";
+    v.textContent = app.version;
+    head.appendChild(v);
+  }
+  li.appendChild(head);
+  if (app.description) {
+    const d = document.createElement("div");
+    d.className = "app-row-desc";
+    d.textContent = app.description;
+    li.appendChild(d);
+  }
+}
+
+/** One line of `label value` pairs, a dot between them. */
+function appRowMeta(li, pairs) {
+  const meta = document.createElement("div");
+  meta.className = "app-row-meta";
+  pairs.forEach(([label, value], i) => {
+    const b = document.createElement("b");
+    b.textContent = label;
+    meta.append(b, document.createTextNode(` ${value}${i < pairs.length - 1 ? " · " : ""}`));
+  });
+  li.appendChild(meta);
+}
+
+/** What a bundle SERVES (§12.10) and what it REACHES (§12.2) — read, never set. Both are
+ *  the manifest's signed word. The protocols are its claim, and installing it is what
+ *  routes each to it; `guest.requires` is the whole of what its guest can touch, so on an
+ *  offer's row this line is what the Install button grants. */
+function appRowClaims(li, app) {
+  const line = document.createElement("div");
+  line.className = "app-row-meta";
+  const say = (label, value) => {
+    const span = document.createElement("span");
+    span.className = "app-row-proto";
+    const b = document.createElement("b");
+    b.textContent = label;
+    span.append(b, document.createTextNode(` ${value}`));
+    line.appendChild(span);
+  };
+  if (app.protocols.length === 0) say("serves", "no protocol — receives nothing");
+  for (const proto of app.protocols) say("serves", `“${proto}”`);
+  if (app.requires.length === 0) say("reaches", "nothing");
+  for (const r of app.requires) say("reaches", APP_GRANTS[r]);
+  li.appendChild(line);
+}
+
+function appRowButton(btns, label, cls, onClick) {
+  const btn = document.createElement("button");
+  btn.className = cls;
+  btn.textContent = label;
+  btn.addEventListener("click", onClick);
+  btns.appendChild(btn);
+  return btn;
+}
+
 function renderAppList() {
   appListEl.innerHTML = "";
   if (installedApps.size === 0) {
@@ -1052,99 +1112,21 @@ function buildAppRow(rec) {
   const li = document.createElement("li");
   li.className = "app-row";
   if (rec.key === activeAppKey) li.classList.add("active");
-
-  const head = document.createElement("div");
-  head.className = "app-row-head";
-  const nm = document.createElement("span");
-  nm.className = "app-row-name";
-  nm.textContent = rec.name;
-  head.appendChild(nm);
-  if (rec.version) {
-    const v = document.createElement("span");
-    v.className = "app-row-version";
-    v.textContent = rec.version;
-    head.appendChild(v);
-  }
-  li.appendChild(head);
-
-  if (rec.description) {
-    const d = document.createElement("div");
-    d.className = "app-row-desc";
-    d.textContent = rec.description;
-    li.appendChild(d);
-  }
-
-  const meta = document.createElement("div");
-  meta.className = "app-row-meta";
-  const authorHex = bytesToHex(rec.authorPk);
-  {
-    const bId = document.createElement("b");
-    bId.textContent = "id";
-    meta.appendChild(bId);
-    const vId = document.createTextNode(` ${rec.id} · `);
-    meta.appendChild(vId);
-    const bAu = document.createElement("b");
-    bAu.textContent = "author";
-    meta.appendChild(bAu);
-    const vAu = document.createTextNode(` ${authorHex.slice(0, 8)} · `);
-    meta.appendChild(vAu);
-    const bWa = document.createElement("b");
-    bWa.textContent = "wasm";
-    meta.appendChild(bWa);
-    const vWa = document.createTextNode(` ${bytesToHex(rec.bytesHash).slice(0, 12)}`);
-    meta.appendChild(vWa);
-  }
-  li.appendChild(meta);
-
-  // What this app SERVES (§12.10) — read, never set. The protocols are the manifest's
-  // signed claim and the routing is the projection of every installed manifest, so this
-  // row has nothing to offer the user but the truth: which ids this bundle claimed. An
-  // installed app holds every one of them, because a claim changes hands only with the
-  // slot.
-  const protos = document.createElement("div");
-  protos.className = "app-row-meta";
-  const claimed = rec.protocols;
-  if (claimed.length === 0) {
-    const none = document.createElement("span");
-    none.textContent = " claims no protocol — receives nothing";
-    protos.appendChild(none);
-  }
-  for (const proto of claimed) {
-    const span = document.createElement("span");
-    span.className = "app-row-proto";
-    const b = document.createElement("b");
-    b.textContent = "serves";
-    span.appendChild(b);
-    span.appendChild(document.createTextNode(` “${proto}”`));
-    protos.appendChild(span);
-  }
-  li.appendChild(protos);
+  appRowHead(li, rec);
+  appRowMeta(li, [["id", rec.key], ["author", bytesToHex(rec.authorPk).slice(0, 8)], ["bundle", rec.hash.slice(0, 12)]]);
+  appRowClaims(li, rec);
 
   const btns = document.createElement("div");
   btns.className = "app-row-buttons";
-  if (rec.uiHtml) {
-    const openBtn = document.createElement("button");
-    openBtn.className = "icon primary";
-    openBtn.textContent = rec.key === activeAppKey ? "Active" : "Open";
-    openBtn.disabled = rec.key === activeAppKey;
-    openBtn.addEventListener("click", () => {
+  if (rec.frame) {
+    const openBtn = appRowButton(btns, rec.key === activeAppKey ? "Active" : "Open", "icon primary", () => {
       setActiveApp(rec.key);
       showTab("app");
     });
-    btns.appendChild(openBtn);
+    openBtn.disabled = rec.key === activeAppKey;
   }
-  const offerBtn = document.createElement("button");
-  offerBtn.className = "icon";
-  offerBtn.textContent = "Offer to peers";
-  offerBtn.addEventListener("click", () => offerApp(rec.key));
-  btns.appendChild(offerBtn);
-
-  const removeBtn = document.createElement("button");
-  removeBtn.className = "icon danger";
-  removeBtn.textContent = "Remove";
-  removeBtn.addEventListener("click", () => removeApp(rec.key));
-  btns.appendChild(removeBtn);
-
+  appRowButton(btns, "Offer to peers", "icon", () => offerApp(rec.key));
+  appRowButton(btns, "Remove", "icon danger", () => removeApp(rec.key));
   li.appendChild(btns);
   return li;
 }
@@ -1157,7 +1139,8 @@ function removeApp(key) {
   // claimed and its guest realm.
   shell.uninstall(key);
   installedApps.delete(key);
-  if (activeAppKey === key) unmountActiveApp();
+  unmountView(rec);
+  if (activeAppKey === key) showNoApp();
   persistInstalledApps();
   renderAppList();
 }
@@ -1175,65 +1158,17 @@ function renderOfferList() {
 }
 
 function buildOfferRow(key, offer) {
-  const meta = offer.peeked.meta;
+  const app = offer.peeked;
   const li = document.createElement("li");
   li.className = "app-row offer-row";
-  const head = document.createElement("div");
-  head.className = "app-row-head";
-  const nm = document.createElement("span");
-  nm.className = "app-row-name";
-  nm.textContent = meta.name || meta.id;
-  head.appendChild(nm);
-  if (meta.version) {
-    const v = document.createElement("span");
-    v.className = "app-row-version";
-    v.textContent = meta.version;
-    head.appendChild(v);
-  }
-  li.appendChild(head);
-  if (meta.description) {
-    const d = document.createElement("div");
-    d.className = "app-row-desc";
-    d.textContent = meta.description;
-    li.appendChild(d);
-  }
-  const m = document.createElement("div");
-  m.className = "app-row-meta";
-  {
-    const bId = document.createElement("b");
-    bId.textContent = "id";
-    m.appendChild(bId);
-    const vId = document.createTextNode(` ${meta.id} · `);
-    m.appendChild(vId);
-    const bAu = document.createElement("b");
-    bAu.textContent = "author";
-    m.appendChild(bAu);
-    const vAu = document.createTextNode(` ${bytesToHex(offer.peeked.authorPk).slice(0, 8)} · `);
-    m.appendChild(vAu);
-    const bFr = document.createElement("b");
-    bFr.textContent = "from";
-    m.appendChild(bFr);
-    const vFr = document.createTextNode(` ${offer.fromPkHex.slice(0, 8)} · `);
-    m.appendChild(vFr);
-    const bWa = document.createElement("b");
-    bWa.textContent = "wasm";
-    m.appendChild(bWa);
-    const vWa = document.createTextNode(` ${bytesToHex(offer.peeked.bytesHash).slice(0, 12)}`);
-    m.appendChild(vWa);
-  }
-  li.appendChild(m);
+  appRowHead(li, app);
+  appRowMeta(li, [["id", app.app], ["author", bytesToHex(app.authorPk).slice(0, 8)],
+    ["from", offer.fromPkHex.slice(0, 8)], ["bundle", app.hash.slice(0, 12)]]);
+  appRowClaims(li, app);
   const btns = document.createElement("div");
   btns.className = "app-row-buttons";
-  const ok = document.createElement("button");
-  ok.className = "icon primary";
-  ok.textContent = "Install";
-  ok.addEventListener("click", () => acceptOffer(key));
-  const no = document.createElement("button");
-  no.className = "icon";
-  no.textContent = "Dismiss";
-  no.addEventListener("click", () => dismissOffer(key));
-  btns.appendChild(ok);
-  btns.appendChild(no);
+  appRowButton(btns, "Install", "icon primary", () => acceptOffer(key));
+  appRowButton(btns, "Dismiss", "icon", () => dismissOffer(key));
   li.appendChild(btns);
   return li;
 }
@@ -1242,23 +1177,13 @@ function buildOfferRow(key, offer) {
 async function loadDroppedFile(file) {
   if (!file) return;
   const bytes = new Uint8Array(await file.arrayBuffer());
-  const peeked = peekMeta(bytes);
-  if (!peeked) {
-    const msg = "Not a valid app bundle (.skb)";
-    shellPrint(msg, "err");
-    showAppsNotice(msg, "err");
-    return;
-  }
-  // Dropping a file IS the consent (§12.4) — the same one-shot approval the
-  // (deleted) addAppFromWasm used to grant a just-built bundle, now granted to
-  // whatever already-signed bundle the user picked.
-  pendingApprovals.add(peeked.moduleHash);
+  // Dropping a file IS the consent (§12.4), granted to whatever already-signed bundle
+  // the user picked. One this shell will not run is refused here, with the reason.
   try {
     const record = await applyAppBundle(bytes);
     shellPrint(`Installed ${record.name} ${record.version}`, "sys");
     setActiveApp(record.key);
   } catch (err) {
-    pendingApprovals.delete(peeked.moduleHash);
     shellPrint(`Install failed: ${err.message}`, "err");
     showAppsNotice(`Install failed: ${err.message}`, "err");
   }
@@ -1296,82 +1221,44 @@ dropzone.addEventListener("drop", async (e) => {
 });
 openAppsBtn.addEventListener("click", () => showTab("apps"));
 
-// ─── iframe protocol: handshake + outgoing messages ────────────────────
-window.addEventListener("message", async (ev) => {
-  if (!frame.contentWindow || ev.source !== frame.contentWindow) return;
-  const msg = ev.data;
-  if (!msg) return;
+// ─── what a view says to the shell ─────────────────────────────────────
+//
+// The view's half of the contract (app-api.js). `ready` and `call` are about its own app:
+// the shell passes bytes between a view and its guest and reads none of them. The other
+// two ask something of the shell, about things that are the shell's, a room or a peer
+// named by its id in hex: `conv` and `contact`. A view is any author's page, so each is
+// checked for shape, and neither hands it anything back.
 
-  if (msg.type === "ready") {
-    iframeReady = true;
-    frame.contentWindow.postMessage(
-      { type: "init", pk: myKeys.publicKey }, "*");
-    for (const payload of renderQueue) {
-      frame.contentWindow.postMessage({ type: "render", payload }, "*");
-    }
-    renderQueue.length = 0;
-    // The fresh page has not been told who is linked, which rooms there are, or been
-    // heard on which conversation it has open.
-    lastPeersKey = lastRoomsKey = null;
-    openConv = undefined;
-    postRoomsToApp();
+/** Whether `v` is 32 bytes as lowercase hex: a key, or a room's id. */
+const isHex32 = (v) => typeof v === "string" && HEX32_RE.test(v);
+
+window.addEventListener("message", (ev) => {
+  const rec = [...installedApps.values()].find((r) => r.frame && r.frame.contentWindow === ev.source);
+  const msg = ev.data;
+  if (!rec || !msg) return;
+
+  if (msg.type === "ready") { void viewReady(rec); return; }
+
+  // Bytes for the app's own guest. The answer is render bytes for the view that asked: a
+  // local echo, say, drawn the way a peer's frame is.
+  if (msg.type === "call") {
+    if (!(msg.bytes instanceof Uint8Array)) return;
+    invokeApp(rec, APP_OP_UI, msg.bytes)
+      .then((answer) => deliverRender(rec, answer), (err) => shellPrint(`${rec.name}: ${err.message}`, "err"));
     return;
   }
 
-  // The conversation open in the app: a room, one peer, or none. A call started now is
+  // The conversation open in the view: a room, one peer, or none. A call started now is
   // with it (`callPeers`).
   if (msg.type === "conv") {
-    openConv = msg.room ? { room: bytesToHex(new Uint8Array(msg.room)) }
-      : msg.to ? { to: bytesToHex(new Uint8Array(msg.to)) } : null;
+    rec.conv = isHex32(msg.room) ? { room: msg.room } : isHex32(msg.to) ? { to: msg.to } : null;
     return;
   }
 
-  if (msg.type === "send" && typeof msg.chatType === "number" && msg.body) {
-    const active = activeAppKey ? installedApps.get(activeAppKey) : null;
-    if (!active) return;
-    // Send under the protocol the active app CLAIMS (§12.10) — the same id its manifest
-    // signed, so a peer routes the frame to whatever app it installed that claims the
-    // same one, which may be a different author's implementation entirely. That is what
-    // the id is for: it names the conversation, not the code.
-    const proto = active.protocols[0];
-    if (!proto) return;
-    const body = msg.body instanceof Uint8Array ? msg.body : new Uint8Array(msg.body);
-    const chatBytes = new Uint8Array(1 + body.length);   // [chatType][body]
-    chatBytes[0] = msg.chatType & 0xff;
-    chatBytes.set(body, 1);
-    // A nick is this node's state, not one message: kept, echoed locally, and told to
-    // every linked peer, now and as each one links (`tellNick`). A new one makes every
-    // peer's copy stale, so nobody counts as told any more.
-    if (msg.chatType === 0x02) {
-      lastSentNickBody = { proto, body };
-      nickToldPeers.clear();
-      pageNickTold.clear();
-      renderLocal(active, chatBytes);
-      tellNick(await linkedPeers());
-      return;
-    }
-    // The nick also rides in front of a chat message for a peer that has not heard it yet,
-    // one that linked since the last poll, so it learns the name before it renders the
-    // message. broadcastToPeers does the per-peer part.
-    let nickPrefix = null;
-    if (lastSentNickBody?.proto === proto) {
-      nickPrefix = new Uint8Array(1 + lastSentNickBody.body.length);
-      nickPrefix[0] = 0x02;
-      nickPrefix.set(lastSentNickBody.body, 1);
-    }
-    // Fire-and-forget over Transport — one plane — to whom the message is for: one peer
-    // (`to`) or a room's members (`room`). With neither it goes to every linked peer, which
-    // is for an announcement like the nick, not for a message. A direct message makes its
-    // addressee a contact, so the link to it outlives any shared room.
-    const only = msg.to ? bytesToHex(new Uint8Array(msg.to)) : null;
-    if (only && !contacts.has(only)) addContact(only, null);
-    const among = msg.room ? membersOfRoom(bytesToHex(new Uint8Array(msg.room))) : null;
-    broadcastToPeers(proto, chatBytes, { nickPrefix, only, among });
-    // Local echo: run through the app's guest, render if active. Not awaited —
-    // the echo is a view concern, and the send has already gone out; letting it
-    // gate the lines below would make a guest failure also drop the presence
-    // cache. `renderLocal` reports its own failure.
-    renderLocal(active, chatBytes);
+  // Make a peer a contact, so the link to it outlives any shared room: what a view asks
+  // before it writes to one peer directly.
+  if (msg.type === "contact") {
+    if (isHex32(msg.peer) && !contacts.has(msg.peer)) addContact(msg.peer, null);
   }
 });
 
@@ -1392,54 +1279,47 @@ window.addEventListener("message", async (ev) => {
 // message author. No per-message signature.
 // ---------------------------------------------------------------------------
 
-let lastSentNickBody = null;   // {proto, body} — this node's nick, as its chat app last set it
-// The peers whose chat app already carries the nick above, and those whose page does: a
-// page shows it in its Network tab, whatever chat app it runs (`tellNick`).
-const nickToldPeers = new Set();
-const pageNickTold = new Set();
+// A nick is the shell's, not an app's: what this node calls itself, set on the Network
+// tab, and what each peer calls itself. The pages tell each other on their own channel
+// (`{ nick }` on call/v1, `onPageSignal`), so a name is the same in every app and needs
+// none installed, and every app reads it out of its context (`contextNow`).
 
-/** Drop everyone the transport no longer counts as linked. This is the whole reason the
- *  told-sets are not a peer mirror: they hold no opinion about peers, they are only ever
- *  narrowed to an answer the transport guest gave — so a peer that dropped and came back
- *  (a reloaded tab keeps its id but starts with an empty nick table) is simply absent and
- *  gets told again. Run on every answer the page asks for, the status poll's included, so
- *  the window in which a returning peer looks already-told is one poll interval. */
-function pruneNickTold(peers) {
-  if (nickToldPeers.size === 0 && pageNickTold.size === 0) return;
-  const linked = new Set(peers);
-  for (const told of [nickToldPeers, pageNickTold]) {
-    for (const id of told) if (!linked.has(id)) told.delete(id);
-  }
-}
+/** The linked peers whose page has heard this node's nick. It holds no opinion about
+ *  peers: it is only ever narrowed to an answer the transport gave, so a peer that dropped
+ *  and came back (a reloaded tab keeps its key and forgets what it was told) is absent,
+ *  and is told again. */
+const nickTold = new Set();
 
-/** Give each linked peer that has not heard it this node's nick. Its page is told on the
- *  pages' own channel, an empty nick for none, and shows it in its Network tab; its chat
- *  app is sent the announcement, so a peer that links after the nick was set has it
- *  without waiting for a message. A peer counts as told before the send, so nothing tells
- *  it twice. */
+/** Give each linked peer that has not heard it this node's nick, an empty one for none. A
+ *  peer counts as told before the send, so nothing tells it twice. Run on every poll's
+ *  answer, so a peer that links is told within a poll interval. */
 function tellNick(peers) {
-  pruneNickTold(peers);
-  const nick = lastSentNickBody ? new TextDecoder().decode(lastSentNickBody.body) : "";
-  const signal = new TextEncoder().encode(JSON.stringify({ nick }));
+  for (const id of [...nickTold]) if (!peers.includes(id)) nickTold.delete(id);
+  const signal = new TextEncoder().encode(JSON.stringify({ nick: myNick }));
   for (const peerId of peers) {
-    if (pageNickTold.has(peerId)) continue;
-    pageNickTold.add(peerId);
-    void sendSignal(peerId, signal).catch(() => pageNickTold.delete(peerId));
-  }
-  if (!lastSentNickBody) return;
-  const { proto, body } = lastSentNickBody;
-  const key = shell.resolve(proto);
-  const sender = key ? installedApps.get(key) : null;
-  if (!sender) return;
-  const frame = new Uint8Array(1 + body.length);
-  frame[0] = 0x02;
-  frame.set(body, 1);
-  for (const peerId of peers) {
-    if (nickToldPeers.has(peerId)) continue;
-    nickToldPeers.add(peerId);
-    void sendFrame(sender, peerId, proto, frame).catch(() => nickToldPeers.delete(peerId));
+    if (nickTold.has(peerId)) continue;
+    nickTold.add(peerId);
+    void sendSignal(peerId, signal).catch(() => nickTold.delete(peerId));
   }
 }
+
+/** Set this node's nick, or with "" have none. Every peer's copy is stale, so nobody
+ *  counts as told any more, and the apps hear of it in their context. */
+function setMyNick(nick) {
+  myNick = nick.trim().slice(0, MAX_NICK);
+  if (myNick) sessionStorage.setItem("chat.nick", myNick);
+  else sessionStorage.removeItem("chat.nick");
+  nickInput.value = myNick;
+  nickTold.clear();
+  tellNick(linkedNow);
+  postContext();
+  shellPrint(myNick ? `You are now known as ${myNick}.` : "You no longer have a nick.", "sys");
+}
+nickInput.value = myNick;
+nickSetBtn.addEventListener("click", () => setMyNick(nickInput.value));
+nickInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); setMyNick(nickInput.value); }
+});
 
 // Nothing here reloads the transport bundle or replaces its sockets: the page says who it
 // wants linked, and the transport links them, a peer at a time (`syncPeers`).
@@ -1527,7 +1407,7 @@ async function leaveRoom(name) {
   hangUpUnwanted(before);
 }
 
-/** What a peer is shown as: the nick the app knows it by, or the start of its key. */
+/** What a peer is shown as: the nick it told this page, or the start of its key. */
 function peerLabel(key) {
   return peerNicks.get(key) ?? key.slice(0, 8);
 }
@@ -1632,7 +1512,7 @@ function syncPeers() {
     if (!wanted.has(key)) wanted.set(key, { since: performance.now(), silent: false, late: false });
     teachPeer(key);
   }
-  postRoomsToApp();
+  postContext();
 }
 
 /** How long a wanted peer may stay unlinked before the wait for it is over: one this node
@@ -1722,10 +1602,9 @@ const videoTiles   = document.getElementById("video-tiles");
 let localStream = null;
 let micEnabled = true;
 const remoteTiles = new Map(); // pkHex -> { wrap, video, stream }
-// The conversation open in the app, `{ room }` or `{ to }` by id in hex, null for none, and
-// undefined for an app that never says. `callScope` is what it was when the call in
-// progress started.
-let openConv;
+// The conversation the call in progress is with: what the app shown said was open when the
+// call started (its record's `conv`), `{ room }` or `{ to }` by id in hex, null for none,
+// and undefined for an app that never says, or with no app shown.
 let callScope;
 
 /** Who of the linked peers the call in progress is with: a room's members, or one peer.
@@ -1849,7 +1728,7 @@ async function startCall() {
   ensureLocalTile();
   // Published to the open conversation's linked peers now, and to any of them that links
   // later (pollPeerViews).
-  callScope = openConv;
+  callScope = installedApps.get(activeAppKey)?.conv;
   media.start(localStream.getTracks().map((track) => ({ track, stream: localStream })), callPeers(await linkedPeers()));
   const joined = remoteTiles.size > 0;
   updateCallStatus();
@@ -2290,33 +2169,8 @@ if (savedRelayUrl) connectRelay();
 // Presentation-only polling: authenticated peer truth stays in the transport guest. The
 // page asks for the current set to render counts and routes; it never mirrors transitions or
 // drives reconnection/fan-out from a client-side Set.
-// The linked set and the contacts, handed to the app's page so it can offer a direct chat
-// with someone who has not spoken yet. Presentation only, like the pill: posted when
-// either changes.
-let lastPeersKey = null;
-function postPeersToApp(peers) {
-  const key = [...peers].sort().join(",") + "|" + [...contacts.keys()].sort().join(",");
-  if (!iframeReady || !frame.contentWindow || key === lastPeersKey) return;
-  lastPeersKey = key;
-  frame.contentWindow.postMessage(
-    { type: "peers", peers: peers.map(hexToBytes), contacts: [...contacts.keys()].map(hexToBytes) }, "*");
-}
-
-// The joined rooms and who the relay says is in each, handed to the app's page: it files a
-// room message under its room, and drops one whose sender is not in that room. Posted when
-// they change.
-let lastRoomsKey = null;
-function postRoomsToApp() {
-  const key = JSON.stringify([...joinedRooms].map(([name, r]) => [name, [...r.members].sort()]));
-  if (!iframeReady || !frame.contentWindow || key === lastRoomsKey) return;
-  lastRoomsKey = key;
-  frame.contentWindow.postMessage({
-    type: "rooms",
-    rooms: [...joinedRooms].map(([name, r]) =>
-      ({ id: hexToBytes(r.id), name: friendlyRoom(name), members: [...r.members].map(hexToBytes) })),
-  }, "*");
-}
-
+// What it hears is also what the apps are told is linked (`postContext`), with the rooms
+// and the contacts: each app's guest is told when any of them changes.
 async function pollPeerViews() {
   // A failed tick is swallowed rather than logged: this runs every 750ms, and the next
   // one either succeeds or the pill simply keeps its last value. What must NOT happen is
@@ -2348,9 +2202,9 @@ async function pollPeerViews() {
     tellPeers(peers);
     updatePeerPill(routes);
     renderPeerList(routes);
+    linkedNow = peers;
     tellNick(peers);
-    postPeersToApp(peers);
-    postRoomsToApp();
+    postContext();
     media.sync(callPeers(peers));
     if (localStream) await updateCallStatus(callPeers(peers).length);
   } catch {}

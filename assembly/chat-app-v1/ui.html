@@ -191,39 +191,43 @@
 <script>
 // chat-app v1 UI. Loaded into a sandboxed iframe by the shell.
 //
-// Protocol (postMessage with parent shell):
-//   parent → us: { type: "init",   pk: Uint8Array(32) }
-//   parent → us: { type: "rooms",  rooms: { id: Uint8Array(32), name: string, members: Uint8Array(32)[] }[] }
-//                  the rooms this node is in, and who the relay says is in each
-//   parent → us: { type: "render", payload: Uint8Array }
-//                  payload = [type u8][pk_len u8][pk ..][body ..]
-//   us → parent: { type: "ready" }              once the UI is wired up
-//   us → parent: { type: "send", chatType: 5,   body: Uint8Array, room: Uint8Array(32) }
-//   us → parent: { type: "conv", room?: Uint8Array(32) }
-//                  the room being written to, which is who a call started now is with
+// With the shell (browser/app-api.js), by postMessage:
+//   us → shell: { type: "ready" }              once the UI is wired up
+//   us → shell: { type: "call", bytes }        a frame for this app's guest, which sends it
+//   us → shell: { type: "conv", room?: hex }   the room being written to, which is who a
+//                                              call started now is with
+//   shell → us: { type: "render", payload }    what this app's guest answered
 //
-// A message is room text, body = [room 32][utf-8 text], and goes to that room's members.
+// With this app's guest (guest.js), as bytes the shell does not read. A frame is room
+// text, [5][room 32][utf-8 text], and the guest sends it to that room's members. A render
+// is one of:
+//   [0][JSON]                             the node's context, ids in hex:
+//                                         { me, nick, rooms: [{ id, name, members }], nicks, … }
+//   [5][pk_len u8][pk ..][room 32][text]  a message as the module drew it, a peer's or
+//                                         this node's own
+//
 // The one log shows every joined room, each line tagged with its room; the picker in the
 // header says which room is written to.
+const RENDER_CONTEXT = 0x00;
 const CHAT_TYPE_ROOM_TEXT = 0x05;
 
 const log = document.getElementById("log");
 const form = document.getElementById("form");
 const msgInput = document.getElementById("msg");
 const roomSelect = document.getElementById("room");
-let myPk = null;
-// The rooms this node is in, as the shell says: room id hex → { id, name, members },
-// `members` the key hex of everyone the relay lists there.
+// This node's key in hex, once the first context says.
+let me = null;
+// The rooms this node is in, as the context says: room id hex → name.
 const rooms = new Map();
+// What each peer calls itself, by key hex, and this node under its own key. A nick is the
+// shell's, so even a text-only app shows it.
+let nicks = {};
 
 function toHex(bytes) {
   return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
 }
-function shortPk(pk) { return toHex(pk.slice(0, 4)); }
-function arraysEqual(a, b) {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
+function fromHex(hex) {
+  return Uint8Array.from(hex.match(/../g), h => parseInt(h, 16));
 }
 function isAtBottom() {
   return log.scrollHeight - log.scrollTop - log.clientHeight < 32;
@@ -250,63 +254,67 @@ function printMessage(tag, text, cls) {
   appendLine(line);
 }
 
+/** The node's context: who this node is, and the rooms it is in. */
+function onContext(ctx) {
+  if (me === null) print(`You are ${ctx.me.slice(0, 8)}. Join a room on the Network tab to start chatting.`, "sys");
+  me = ctx.me;
+  nicks = { ...ctx.nicks, ...(ctx.nick ? { [ctx.me]: ctx.nick } : {}) };
+  const was = roomSelect.value;
+  rooms.clear();
+  roomSelect.replaceChildren();
+  for (const r of ctx.rooms) {
+    rooms.set(r.id, r.name);
+    roomSelect.appendChild(new Option(r.name, r.id));
+  }
+  // Keep writing to the same room while this node is still in it.
+  if (rooms.has(was)) roomSelect.value = was;
+  roomSelect.hidden = rooms.size === 0;
+  openRoom();
+}
+
 window.addEventListener("message", (ev) => {
   if (ev.source !== window.parent) return;
   const msg = ev.data;
-  if (!msg) return;
-  if (msg.type === "init") {
-    myPk = new Uint8Array(msg.pk);
-    print(`You are ${shortPk(myPk)}. Join a room on the Network tab to start chatting.`, "sys");
-  } else if (msg.type === "rooms") {
-    const was = roomSelect.value;
-    rooms.clear();
-    roomSelect.replaceChildren();
-    for (const r of msg.rooms) {
-      const id = new Uint8Array(r.id), hex = toHex(id);
-      rooms.set(hex, { id, name: r.name, members: new Set(r.members.map(m => toHex(new Uint8Array(m)))) });
-      roomSelect.appendChild(new Option(r.name, hex));
-    }
-    // Keep writing to the same room while this node is still in it.
-    if (rooms.has(was)) roomSelect.value = was;
-    roomSelect.hidden = rooms.size === 0;
-    openRoom();
-  } else if (msg.type === "sys") {
-    print(msg.text, "sys");
-  } else if (msg.type === "render") {
-    const payload = new Uint8Array(msg.payload);
-    let p = 0;
-    const type = payload[p++];
-    const pkLen = payload[p++];
-    if (p + pkLen > payload.length) return;
-    const pk = payload.slice(p, p + pkLen); p += pkLen;
-    const body = payload.slice(p);
-    if (type !== CHAT_TYPE_ROOM_TEXT || body.length < 32) return;
-    // Not shown: a message for a room this node is not in, or from a peer who is not in it.
-    const isMe = myPk && arraysEqual(pk, myPk);
-    const room = rooms.get(toHex(body.slice(0, 32)));
-    if (!room || (!isMe && !room.members.has(toHex(pk)))) return;
-    printMessage(`#${room.name} ${shortPk(pk)}`, new TextDecoder().decode(body.slice(32)), isMe ? "me" : "peer");
+  if (!msg || msg.type !== "render") return;
+  const payload = new Uint8Array(msg.payload);
+  if (payload[0] === RENDER_CONTEXT) {
+    onContext(JSON.parse(new TextDecoder().decode(payload.subarray(1))));
+    return;
   }
+  let p = 0;
+  const type = payload[p++];
+  const pkLen = payload[p++];
+  if (p + pkLen > payload.length) return;
+  const pk = toHex(payload.slice(p, p + pkLen)); p += pkLen;
+  const body = payload.slice(p);
+  if (type !== CHAT_TYPE_ROOM_TEXT || body.length < 32) return;
+  // The guest draws a peer's message only from someone in its room; what is left to tell
+  // here is which room that is.
+  const room = rooms.get(toHex(body.slice(0, 32)));
+  if (room === undefined) return;
+  const who = nicks[pk] ? `${nicks[pk]} (${pk.slice(0, 8)})` : pk.slice(0, 8);
+  printMessage(`#${room} ${who}`, new TextDecoder().decode(body.slice(32)), pk === me ? "me" : "peer");
 });
 
 /** Tell the shell which room is written to, or that there is none. */
 function openRoom() {
-  const room = rooms.get(roomSelect.value);
-  msgInput.placeholder = room ? `Message #${room.name}` : "Join a room to write";
-  window.parent.postMessage(room ? { type: "conv", room: room.id } : { type: "conv" }, "*");
+  const room = roomSelect.value;
+  msgInput.placeholder = rooms.has(room) ? `Message #${rooms.get(room)}` : "Join a room to write";
+  window.parent.postMessage(rooms.has(room) ? { type: "conv", room } : { type: "conv" }, "*");
 }
 roomSelect.addEventListener("change", openRoom);
 
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = msgInput.value;
-  const room = rooms.get(roomSelect.value);
-  if (!text || !room) return;
+  const room = roomSelect.value;
+  if (!text || !rooms.has(room)) return;
   const content = new TextEncoder().encode(text);
-  const body = new Uint8Array(32 + content.length);
-  body.set(room.id, 0);
-  body.set(content, 32);
-  window.parent.postMessage({ type: "send", chatType: CHAT_TYPE_ROOM_TEXT, body, room: room.id }, "*");
+  const frame = new Uint8Array(1 + 32 + content.length);
+  frame[0] = CHAT_TYPE_ROOM_TEXT;
+  frame.set(fromHex(room), 1);
+  frame.set(content, 33);
+  window.parent.postMessage({ type: "call", bytes: frame }, "*");
   msgInput.value = "";
   msgInput.focus();
 });

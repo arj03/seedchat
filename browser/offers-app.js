@@ -1,15 +1,16 @@
-// The offers app SHAPE, in the same spirit as chat-app.js: what the offers app's guest
-// program is, and how much authority it holds. Both the browser shell (which loads the
-// boot bundle built from it and reads its records) and scripts/build-boot-bundles.mjs
-// (which signs it) read it here, so the guest source that gets SIGNED is written once.
+// The offers app SHAPE: what the offers app's guest program is, and how much authority it
+// holds. Both the browser shell (which loads the boot bundle built from it and reads its
+// records) and scripts/build-boot-bundles.mjs (which signs it) read it here, so the guest
+// source that gets SIGNED is written once.
 //
 // `offer/v1` carries a signed bundle from one browser to another, and the app that would
 // handle it is the thing being offered — so until someone accepts an offer there is no app
 // to route it to, and somebody already installed at boot has to own the name. That is this
-// app's whole reason to exist: a keyspace and a claim, nothing else. It holds no network, no
-// signing, no install — accepting an offer, and installing what it names, stays the page's
-// job. Composition is several small bundles, not one god shell: this one owns exactly the
-// name a peer's offer arrives on and the fs keyspace its records live in.
+// app's whole reason to exist: it owns `offer/v1` in both directions. A peer's offer lands
+// in its keyspace, and this node's own leave through it, because only a guest can call the
+// network and the shell should not borrow some other app's guest to do it. It holds no
+// signing and no install — accepting an offer, and installing what it names, stays the
+// page's job. Composition is several small bundles, not one god shell.
 
 /** The wire protocol a peer's offer travels under (§12.10) — an ordinary id, claimed by
  *  the boot bundle this shell builds from this file (scripts/build-boot-bundles.mjs).
@@ -18,19 +19,22 @@
  *  an app installed that could otherwise receive it. */
 export const OFFER_PROTO = "offer/v1";
 
-/** This app's id, and its manifest's `app`. A literal, not a grammar like chat's
- *  (`chat-app.js` `APP_ID`): there is exactly one offers app, built once by this shell's
- *  own scripts/build-boot-bundles.mjs, never by a peer's bundle or a user's drag-and-drop. */
+/** This app's id, and its manifest's `app`. A literal: there is exactly one offers app,
+ *  built once by this shell's own scripts/build-boot-bundles.mjs, never by a peer's bundle
+ *  or a user's drag-and-drop. */
 export const OFFERS_APP = "offers";
 
-/** The whole authority the offers guest holds (§12.2): a keyspace, nothing more. No
- *  network, no signing, no install — accepting what lands here and installing it is the
- *  page's job, never this guest's. The manifest declares the SERVICE, never its finer-
- *  grained methods: naming `fs` grants the guest `fs/get` and `fs/put` alike, and a
- *  manifest naming `fs/get` is refused at load (seedkernel §12.2). `crypto/blake2b`
- *  needs no entry here: a `crypto/*` name is ungated, not a grant (seedkernel §12.1), so
- *  it never appears in `requires`. */
-export const OFFERS_REQUIRES = ["fs"];
+/** The whole authority the offers guest holds (§12.2): a keyspace for the offers that
+ *  arrive, and the network for the ones this node makes. No signing, no install —
+ *  accepting what lands here and installing it is the page's job, never this guest's. The
+ *  manifest declares the SERVICE, never its finer-grained methods: naming `fs` grants the
+ *  guest `fs/get` and `fs/put` alike, and a manifest naming `fs/get` is refused at load
+ *  (seedkernel §12.2). `crypto/blake2b` needs no entry here: a `crypto/*` name is ungated,
+ *  not a grant (seedkernel §12.1), so it never appears in `requires`. */
+export const OFFERS_REQUIRES = ["fs", "_net"];
+
+/** The page's one local op: `[to 32][bundle …]`, sent to that peer under `OFFER_PROTO`. */
+export const OFFERS_OP_SEND = "send";
 
 /** The prefix every record this guest writes lives under, within its own fs scope
  *  (§12.2). Dot, not the `offers/` a directory reading would suggest: an fs key is a
@@ -41,38 +45,37 @@ export const OFFERS_REQUIRES = ["fs"];
  *  peer or two different ones, lands on the same key rather than piling up duplicates. */
 export const OFFERS_KEY_PREFIX = "offers.";
 
-/** The guest this shell signs into the boot bundle (scripts/build-boot-bundles.mjs). Its
- *  `handle` has exactly one caller: a peer's inbound `offer/v1` frame, `[from 32][blob …]`
- *  — the host's own attribution prepended to the bundle in transit. Nothing else reaches
- *  it: it declares no `timer` service, so it is never re-entered for a fired deadline, and
- *  nothing on this node calls it back as a loopback, so there is no host-op vocabulary to
- *  frame here and no `op-frame` import (contrast chat-app.js, whose guest also serves a
- *  local `send` op on the same `handle`).
+/** The guest this shell signs into the boot bundle (scripts/build-boot-bundles.mjs).
+ *  `prelude` is the guest source in front of it: seedkernel's op-frame and the network
+ *  library (assembly/guest-lib/net.js). `handle` has two callers:
  *
- *  It hashes the blob (`crypto/blake2b` — ungated, not a grant), and that hash is both
- *  the dedupe key and the guest's answer. It `fs/get`s the record first: an existing one
- *  means this exact blob already arrived, so it returns empty rather than writing a
- *  duplicate or re-announcing an offer already pending. A fresh blob is `fs/put` under
- *  `[from 32][blob]`, and the hash comes back as the answer — which is exactly what the
- *  page's `onInbound` receives (`InstallOptions.onInbound`, seedkernel §12.10): a
+ *  - the page's `send` op, `[to 32][bundle …]` — handed to the network under `offer/v1`,
+ *    fire-and-forget: an offer is not a round trip, and its answer is the peer installing
+ *    it or not.
+ *  - a peer's inbound `offer/v1` frame, `[from 32][blob …]` — the host's own attribution
+ *    prepended to the bundle in transit. It declares no `timer` service, so it is never
+ *    re-entered for a fired deadline.
+ *
+ *  For a peer's frame it hashes the blob (`crypto/blake2b` — ungated, not a grant), and
+ *  that hash is both the dedupe key and the guest's answer. It `fs/get`s the record first:
+ *  an existing one means this exact blob already arrived, so it returns empty rather than
+ *  writing a duplicate or re-announcing an offer already pending. A fresh blob is `fs/put`
+ *  under `[from 32][blob]`, and the hash comes back as the answer — which is exactly what
+ *  the page's `onInbound` receives (`InstallOptions.onInbound`, seedkernel §12.10): a
  *  non-empty answer is a fresh offer's hash, telling the page to go read the record it
  *  just wrote; an empty one is silence, because there is nothing new to show. There is no
- *  push from a guest to the page that installed it on any other seam, so the answer doubling as the
- *  notification is the whole mechanism. Every `host.call` is awaited, including the
- *  hash: seedkernel's seam is uniformly asynchronous even when a backend computes its
- *  answer inline. */
-export function offersGuestSource() {
+ *  push from a guest to the page that installed it on any other seam, so the answer
+ *  doubling as the notification is the whole mechanism. Every `host.call` is awaited,
+ *  including the hash: seedkernel's seam is uniformly asynchronous even when a backend
+ *  computes its answer inline. */
+export function offersGuestSource(prelude) {
   return `
-"use strict";
+${prelude}
+
+const PROTO = ${JSON.stringify(OFFER_PROTO)};
 
 // Byte helpers only — no TextEncoder/TextDecoder in a zero-authority realm (mirrors the
 // transport guest's own transport/src/util.js).
-const HEX = "0123456789abcdef";
-function toHex(b) {
-  let s = "";
-  for (let i = 0; i < b.length; i++) s += HEX[b[i] >>> 4] + HEX[b[i] & 15];
-  return s;
-}
 function utf8Encode(s) {
   const out = [];
   for (let i = 0; i < s.length; i++) {
@@ -87,13 +90,15 @@ function writeU32BE(out, off, v) {
   out[off] = v >>> 24; out[off + 1] = (v >>> 16) & 0xff; out[off + 2] = (v >>> 8) & 0xff; out[off + 3] = v & 0xff;
 }
 
-// The host's inbound shape is handle([caller 32][body …]): attribution only. This
-// guest has exactly one caller — a peer's offer/v1 frame — so unlike chat-app.js it never
-// has to tell host/timer/peer apart: the whole body after the 32-byte prefix is the
-// offered blob.
+// The host's inbound shape is handle([caller 32][body …]): attribution only. From the
+// host itself the body is the page's op; from a peer it is the offered blob, whole.
 async function handle(arg) {
-  const from = arg.subarray(0, 32);
-  const blob = arg.subarray(32);
+  const { fromHost, caller: from, body: blob } = callerOf(arg);
+  if (fromHost) {
+    const { op, args: p } = readOp(blob);
+    if (op !== ${JSON.stringify(OFFERS_OP_SEND)}) return new Uint8Array(0);
+    return await netSend(p.subarray(0, 32), PROTO, p.subarray(32));
+  }
   // crypto/blake2b takes [outLen][keyLen][key][msg]: the unkeyed 32-byte hash.
   const hashArg = new Uint8Array(2 + blob.length);
   hashArg[0] = 32;

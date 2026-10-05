@@ -1,11 +1,12 @@
 // Headless smoke test: does chat still work on the seedkernel it depends on?
 //
-// Replays the boot path browser/chat-shell.js actually runs — the bootShell
-// assembly + its boot-selected transport + consent-gated chat install +
+// Replays the boot path browser/shell.js actually runs — the bootShell
+// assembly + its boot-selected transport + consent-gated app install +
 // protocol dispatch — minus the browser-only WebRTC/DOM. Two shells link through
-// injected ChannelFactory sinks (the shape RtcNetwork implements), a real
-// chat-app-v1.wasm round-trips a message, and the offers app (a second boot bundle,
-// browser/offers-app.js) round-trips an offer. Run it after a seedkernel update:
+// injected ChannelFactory sinks (the shape RtcNetwork implements), the real chat apps
+// round-trip messages through the shell's two ops (browser/app-api.js), v1 is upgraded
+// to v2 in place, and the offers app (a second boot bundle, browser/offers-app.js)
+// round-trips an offer. Run it after a seedkernel update:
 //
 //   node scripts/smoke.mjs
 //
@@ -34,13 +35,18 @@ const { transportBundleBytes, TRANSPORT_SERVICE } = await import("seedkernel-was
 const {
   verifyBundle, genesisHash,
 } = await import("seedkernel-wasm/bundle");
-const { signBundle, guestOpFraming, hybridAuthorKeysFromSeed }
+const { signBundle, authorBundle, guestOpFraming, hybridAuthorKeysFromSeed }
   = await import("seedkernel-wasm/bundle-author");
-// The chat app shape the offline builder authors — same guest source, same authority set.
-const { chatGuestSource, isChatApp, CHAT_APP_REQUIRES, CHAT_PROTO, CHAT_OP_SEND, NET_PROTO } = await import("../browser/chat-app.js");
+// The shell's contract with its apps: the gate, the consent digest, the context and the two
+// ops. The same module the browser shell runs, so what is exercised here is its contract.
+const { APP_API, APP_OP_CONTEXT, APP_OP_UI, NET_PROTO, appFacts, bundleDigest, contextJson }
+  = await import("../browser/app-api.js");
+// An app's source directory, read the way scripts/build-app-bundle.mjs reads it: the same
+// guest sources, view and module, so this test signs the bytes the builder would.
+const { readAppSource } = await import("./app-source.mjs");
 // The offers app shape — same guest source scripts/build-boot-bundles.mjs signs into
-// bundle/offers.skb, read directly off disk below like chat-app-v1.wasm already is.
-const { OFFER_PROTO, OFFERS_KEY_PREFIX } = await import("../browser/offers-app.js");
+// bundle/offers.skb, read directly off disk below.
+const { OFFER_PROTO, OFFERS_KEY_PREFIX, OFFERS_OP_SEND } = await import("../browser/offers-app.js");
 // The identity the page pins its offers boot bundle by, off the generated artifact the
 // page itself reads — so `admit` below is the browser's gate, not a stand-in for it.
 const { OFFERS_AUTHOR_HEX, OFFERS_APP } = await import("../browser/offers-bundle.js");
@@ -57,22 +63,30 @@ const { writeOp, OpArgs } = await import("seedkernel-wasm/op-frame");
 const TRANSPORT_BYTES = transportBundleBytes();
 
 const toHex = (b) => Buffer.from(b).toString("hex");
+const fromHex = (h) => Uint8Array.from(Buffer.from(h, "hex"));
+const utf8 = (s) => new TextEncoder().encode(s);
+const text = (b) => new TextDecoder().decode(b);
+const concat = (...parts) => Uint8Array.from(Buffer.concat(parts.map((p) => Buffer.from(p))));
 
-// ── the chat-shell admit gate, in shape ────────────────────────────────────────
-// ONE admission predicate (§12.5), and the one branch that is actually chat's: the
+// ── the shell admit gate, in shape ────────────────────────────────────────
+// ONE admission predicate (§12.5), and the one branch that is actually the page's: the
 // consent gate. The transport never reaches it — bootShell installs the selected blob
 // at boot, and ordinary loading cannot acquire `link` — so the FORGED-transport check
 // below exercises the rule the browser shell actually runs under.
 const pendingApprovals = new Set();
+/** What a consent names (shell.js `peekBundle`): the digest of the whole bundle. */
+const digestOf = (v) => toHex(bundleDigest(v, (bytes) => genesisHash(sodium, bytes)));
+/** Consent to one bundle, as dropping it or accepting its offer does in the browser. */
+const consent = (blob) => pendingApprovals.add(digestOf(verifyBundle(sodium, blob)));
 function admit(v) {
   // The offers boot bundle is pinned to the exact author and app this build produced,
-  // exactly as chat-shell.js pins it: bytes the deployment shipped, loaded before any
+  // exactly as shell.js pins it: bytes the deployment shipped, loaded before any
   // dialog could run, so there is nothing for a consent click to decide.
   if (toHex(v.author) === OFFERS_AUTHOR_HEX && v.manifest.app === OFFERS_APP) return true;
   if (toHex(v.author) === CALLS_AUTHOR_HEX && v.manifest.app === CALLS_APP) return true;
-  const bytesHashHex = v.modules.length > 0 ? toHex(genesisHash(sodium, v.modules[0].wasm)) : "";
-  if (!pendingApprovals.has(bytesHashHex)) return false;
-  pendingApprovals.delete(bytesHashHex);
+  const hash = digestOf(v);
+  if (!pendingApprovals.has(hash)) return false;
+  pendingApprovals.delete(hash);
   return true;
 }
 
@@ -150,7 +164,7 @@ const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 /** The peers a node holds an authenticated link to. Asked of the transport GUEST, through
  *  the host's own door into a co-resident `services` claim (`Shell.call`, seedkernel
  *  §12.10) — the same call seedkernel's CLI makes for a cohort, and the same one
- *  chat-shell.js's `linkedPeers` makes for its peer pill. The driver answers nothing
+ *  shell.js's `linkedPeers` makes for its peer pill. The driver answers nothing
  *  peer-shaped: links are the guest's, so this is a round trip through its realm.
  *  `null` is "nothing claims that id" — a node with no transport standing. */
 async function peersOf(shell) {
@@ -162,7 +176,7 @@ async function peersOf(shell) {
   return out;
 }
 
-/** How a node reaches each linked peer: the transport's `routes` op, which chat-shell.js's
+/** How a node reaches each linked peer: the transport's `routes` op, which shell.js's
  *  `peerRoutes` reads for the Network tab's peer list. Peer hex to whether its link is
  *  direct. */
 async function routesOf(shell) {
@@ -182,8 +196,9 @@ async function setContactSecret(shell, secret) {
   if (!answer) throw new Error(`nothing claims ${NET_PROTO}`);
   await answer;
 }
-// The one string in the host's vocabulary chat spells by hand (chat-app.js keeps a
-// no-imports shape) must be the transport bundle's own claim, or the guest calls
+// The one string in the host's vocabulary chat spells by hand (app-api.js keeps a
+// no-imports shape, and the guest library spells it again in guest source,
+// assembly/guest-lib/net.js) must be the transport bundle's own claim, or the guest calls
 // nothing. The host reserves no name for it: the claim is an ordinary LOCAL service
 // name (§12.10) — the transport's manifest declares it under `services`, never under
 // `protocols`, so a peer frame naming it is refused by the routing — and the bundle
@@ -219,12 +234,16 @@ const peerB = toHex(identityB.publicKey);
 const authorA = hybridAuthorKeysFromSeed(sodium, identityA.privateKey.slice(0, 32));
 const CONTACT = new Uint8Array(32).fill(7); // each node's contact secret, which the other presents
 
-// What B's own loaded slots answered, filled in by each load's onInbound (seedkernel
-// §12.10) below — the shell itself serves no name any more, so there is no claims
-// table to register a handler on; each load owns its own answer.
-const inbound = { render: null };
+// What B's chat app answered for each inbound frame it drew, filled in by its load's
+// onInbound (seedkernel §12.10) — the shell itself serves no name any more, so there is no
+// claims table to register a handler on; each load owns its own answer. An empty answer is
+// a frame the guest did not draw.
+const renders = [];
+const onChatInbound = (claim, from, answer) => { if (answer.length > 0) renders.push(new Uint8Array(answer)); };
+// A's handle into a second app beside chat (3b), which plays a misbehaving peer in 5b.
+let rogueApp = null;
 
-// The adapter is bootShell's, exactly as chat-shell.js gets it: the factory exists first
+// The adapter is bootShell's, exactly as shell.js gets it: the factory exists first
 // and is passed as `transport.channels`; boot installs the selected transport and registers
 // each factory's accept sink. Contact policy is installation-local transport GUEST config.
 const channelsA = new InjectedChannels();
@@ -260,7 +279,7 @@ try {
     "cohorts and the peer set left the driver too — they are claim calls now");
   assert(netA.send === undefined, "the adapter has no request facade — sending is an app's");
   // What replaced all three: the host's own door into the claim the transport serves,
-  // which is the call chat-shell.js's peer pill makes. Not yet linked to anyone, so the
+  // which is the call shell.js's peer pill makes. Not yet linked to anyone, so the
   // answer is an empty peer set rather than a refusal.
   assert((await peersOf(A)).length === 0, `${NET_PROTO} answers a host-side call, with no peers yet`);
   assert(A.call("no.such.service", new OpArgs("peers").build()) === null,
@@ -293,34 +312,24 @@ try {
   else fail("forged transport refusal", err);
 }
 
-// 3. build + install a real chat app bundle (the shape scripts/build-app-bundle.mjs
-//    now authors offline; this test still assembles its own inline so it exercises
-//    signBundle directly rather than shelling out)
-const chatWasm = new Uint8Array(readFileSync(resolve(here, "../build/chat-app-v1.wasm")));
-let chatApp = null;
+// 3. build + install a real chat app bundle, from the same source directory
+//    scripts/build-app-bundle.mjs signs (this test assembles its own so it signs under a
+//    key it holds, rather than shelling out)
+const appDir = (name) => resolve(here, "../assembly", name);
+const chatV1 = authorBundle(sodium, authorA, { ...readAppSource(appDir("chat-app-v1"), guestOpFraming), version: 1 });
+const CHAT_PROTO = chatV1.manifest.protocols[0];
+let chatApp = null;   // A's handle into its chat app's guest
+let chatAppB = null;  // B's
 let chatKey = "";
 try {
-  // The ~5-line guest every chat app ships, from the same module the browser shell
-  // authors from (browser/chat-app.js) — signed source is written once, so this test
-  // exercises the bytes the shell would actually sign rather than a copy of them.
-  const guestBytes = new TextEncoder().encode(chatGuestSource("chat", guestOpFraming));
-  const manifest = {
-    app: "chat",
-    version: 1,
-    // The claim (§12.10) — every chat app declares the one chat protocol, and the load
-    // is what routes it. Same constant the browser shell signs into its bundles.
-    protocols: [CHAT_PROTO],
-    modules: [{ name: "chat" }],
-    guest: {
-      // The signed reach (§12.2, §12.10): no host service at all, and one co-resident
-      // guest — the network.
-      requires: CHAT_APP_REQUIRES,
-    },
-  };
-  const chatBundle = signBundle(sodium, authorA, manifest, guestBytes, [chatWasm]);
-  const moduleHash = toHex(genesisHash(sodium, chatWasm));
-  pendingApprovals.add(moduleHash);            // auto-approve like addAppFromWasm
-  chatApp = await A.install(chatBundle);
+  // What the shell reads off the signed manifest (`appFacts`): the app's row, its claim and
+  // reach, and its view. All of it rides in the manifest, none of it in a module.
+  const facts = appFacts(chatV1.manifest);
+  assert(facts.name === "Chat" && facts.version === "v1", "the manifest carries the app's name and version");
+  assert(typeof facts.ui === "string" && facts.ui.includes("<html"), "the manifest carries the app's view");
+  assert(facts.requires.length === 1 && facts.requires[0] === NET_PROTO, "a chat app reaches the network and nothing else");
+  consent(chatV1.blob);            // dropping the file is the consent
+  chatApp = await A.install(chatV1.blob);
   chatKey = chatApp.manifest.app;
   // The app's module is private to its slot, so there is no table to ask what landed:
   // a load builds every module or none (§12.4), and what the shell exposes is the claim.
@@ -329,15 +338,39 @@ try {
   // claims "chat" and B's load routes it there (§12.10). Each peer's routing is its own
   // — B would answer the same frames with a different author's chat app, as long as it
   // claimed the same protocol.
-  pendingApprovals.add(moduleHash);
+  consent(chatV1.blob);
   // B's view of what its own chat app answered for an inbound frame is this load's own
   // `onInbound` (seedkernel §12.10) — no second name for the guest to push through.
-  await B.install(chatBundle, {
-    onInbound: (claim, from, answer) => { if (answer.length > 0) inbound.render = new Uint8Array(answer); },
-  });
+  chatAppB = await B.install(chatV1.blob, { onInbound: onChatInbound });
   assert(B.resolve(CHAT_PROTO) === chatKey, `B routes "${CHAT_PROTO}" to the app it installed`);
-  ok(`chat app installed on both shells under '${chatKey}'`);
+  ok(`chat app installed on both shells under '${chatKey}', its row and view read off the signed manifest`);
 } catch (err) { fail("chat app install", err); }
+
+// 3b. a consent names the WHOLE bundle (`bundleDigest`). Two bundles that differ only in
+//     their guest are two bundles: a consent to one admits no other, which is what lets a
+//     guest carry an app's behaviour.
+try {
+  const prelude = guestOpFraming() + readFileSync(resolve(here, "../assembly/guest-lib/net.js"), "utf8");
+  // A guest-only app beside chat, serving nothing: its `send` op puts any frame on the
+  // wire under the chat protocol, which the checks below use to play a peer that does not
+  // keep to the chat guest's rules.
+  const rogue = (extra) => authorBundle(sodium, authorA, {
+    app: "rogue", version: 1, modules: [], guestRequires: [NET_PROTO],
+    guestConfig: { shell: { api: APP_API, name: "Rogue" } },
+    guestSource: `${prelude}
+async function handle(arg) {
+  const { args: p } = readOp(callerOf(arg).body);
+  return await netSend(p.subarray(0, 32), ${JSON.stringify(CHAT_PROTO)}, p.subarray(32));
+}${extra}`,
+  }).blob;
+  const [one, other] = [rogue(""), rogue("\n// the same app, with one more line of guest")];
+  consent(one);
+  let admitted = true;
+  try { await A.install(other); } catch { admitted = false; }
+  assert(!admitted, "a consent to one guest must not admit another");
+  rogueApp = await A.install(one);
+  ok("a consent names the whole bundle: a different guest is a different bundle");
+} catch (err) { fail("consent names the whole bundle", err); }
 
 // 4. link A and B through the ChannelFactory sinks registered during boot
 try {
@@ -365,42 +398,96 @@ try {
   ok("contact secret rotated in the transport guest without a reload");
 } catch (err) { fail("transport handshake", err); }
 
-// 5. dispatch: A's chat app sends a message, B renders it via its bound app's guest
+// 5. dispatch: A's view hands its guest a frame, the guest sends it to the room's members,
+//    and B's guest draws it — every step through the shell's two ops (app-api.js), with
+//    the shell reading none of the bytes.
+const ROOM = toHex(new Uint8Array(32).fill(5));     // a room both nodes are in
+const STRAY = toHex(new Uint8Array(32).fill(6));    // one only A is in
+/** The context a shell tells its apps (shell.js `contextNow`), as the `ctx` op's bytes. */
+const contextOf = (me, rooms, linked, nicks = {}) =>
+  utf8(contextJson({ me, nick: "", rooms, linked, contacts: [], nicks }));
+const roomWith = (id, ...members) => ({ id, name: `room-${id.slice(0, 2)}`, members });
+/** A room frame: [type][room 32][content]. */
+const roomFrame = (type, room, content) => concat([type], fromHex(room), utf8(content));
 try {
-  // Room text, the one frame chat v1 knows: [0x05][room 32][text].
-  const room = new Uint8Array(32).fill(5);
-  const text = new TextEncoder().encode("hi there");
-  const chatBytes = new Uint8Array(1 + room.length + text.length);
-  chatBytes[0] = 0x05;
-  chatBytes.set(room, 1);
-  chatBytes.set(text, 1 + room.length);
-  // The send leaves through A's chat app, because that is the only thing that can send:
-  // its guest's `handle` frames the transport's op wire and calls `_net`, on the local
-  // `send` op. Same argument shape the browser shell builds (`sendFrame` in chat-shell.js).
-  const proto = new TextEncoder().encode(CHAT_PROTO);
-  const arg = new Uint8Array(32 + 1 + proto.length + chatBytes.length);
-  arg.set(identityB.publicKey, 0);
-  arg[32] = proto.length;
-  arg.set(proto, 33);
-  arg.set(chatBytes, 33 + proto.length);
-  await chatApp.invoke(writeOp(CHAT_OP_SEND, arg));
-  // B's view of the answer is its own load's onInbound (seedkernel §12.10): the render
-  // bytes B's chat app's guest returned for the inbound frame ARE this call's answer,
-  // handed to the page that installed it — no second claim, no relay.
-  await until(() => inbound.render !== null, 4000, "rendered message");
-  const delivered = inbound.render;
+  // Each guest is told the context first, and answers it for its own view as render 0.
+  // A nick is the shell's, and rides in the context: one outside ASCII is escaped on the way
+  // in, because a guest reads a byte as a character, and comes out whole for the view.
+  const view = await chatApp.invoke(writeOp(APP_OP_CONTEXT,
+    contextOf(peerA, [roomWith(ROOM, peerB), roomWith(STRAY, peerB)], [peerB], { [peerB]: "Zoë" })));
+  assert(view[0] === 0, "the context answer is render type 0, for the view");
+  const told = JSON.parse(text(view.slice(1)));
+  assert(told.api === APP_API && told.me === peerA && told.rooms.length === 2,
+    "the view is handed the same context the guest was told");
+  assert(told.nicks[peerB] === "Zoë", "a peer's nick reaches the view through the guest, whatever its characters");
+  await chatAppB.invoke(writeOp(APP_OP_CONTEXT, contextOf(peerB, [roomWith(ROOM, peerA)], [peerA])));
+
+  // A frame for a room B is not in reaches B and is not drawn; the next, for the room they
+  // share, is. One link carries both in order, so the first render B sees settles it.
+  await chatApp.invoke(writeOp(APP_OP_UI, roomFrame(0x05, STRAY, "not for B")));
+  const echo = await chatApp.invoke(writeOp(APP_OP_UI, roomFrame(0x05, ROOM, "hi there")));
+  // The `ui` answer is the local echo: the frame drawn as A's own by A's module.
+  assert(echo[0] === 0x05 && toHex(echo.slice(2, 34)) === peerA && text(echo.slice(66)) === "hi there",
+    "the ui answer is the frame drawn as this node's own");
+  await until(() => renders.length > 0, 4000, "rendered message");
+  const delivered = renders[0];
   // chat v1 render: [type 1][pk_len 1][pk 32][body], the body passed through
   assert(delivered[0] === 0x05, "render type");
   assert(delivered[1] === 32, "render pk_len");
-  assert(toHex(delivered.slice(2, 34)) === toHex(identityA.publicKey), "render sender pk = A's key");
-  assert(toHex(delivered.slice(34, 66)) === toHex(room), "render room");
-  assert(new TextDecoder().decode(delivered.slice(66)) === "hi there", "render text");
-  ok(`dispatch round-trip: A's app → _net → B's shell → B's chat app's guest → onInbound → ${delivered.length} render bytes`);
+  assert(toHex(delivered.slice(2, 34)) === peerA, "render sender pk = A's key");
+  assert(toHex(delivered.slice(34, 66)) === ROOM, "render room");
+  assert(text(delivered.slice(66)) === "hi there", "render text — the frame for a room B is not in was not drawn");
+  // v1 speaks room text only: any other frame from its view goes nowhere.
+  assert((await chatApp.invoke(writeOp(APP_OP_UI, roomFrame(0x06, ROOM, "an image")))).length === 0,
+    "v1's guest sends only room text");
+  ok(`dispatch round-trip: A's view → ui op → A's guest → _net → B's guest → onInbound → ${delivered.length} render bytes`);
 } catch (err) { fail("chat dispatch round-trip", err); }
 
+// 5b. the upgrade: chat v2 replaces v1 under the same label on both shells, with no change
+//     to the shell — a new guest, module and view, driven through the same two ops. Then
+//     what v2 adds, all of it the bundle's doing: images, and direct messages.
+try {
+  const chatV2 = authorBundle(sodium, authorA, { ...readAppSource(appDir("chat-app-v2"), guestOpFraming), version: 2 });
+  assert(digestOf(verifyBundle(sodium, chatV2.blob)) !== digestOf(verifyBundle(sodium, chatV1.blob)), "v2 is another bundle");
+  consent(chatV2.blob);
+  chatApp = await A.install(chatV2.blob, { replaces: chatKey });
+  consent(chatV2.blob);
+  chatAppB = await B.install(chatV2.blob, { replaces: chatKey, onInbound: onChatInbound });
+  assert(appFacts(chatApp.manifest).version === "v2" && A.resolve(CHAT_PROTO) === chatKey, "v2 holds the chat claim");
+  // A replacement is a fresh realm: its guest is told the context again.
+  await chatApp.invoke(writeOp(APP_OP_CONTEXT, contextOf(peerA, [roomWith(ROOM, peerB)], [peerB])));
+  await chatAppB.invoke(writeOp(APP_OP_CONTEXT, contextOf(peerB, [roomWith(ROOM, peerA)], [peerA])));
+  renders.length = 0;
+
+  // A render is [type][pk_len][pk 32][body], whichever version drew it.
+  const parse = (r) => ({ type: r[0], from: toHex(r.slice(2, 34)), body: r.slice(34) });
+  await chatApp.invoke(writeOp(APP_OP_UI, roomFrame(0x05, ROOM, "from v2")));
+  await chatApp.invoke(writeOp(APP_OP_UI, roomFrame(0x06, ROOM, "not really a jpeg")));
+  await chatApp.invoke(writeOp(APP_OP_UI, concat([0x03], fromHex(peerB), utf8("just you"))));
+  await until(() => renders.length >= 3, 4000, "v2's renders");
+  const [room, image, direct] = renders.map(parse);
+  assert(room.type === 0x05 && room.from === peerA && text(room.body.slice(32)) === "from v2", "a room message from v2");
+  assert(image.type === 0x06 && toHex(image.body.slice(0, 32)) === ROOM, "a room image, which v1 would not have drawn");
+  assert(direct.type === 0x03 && toHex(direct.body.slice(0, 32)) === peerB && text(direct.body.slice(32)) === "just you",
+    "a direct message reaches its addressee");
+  ok("upgrade v1 → v2 under the same label: images and direct messages, with nothing but the bundle changed");
+
+  // What B's guest draws is its own decision, not the sender's. The rogue app on A plays a
+  // peer that sends what an honest chat guest never would.
+  const asPeer = (frame) => rogueApp.invoke(writeOp("send", concat(fromHex(peerB), frame)));
+  await chatAppB.invoke(writeOp(APP_OP_CONTEXT, contextOf(peerB, [roomWith(ROOM)], [peerA]))); // A no longer in the room
+  await asPeer(roomFrame(0x05, ROOM, "from outside the room"));
+  await asPeer(concat([0x03], fromHex(peerA), utf8("addressed to someone else")));
+  await asPeer(concat([0x03], fromHex(peerB), utf8("addressed to B")));
+  await until(() => renders.length >= 4, 4000, "the one frame that is for B");
+  assert(renders.length === 4 && text(parse(renders[3]).body.slice(32)) === "addressed to B",
+    "a room frame from a peer not in the room, and a direct one for someone else, are not drawn");
+  ok("the receive filter is the guest's: only frames for this node are drawn");
+} catch (err) { fail("upgrade to chat v2", err); }
+
 // 6. the offers app: a second boot bundle on both shells (browser/offers-app.js), and
-//    a real offer/v1 frame end to end. A's chat app sends an opaque blob under
-//    offer/v1 — the offers app's own claim, never the chat app's — B's offers app
+//    a real offer/v1 frame end to end. A's offers app sends an opaque blob under
+//    offer/v1 — its own claim, in both directions — B's offers app
 //    hashes it, stores `[from 32][blob]` under its own fs key, and answers with the
 //    hash; B's view of "a fresh offer arrived" is that answer, delivered through
 //    onInbound exactly like a chat render, with no shell-level claims table anywhere.
@@ -418,17 +505,11 @@ try {
   assert(A.resolve(OFFER_PROTO) === aOffers.manifest.app, `A routes "${OFFER_PROTO}" to the offers app`);
   assert(B.resolve(OFFER_PROTO) === bOffers.manifest.app, `B routes "${OFFER_PROTO}" to the offers app`);
 
-  const offeredBlob = new TextEncoder().encode("a bundle blob, opaque to the offers app");
-  const offerProtoBytes = new TextEncoder().encode(OFFER_PROTO);
-  const offerArg = new Uint8Array(32 + 1 + offerProtoBytes.length + offeredBlob.length);
-  offerArg.set(identityB.publicKey, 0);
-  offerArg[32] = offerProtoBytes.length;
-  offerArg.set(offerProtoBytes, 33);
-  offerArg.set(offeredBlob, 33 + offerProtoBytes.length);
-  // Sent through A's CHAT app's guest, same as offerApp() in chat-shell.js: only a
-  // guest can call `_net` (§12.10), and offer/v1 is the offers bundle's claim now, not
-  // the sender's — the chat app is just the guest already holding the network.
-  await chatApp.invoke(writeOp(CHAT_OP_SEND, offerArg));
+  const offeredBlob = utf8("a bundle blob, opaque to the offers app");
+  // Sent through A's OFFERS app's guest, same as offerApp() in shell.js: only a
+  // guest can call `_net` (§12.10), and the app that owns offer/v1 is the one that
+  // speaks it. No other app's guest is borrowed to carry it.
+  await aOffers.invoke(writeOp(OFFERS_OP_SEND, concat(identityB.publicKey, offeredBlob)));
 
   await until(() => offersInbound.hash !== null, 4000, "offer notification");
   const hex = toHex(offersInbound.hash);
@@ -438,7 +519,7 @@ try {
   assert(record !== null, `B's offers slot holds ${OFFERS_KEY_PREFIX}${hex.slice(0, 12)}…`);
   assert(toHex(record.slice(0, 32)) === toHex(identityA.publicKey), "the record's sender is A's key");
   assert(toHex(record.slice(32)) === toHex(offeredBlob), "the record's blob is the exact bytes A sent");
-  ok(`offer end-to-end: A's chat app → offer/v1 → B's offers app's guest → fs record ${OFFERS_KEY_PREFIX}${hex.slice(0, 12)}…`);
+  ok(`offer end-to-end: A's offers app → offer/v1 → B's offers app's guest → fs record ${OFFERS_KEY_PREFIX}${hex.slice(0, 12)}…`);
 } catch (err) { fail("offer end-to-end", err); }
 
 // 7. the calls app: a third boot bundle (browser/calls-app.js). A call's media rides a
@@ -465,35 +546,34 @@ try {
   ok("call signaling end-to-end: A's calls app → call/v1 → B's calls app → onInbound");
 } catch (err) { fail("call signaling end-to-end", err); }
 
-// 8. the shape gate an Offer passes through (peekMeta → isChatApp). A peer's bundle
-// is installed on one click of a row showing a name and an author, so the reach it
-// declares is the whole of what that click grants — and a chat app's is exactly one
-// local name, `_net`: the network it must reach to be a chat app at all, and no host
-// service whatsoever.
+// 8. the gate a bundle passes before it is installed (peekBundle → appFacts). A peer's
+// bundle is installed on one click of a row showing a name and an author, so the reach it
+// declares is the whole of what that click grants. The shell hosts any app, so the gate is
+// not about what an app is for: it is the contract version it was built to, and a reach
+// within what the shell grants — the network, a keyspace of its own, a wake.
 try {
-  const chatManifest = (requires, modules, protocols) => ({
-    app: "chat", version: 1,
-    protocols: protocols ?? [CHAT_PROTO],
-    modules: modules ?? [{ name: "chat", hash: "aa" }],
-    guest: { hash: "bb", requires },
+  const manifest = (over = {}) => ({
+    app: "friends", version: 1, modules: [],
+    protocols: over.protocols ?? ["friends/v1"],
+    ...(over.services ? { services: over.services } : {}),
+    guest: {
+      requires: over.requires ?? [NET_PROTO],
+      config: over.config ?? { shell: { api: APP_API, name: "Friends" } },
+    },
   });
-  const shape = (over = {}) => chatManifest(
-    over.requires ?? CHAT_APP_REQUIRES, over.modules, over.protocols);
-  assert(isChatApp(shape()), "the shell's own app shape is accepted");
-  assert(!isChatApp(shape({ requires: [...CHAT_APP_REQUIRES, "fs"] })), "an offered app claiming fs beside the network is refused");
-  assert(!isChatApp(shape({ requires: [...CHAT_APP_REQUIRES, "node"] })), "an offered app claiming a signing oracle is refused");
-  assert(!isChatApp(shape({ requires: [...CHAT_APP_REQUIRES, "link"] })), "an offered app reaching for sockets is refused");
-  assert(!isChatApp(shape({ requires: [] })), "an app that cannot reach the network is refused");
-  assert(!isChatApp(shape({ requires: [...CHAT_APP_REQUIRES, "_store"] })), "an app calling a second guest beside the network is refused");
-  assert(!isChatApp(shape({ modules: [] })), "a no-module app is refused");
-  // The claim is part of what one click grants (§12.10): installing an offered
-  // bundle routes every id it claims to it, so a bundle claiming something other than
-  // the chat protocol — or nothing, or extra ids beside it — is not a chat app.
-  assert(!isChatApp(shape({ protocols: [] })), "an app claiming no protocol is refused");
-  assert(!isChatApp(shape({ protocols: ["seedstore"] })), "an app claiming another protocol is refused");
-  assert(!isChatApp(shape({ protocols: [CHAT_PROTO, "seedstore"] })), "an app claiming an extra protocol is refused");
-  ok("the offer shape gate admits only network-only chat apps claiming the chat protocol");
-} catch (err) { fail("offer shape gate", err); }
+  const refused = (m) => { try { appFacts(m); return false; } catch { return true; } };
+  assert(!refused(manifest()), "an app claiming its own protocol and reaching the network is accepted");
+  assert(!refused(manifest({ requires: [NET_PROTO, "fs", "timer"] })), "storage and a timer beside the network are granted");
+  assert(!refused(manifest({ requires: [], protocols: [] })), "an app that reaches and serves nothing is harmless");
+  assert(appFacts(manifest()).ui === null, "an app may have no view");
+  assert(refused(manifest({ requires: [NET_PROTO, "node"] })), "an app claiming a signing oracle is refused");
+  assert(refused(manifest({ requires: [NET_PROTO, "link"] })), "an app reaching for sockets is refused");
+  assert(refused(manifest({ requires: [NET_PROTO, "_store"] })), "an app calling a second guest beside the network is refused");
+  assert(refused(manifest({ services: ["friends"] })), "an app serving a local service is refused");
+  assert(refused(manifest({ config: {} })), "a bundle with no shell entry is not an app for this shell");
+  assert(refused(manifest({ config: { shell: { api: APP_API + 1 } } })), "an app built for another contract version is refused by name");
+  ok("the install gate admits any app within the shell's grants and its contract version");
+} catch (err) { fail("install gate", err); }
 
 // 9. the two transport ops the page's rooms and contacts rest on: `welcome` names the
 //    room-mates, whose calls need no contact secret, and `forget` drops one peer and its

@@ -23,16 +23,18 @@ export const CALLS_REQUIRES = ["_net"];
 /** The page's one local op: `[to 32][signal …]`, sent to that peer under `CALL_PROTO`. */
 export const CALLS_OP_SEND = "send";
 
-/** The guest this shell signs into the boot bundle. `handle` has two callers:
+/** The guest this shell signs into the boot bundle. `prelude` is the guest source in front
+ *  of it: seedkernel's op-frame and the network library (assembly/guest-lib/net.js).
+ *  `handle` has two callers:
  *
  *  - a peer's inbound `call/v1` frame, `[from 32][signal …]` — answered with the signal
  *    itself, which is exactly what the page's `onInbound` receives (seedkernel §12.10),
  *    with `from` beside it: the answer doubling as the notification, as offers-app.js does;
  *  - the page's `send` op, `[to 32][signal …]` — handed to `_net` fire-and-forget: a
  *    signal is not a round trip, and its answer comes back as a signal of the peer's own. */
-export function callsGuestSource(guestOpFraming) {
+export function callsGuestSource(prelude) {
   return `
-${guestOpFraming()}
+${prelude}
 
 const PROTO = ${JSON.stringify(CALL_PROTO)};
 
@@ -41,15 +43,6 @@ async function handle(arg) {
   if (!fromHost) return arg.subarray(32);
   const { op, args: p } = readOp(body);
   if (op !== ${JSON.stringify(CALLS_OP_SEND)}) return new Uint8Array(0);
-  const signal = p.subarray(32);
-  // The transport's send op: [noReply u8] then [to][proto][payload] as blobs.
-  const args = new Uint8Array(1 + 4 + 32 + 4 + PROTO.length + 4 + signal.length);
-  let o = 0;
-  args[o++] = 1;
-  const u32 = (v) => { args[o] = v >>> 24; args[o + 1] = (v >>> 16) & 255; args[o + 2] = (v >>> 8) & 255; args[o + 3] = v & 255; o += 4; };
-  u32(32); args.set(p.subarray(0, 32), o); o += 32;
-  u32(PROTO.length); for (let i = 0; i < PROTO.length; i++) args[o++] = PROTO.charCodeAt(i);
-  u32(signal.length); args.set(signal, o);
-  return await host.call(${JSON.stringify(CALLS_REQUIRES[0])}, writeOp("send", args));
+  return await netSend(p.subarray(0, 32), PROTO, p.subarray(32));
 }`;
 }
