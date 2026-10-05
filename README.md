@@ -162,14 +162,28 @@ network. A room message goes only to that room's members, and a direct message o
 addressee.
 
 **Calls.** The call bar above the app on the **App** tab is the shell's, not the app's.
-**Start call** asks for the camera and microphone and publishes them to the conversation
-open in the app: a room's linked members, or the one peer of a direct chat. With no app
-shown, or one that never says which conversation is open, a call is with every linked
-peer. A peer that is not in the call sees those who are, and its button reads **Join
-call**. Media rides peer connections the page owns, one per peer, beside the transport's
-and asking the same relay for STUN. Their signaling rides the node's authenticated
-channel, so a call needs no relay once the peers are linked, and nobody on the relay can
-inject into one.
+**Start call** starts a call with the conversation open in the app: a room's linked
+members, or the one peer of a direct chat. With no app shown, or one that never says which
+conversation is open, a call is with every linked peer.
+
+Those peers are only told of the call. Each one's bar says who is calling, and offers
+**Accept call** and **Decline**; until it accepts, a peer receives nothing of the call
+and sends nothing, since media is negotiated only between two nodes that are both in it.
+Accepting enters that call, whatever conversation is open. A call turned down, or hung up
+on, does not ring again while it lasts; it can still be entered with **Start call** from
+its conversation.
+
+Starting or accepting a call asks for the microphone and the camera together and
+publishes both, and each then has its own button. **Mute** silences the microphone, which
+stays captured, and **Unmute** brings it back. **Stop video** lets the camera go, and
+**Start video** asks for it again. A call the browser gives neither to (permission
+refused, or no camera) goes on all the same with both off, **Unmute** then asking for the
+microphone alone and **Start video** for the camera.
+
+Media rides peer connections the page owns, one per peer, beside the transport's and
+asking the same relay for STUN. Their signaling rides the node's authenticated channel,
+so a call needs no relay once the peers are linked, and nobody on the relay can inject
+into one.
 
 A call is the shell's because an app cannot hold one. A view's sandbox gives it an opaque
 origin, which cannot be granted the camera or microphone: `getUserMedia` fails there in
@@ -208,7 +222,7 @@ when both tabs are on this machine. Reaching the shell from another device needs
 | `browser/app-api.js` | The contract between the shell and any app, in one place: the contract version, what an app may reach, what the shell reads off a signed manifest (`appFacts`), the digest a consent names, and the two ops the shell calls on an app's guest. The shell gates and drives every bundle through it, and the builder refuses to sign what it would refuse. |
 | `browser/offers-app.js` | The offers app *shape*: the `offer/v1` id, the app id `offers`, its authority (`fs` for the offers that arrive, `_net` for the ones this node makes), and its guest source — a claim, a keyspace and a `send` op, no module. `scripts/build-boot-bundles.mjs` signs it into the boot bundle. |
 | `browser/calls-app.js` | The calls app *shape*: the `call/v1` id, the app id `calls`, its one reach (`_net`), and its guest source — a claim that hands a peer's call signal to the page, and a `send` op that puts the page's on the wire. What else two pages tell each other rides it too: `{ peer }`, that one added or removed the other as a peer, and `{ nick }`, what a peer calls itself. |
-| `browser/media-rtc.js` | The call feature: `MediaCalls`, one `RTCPeerConnection` per peer that the page owns, beside the transport's, with perfect negotiation signaled over `call/v1`. Live media is the page's own — the host holds only the transport's connections. |
+| `browser/media-rtc.js` | The call feature: `MediaCalls`, one `RTCPeerConnection` per peer that the page owns, beside the transport's, with perfect negotiation signaled over `call/v1`. A node in a call tells its peers so (`{ call }`), and a connection is opened only between two that have each said they are in the same one. Live media is the page's own — the host holds only the transport's connections. |
 | `assembly/chat-app/` | Chat — text and images, in several rooms and in direct chats. `app.json` says what the bundle is, `guest.js` is its guest, which holds the chat wire vocabulary and decides who each frame is for, `index.ts` is its module, the one transform that draws a frame, and `ui.html` its view, with the view's CSS and JS in files of their own (`ui.css`, `ui.js`) beside the page. |
 | `assembly/jam-app/` | Jam: a room's chat, emoji reactions, and a playlist kept and played together. `guest.js` is a pipe scoped to a room that names blocks of audio by their hash, its view (`ui.html`, `ui.css`, `ui.js`) holds the room's state and plays it, `formats.js` finds where a FLAC or Ogg Vorbis file may be cut, and there is no module. See [The jam app](#the-jam-app). |
 | `assembly/guest-lib/net.js` | Guest source any guest that reaches the network puts in front of its own: the transport's `send` and `peers` ops, and keys as hex. Every app and both boot bundles use it. |
@@ -219,7 +233,7 @@ when both tabs are on this machine. Reaching the shell from another device needs
 | `scripts/build-boot-bundles.mjs` | Signs the offers and calls apps' guest-only bundles under the same key, each with its own freshness mark in `<name>-author.version`. |
 | `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/`, plus the browser libsodium and the QuickJS realm engine. Refuses a stale seedkernel build. |
 | `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat app and the shell's two ops, replaces it in place with a later build, round-trips an offer through the offers app and a call signal through the calls app, and carries a frame and a block of audio through jam's guest. |
-| `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, an offer, messages, an app replaced in place by a bundle dropped over it, a direct message, a call, removing an app, and a reload. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. The FLAC file it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
+| `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, an offer, messages, an app replaced in place by a bundle dropped over it, a direct message, a call that reaches its peer only once accepted, with a microphone muted and a camera turned off and on again, and one turned down, removing an app, and a reload. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. The FLAC file it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
 | `scripts/clean.mjs` | Deletes `build/` and `browser/vendor/` when a rebuild isn't taking. |
 
 What the shell reads of an app — its name, version, description and view — rides in the

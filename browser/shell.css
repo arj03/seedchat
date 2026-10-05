@@ -400,7 +400,8 @@
     background: var(--panel);
     flex-wrap: wrap;
   }
-  #call-bar.idle #call-mute, #call-bar.idle #call-end { display: none; }
+  #call-bar.idle #call-mute, #call-bar.idle #call-cam, #call-bar.idle #call-end { display: none; }
+  #call-bar:not(.ringing) #call-decline { display: none; }
   #call-status { font-size: 0.8em; color: var(--muted); margin-left: auto; }
 
   #video-tiles {
@@ -439,6 +440,9 @@
     backdrop-filter: blur(2px);
   }
   .tile.local .tile-label { color: var(--me); }
+  /* A tile with no video to show is its label alone; its audio plays on. */
+  .tile.no-video { aspect-ratio: auto; min-height: 2.2em; }
+  .tile.no-video video { height: 0; }
 
   .app-frame {
     flex: 1;

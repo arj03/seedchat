@@ -7,18 +7,34 @@
 // (calls-app.js) — so a call needs no relay once the peers are linked, and nobody on the
 // relay can inject into one.
 //
+// A call is entered, not received. A node in a call says so to that call's peers (`{ call
+// }`), and that word is all a peer gets of it: a connection is opened, and a description
+// answered, only between two nodes that have each said they are in the same call. So
+// nothing of a caller's reaches a peer that has not accepted, and nothing of that peer's
+// leaves it.
+//
 // Negotiation is the W3C "perfect negotiation" pattern: either side may offer (adding a
 // track does), and on a collision the polite side — the larger key, by the same rule the
 // transport uses for who offers — rolls its own offer back.
 
-/** One signal: `{ sdp }` (a description), `{ candidate }`, or `{ bye: true }` (hang-up). */
+/** One signal: `{ call }` (in a call, and which), `{ sdp }` (a description), `{ candidate }`,
+ *  or `{ bye: true }` (hang-up). */
 const encode = (msg) => new TextEncoder().encode(JSON.stringify(msg));
 
 export class MediaCalls {
-  /** peerId → { pc, polite, makingOffer, ignoreOffer } */
+  /** peerId → { pc, polite, makingOffer, ignoreOffer, carrying }, `carrying` the
+   *  transceiver each of our tracks is sent on */
   #peers = new Map();
-  /** Local tracks to publish, [{ track, stream }]; empty when not in a call. */
+  /** Local tracks to publish, [{ track, stream }]; empty while nothing of ours is on. */
   #tracks = [];
+  /** The call we are in, by the name both ends of it say, and who of a set of peers it is
+   *  with (`start`); null out of a call. */
+  #call = null;
+  #among = null;
+  /** The peers told we are in it. */
+  #rung = new Set();
+  /** peerId → { call, gone }: every peer that says it is in a call, and which. */
+  #callers = new Map();
 
   /**
    * @param {{
@@ -27,34 +43,82 @@ export class MediaCalls {
    *   send: (peerId: string, signal: Uint8Array) => Promise<unknown>,
    *   onTrack?: (peerId: string, track: MediaStreamTrack) => void,
    *   onPeerClosed?: (peerId: string) => void,
+   *   onCallers?: () => void,
    * }} opts
    */
   constructor(opts) { this.opts = opts; }
 
-  get active() { return this.#tracks.length > 0; }
+  /** peerId → the call it says it is in, for every peer in one. */
+  get callers() { return new Map([...this.#callers].map(([p, c]) => [p, c.call])); }
 
-  /** Start publishing these tracks to every peer in `peers`, and to any peer that links
-   *  later (`sync`). */
-  start(tracks, peers) {
-    this.#tracks = tracks;
-    this.sync(peers);
+  /** How many peers are in the call with us. */
+  get size() { return this.#peers.size; }
+
+  /** Be in the call named `call`: with those `among` picks out of a list of peers, of the
+   *  `linked` now and of any that links later (`sync`). Each is told, and the ones in it
+   *  too are connected. */
+  start(call, among, linked) {
+    this.#call = call;
+    this.#among = among;
+    this.sync(linked);
   }
 
-  /** Follow the linked set while in a call: call a newly linked peer, drop one gone. */
-  sync(peers) {
-    if (!this.active) return;
-    const linked = new Set(peers);
-    for (const p of peers) this.#ensure(p);
-    for (const p of [...this.#peers.keys()]) if (!linked.has(p)) this.#close(p);
+  /** Publish a track, beside any already published: to every peer in the call, and to any
+   *  that enters it later. */
+  publish(track, stream) {
+    this.#tracks.push({ track, stream });
+    for (const p of this.#peers.keys()) this.#ensure(p);
   }
 
-  /** Hang up: tell every peer, close every media connection, publish nothing. */
-  end() {
-    this.#tracks = [];
-    for (const p of [...this.#peers.keys()]) {
-      void this.opts.send(p, encode({ bye: true })).catch(() => {});
-      this.#close(p);
+  /** Stop publishing one track, the rest going on. Its transceiver stays, sending nothing,
+   *  which mutes the track at the far end. */
+  unpublish(track) {
+    this.#tracks = this.#tracks.filter((t) => t.track !== track);
+    for (const e of this.#peers.values()) {
+      const t = e.carrying.get(track);
+      if (!t) continue;
+      e.carrying.delete(track);
+      try {
+        void t.sender.replaceTrack(null).catch(() => {});
+        t.direction = "recvonly";
+      } catch { /* closed meanwhile */ }
     }
+  }
+
+  /** Follow the linked peers. A caller that is gone calls no more; and in a call, a peer of
+   *  it that links is told of it, one in it too is connected, and one out of it dropped. */
+  sync(linked) {
+    let changed = false;
+    for (const [p, c] of this.#callers) {
+      // Gone at two looks running: a peer may have linked, and called, after one was taken.
+      if (linked.includes(p)) c.gone = false;
+      else if (c.gone) { this.#callers.delete(p); changed = true; }
+      else c.gone = true;
+    }
+    if (this.#call !== null) {
+      const peers = new Set(this.#among(linked));
+      // A peer that dropped and came back has forgotten what it was told, and is told again.
+      for (const p of [...this.#rung]) if (!peers.has(p)) this.#rung.delete(p);
+      for (const p of peers) {
+        if (!this.#rung.has(p)) {
+          this.#rung.add(p);
+          void this.opts.send(p, encode({ call: this.#call })).catch(() => this.#rung.delete(p));
+        }
+        if (this.#with(p)) this.#ensure(p);
+      }
+      for (const p of [...this.#peers.keys()]) if (!this.#with(p)) this.#close(p);
+    }
+    if (changed) this.opts.onCallers?.();
+  }
+
+  /** Hang up: tell every peer told of the call, close every media connection, publish
+   *  nothing. */
+  end() {
+    this.#call = this.#among = null;
+    this.#tracks = [];
+    for (const p of this.#rung) void this.opts.send(p, encode({ bye: true })).catch(() => {});
+    this.#rung.clear();
+    for (const p of [...this.#peers.keys()]) this.#close(p);
   }
 
   /** Kick an ICE restart on every call, after a network change. */
@@ -68,9 +132,20 @@ export class MediaCalls {
   async onSignal(peerId, bytes) {
     let msg;
     try { msg = JSON.parse(new TextDecoder().decode(bytes)); } catch { return; }
-    if (msg?.bye) { this.#close(peerId); return; }
-    // A peer that calls us gets a connection even while we are not in a call, so its
-    // tracks show; ours join only when we start one.
+    if (msg?.bye) {
+      this.#close(peerId);
+      if (this.#callers.delete(peerId)) this.opts.onCallers?.();
+      return;
+    }
+    if (typeof msg?.call === "string") {
+      this.#callers.set(peerId, { call: msg.call, gone: false });
+      if (this.#with(peerId)) this.#ensure(peerId);
+      this.opts.onCallers?.();
+      return;
+    }
+    // A description or a candidate is heard only from a peer in the call with us. One whose
+    // call we have not entered has no connection here to offer to.
+    if (!this.#with(peerId)) return;
     const e = this.#ensure(peerId);
     try {
       if (msg?.sdp) {
@@ -89,11 +164,18 @@ export class MediaCalls {
     } catch { /* a stale signal after a rollback, or a peer that went away */ }
   }
 
+  /** Whether a peer is in the call with us: we are in one, it is a peer of that call, and
+   *  it has said it is in the same. */
+  #with(peerId) {
+    return this.#call !== null && this.#callers.get(peerId)?.call === this.#call &&
+      this.#among([peerId]).length > 0;
+  }
+
   #ensure(peerId) {
     let e = this.#peers.get(peerId);
     if (!e) {
       const pc = new RTCPeerConnection(this.opts.rtcConfig);
-      e = { pc, polite: this.opts.myId > peerId, makingOffer: false, ignoreOffer: false };
+      e = { pc, polite: this.opts.myId > peerId, makingOffer: false, ignoreOffer: false, carrying: new Map() };
       this.#peers.set(peerId, e);
       const entry = e;
       pc.addEventListener("icecandidate", (ev) => {
@@ -112,14 +194,28 @@ export class MediaCalls {
         if (pc.connectionState === "failed") this.#close(peerId);
       });
     }
-    // Publish what this call carries on a connection that does not carry it yet.
-    const sending = new Set(e.pc.getSenders().map((s) => s.track));
+    // Publish what we carry on a connection that does not carry it yet.
     for (const { track, stream } of this.#tracks) {
-      if (!sending.has(track)) {
-        try { e.pc.addTrack(track, stream); } catch { /* closed meanwhile */ }
+      if (!e.carrying.has(track)) {
+        try { e.carrying.set(track, this.#carry(e, track, stream)); } catch { /* closed meanwhile */ }
       }
     }
     return e;
+  }
+
+  /** Send a track on a connection, answering the transceiver it goes on. One that only
+   *  receives takes it: the peer's own, or one a track of ours was taken off (`unpublish`).
+   *  `addTrack` would pass over the latter and add a media section each time a camera is
+   *  turned back on. */
+  #carry(e, track, stream) {
+    const taken = new Set(e.carrying.values());
+    const idle = e.pc.getTransceivers().find((t) =>
+      !taken.has(t) && t.receiver.track.kind === track.kind && t.direction === "recvonly");
+    if (!idle) return e.pc.addTransceiver(track, { streams: [stream] });
+    void idle.sender.replaceTrack(track).catch(() => {});
+    idle.sender.setStreams(stream);
+    idle.direction = "sendrecv";
+    return idle;
   }
 
   #close(peerId) {

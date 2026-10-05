@@ -465,12 +465,64 @@ try {
   await page(A, click("tab-app"));
 
   // 11. a call is the shell's, with the conversation the app's view said is open: its
-  //     signals ride the pages' channel, and the media a connection of the page's own
+  //     signals ride the pages' channel, and the media a connection of the page's own. The
+  //     peer called is only told so, and gets nothing of the call until it accepts. Each
+  //     end enters with its microphone and camera on, asked for together; a mute silences
+  //     the microphone, and the camera is let go of when turned off and asked for again
+  //     when turned back on. A call hung up on, or turned down, rings no more
+  await page(A, `(() => {
+    const ask = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    window.asked = [];
+    navigator.mediaDevices.getUserMedia = (what) => { window.asked.push(Object.keys(what).join("+")); return ask(what); };
+  })()`);
+  const asked = () => page(A, "window.asked.join(' ')");
+  const tileOf = (sel) => `(() => {
+    const t = document.querySelector('#video-tiles .tile${sel}');
+    return !t ? "none" : t.classList.contains("no-video") ? "label" : t.querySelector("video").videoWidth > 0 ? "video" : "blank";
+  })()`;
+  const mic = "(([t]) => t.readyState + (t.enabled ? ' on' : ' off'))(document.querySelector('#tile-local video').srcObject.getAudioTracks())";
   await page(A, click("call-start"));
   await waitFor("A: a call starts", async () => /in call/.test(await page(A, text("call-status"))));
-  await waitFor("B: receives A's media", async () => /receiving from 1 peer/.test(await page(B, text("call-status"))), 30000);
+  await waitFor("B: is told A is calling, and offered the call", async () =>
+    (await page(B, text("call-status"))) === "annie is calling" && (await page(B, text("call-start"))) === "Accept call");
+  await waitFor("A: its own tile shows its camera", async () => (await page(A, tileOf(".local"))) === "video");
+  check((await asked()) === "audio+video", "A: asked for its microphone and camera together");
+  check((await page(A, text("call-mute"))) === "Mute" && (await page(A, text("call-cam"))) === "Stop video", "A: and offers to turn each off");
+  await sleep(1500);
+  check((await page(B, tileOf(""))) === "none" && (await page(A, text("call-status"))) === "in call (waiting for peers)",
+    "B: gets nothing of a call it has not accepted, and A nobody in it");
+  await page(B, click("call-start"));
+  await waitFor("B: accepts, and is in the call with A", async () =>
+    (await page(B, text("call-status"))) === "in call · 1 peer" && (await page(A, text("call-status"))) === "in call · 1 peer");
+  await waitFor("B: sees A's camera once it has accepted", async () => (await page(B, tileOf(":not(.local)"))) === "video", 30000);
+  await waitFor("A: and A sees B's", async () => (await page(A, tileOf(":not(.local)"))) === "video", 30000);
+  await page(A, click("call-mute"));
+  check((await page(A, mic)) === "live off" && (await page(A, text("call-mute"))) === "Unmute", "A: a mute silences its microphone");
+  await page(A, click("call-mute"));
+  check((await page(A, mic)) === "live on" && (await page(A, text("call-mute"))) === "Mute", "A: and an unmute brings it back");
+  await page(A, click("call-cam"));
+  await waitFor("B: A's tile is its label once A stops its video", async () => (await page(B, tileOf(":not(.local)"))) === "label");
+  check((await page(A, tileOf(".local"))) === "label" && (await page(A, text("call-cam"))) === "Start video", "A: and so is its own");
+  await page(A, click("call-cam"));
+  await waitFor("B: and sees A's camera again when it is back on", async () => (await page(B, tileOf(":not(.local)"))) === "video", 30000);
+  check((await asked()) === "audio+video video", "A: asked for the camera alone, and nothing else since the call started");
   await page(A, click("call-end"));
-  await waitFor("B: the call ends when A hangs up", async () => (await page(B, text("call-status"))) === "idle");
+  await waitFor("B: A is gone from the call when it hangs up", async () =>
+    (await page(B, tileOf(":not(.local)"))) === "none" && (await page(B, text("call-status"))) === "in call (waiting for peers)");
+  check((await page(A, text("call-status"))) === "idle" && (await page(A, text("call-start"))) === "Start call",
+    "A: the call it hung up on does not ring, with B still in it");
+  await page(B, click("call-end"));
+  await waitFor("B: the call ends", async () => (await page(B, text("call-status"))) === "idle");
+  await page(B, click("call-start"));
+  await waitFor("A: is told B is calling", async () =>
+    /is calling/.test(await page(A, text("call-status"))) && (await page(A, text("call-start"))) === "Accept call");
+  await page(A, click("call-decline"));
+  check((await page(A, text("call-status"))) === "idle" && (await page(A, text("call-start"))) === "Start call", "A: a call turned down rings no more");
+  await sleep(1500);
+  check((await page(A, tileOf(""))) === "none" && (await page(B, text("call-status"))) === "in call (waiting for peers)",
+    "A: and gets nothing of it");
+  await page(B, click("call-end"));
+  await waitFor("B: the call ends", async () => (await page(B, text("call-status"))) === "idle");
 
   // 12. removing an app takes its view with it, and it installs again
   await page(B, clickButton("app-list", "Remove"));

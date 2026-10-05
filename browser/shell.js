@@ -393,17 +393,25 @@ const media = new MediaCalls({
   myId: myPkHex,
   rtcConfig: RTC_CONFIG,
   send: sendSignal,
+  onCallers: () => callersChanged(),
   onPeerClosed: (peerId) => {
     removeRemoteTile(peerId);
     updateCallStatus();
   },
   onTrack: (peerId, track) => {
     const tile = getOrCreateRemoteTile(peerId);
+    // A track its peer turned off and on again is announced again.
+    if (tile.stream.getTracks().includes(track)) return;
     tile.stream.addTrack(track);
+    const draw = () => drawTile(tile.wrap, tile.stream);
+    track.addEventListener("mute", draw);
+    track.addEventListener("unmute", draw);
     track.addEventListener("ended", () => {
       try { tile.stream.removeTrack(track); } catch {}
       if (tile.stream.getTracks().length === 0) removeRemoteTile(peerId);
+      else draw();
     });
+    draw();
   },
 });
 
@@ -1590,11 +1598,14 @@ restoreOffers().catch((err) =>
 //
 // Calls ride peer connections of their own, one per peer in the call, through MediaCalls
 // (./media-rtc.js), signaled over the calls boot bundle. A call is with the conversation
-// open in the app when it starts: media.start publishes our camera/mic to that room's
-// linked members, or to that one peer, and pollPeerViews keeps it following them (`callPeers`);
-// endCall hangs up with every peer. Remote tracks arrive via the onTrack callback wired
-// on `media` above and land in a per-peer tile keyed by pubkey hex; a tile is cleaned up
-// when its track ends or its media connection closes.
+// open in the app when it starts: its linked peers, a room's members or one peer, are told
+// of it, and pollPeerViews keeps that following them (`callPeers`). Being told is all a
+// peer gets: the bar says who is calling, and nothing of the call is received, or sent,
+// until it is accepted there (`incomingCall`). Whoever enters a call does so with the
+// microphone and the camera on, each then turned off and on by its own button (`capture`,
+// `release`); endCall hangs up with every peer. Remote tracks arrive via the onTrack
+// callback wired on `media` above and land in a per-peer tile keyed by pubkey hex; a tile
+// is cleaned up when its track ends or its media connection closes.
 //
 // All of it is here rather than in an app's view because a view cannot capture: its
 // sandbox gives it an opaque origin, and `getUserMedia` fails there with a SecurityError
@@ -1602,13 +1613,16 @@ restoreOffers().catch((err) =>
 
 const callBar      = document.getElementById("call-bar");
 const callStartBtn = document.getElementById("call-start");
+const callDeclineBtn = document.getElementById("call-decline");
 const callMuteBtn  = document.getElementById("call-mute");
+const callCamBtn   = document.getElementById("call-cam");
 const callEndBtn   = document.getElementById("call-end");
 const callStatus   = document.getElementById("call-status");
 const videoTiles   = document.getElementById("video-tiles");
 
+// What we have captured for the call in progress: the microphone and the camera, less
+// whichever is off or the browser did not give, and null out of a call.
 let localStream = null;
-let micEnabled = true;
 const remoteTiles = new Map(); // pkHex -> { wrap, video, stream }
 // The conversation the call in progress is with: what the app shown said was open when the
 // call started (its record's `conv`), `{ room }` or `{ to }` by id in hex, null for none,
@@ -1625,29 +1639,74 @@ function callPeers(linked) {
   return linked.filter((p) => members.has(p));
 }
 
-async function updateCallStatus(peerCount) {
-  if (!localStream) {
-    // Not sending — but a peer that is shows up here anyway, so the bar says so, and the
-    // button offers to join that call rather than to start one.
-    const n = remoteTiles.size;
-    callStartBtn.textContent = n > 0 ? "Join call" : "Start call";
-    callStatus.textContent = n > 0 ? `receiving from ${n} peer${n === 1 ? "" : "s"}` : "idle";
-    callBar.classList.toggle("idle", n === 0);
+/** What both ends of a call with `scope` name it by: a room's id, "direct" for a call with
+ *  one peer, "all" for one with everyone linked. */
+const callName = (scope) => scope === undefined ? "all" : scope?.room ?? "direct";
+
+/** What a call is turned down by, and kept from ringing again: a room's or everyone's by
+ *  its name, one peer's by that peer. */
+const callId = (peer, call) => call === "direct" ? peer : call;
+
+// The calls turned down, or hung up on, by `callId`: none rings again while it lasts.
+const declined = new Set();
+
+/** The call waiting to be accepted: the first a peer says it is in that we could enter and
+ *  have not turned down, as { id, scope, callers }, or null. A room's is one whose caller
+ *  the relay says is in that room with us. */
+function incomingCall() {
+  const callers = media.callers;
+  for (const [from, call] of callers) {
+    const direct = call === "direct";
+    if (!direct && call !== "all" && !membersOfRoom(call).has(from)) continue;
+    if (declined.has(callId(from, call))) continue;
+    return {
+      id: callId(from, call),
+      scope: direct ? { to: from } : call === "all" ? undefined : { room: call },
+      callers: direct ? [from] : [...callers].filter(([, c]) => c === call).map(([p]) => p),
+    };
+  }
+  return null;
+}
+
+/** Who is in a call changed: one nobody is in any more is not one turned down, so its
+ *  next caller rings; and the bar says who is calling now. */
+function callersChanged() {
+  const live = new Set([...media.callers].map(([from, call]) => callId(from, call)));
+  for (const id of [...declined]) if (!live.has(id)) declined.delete(id);
+  updateCallStatus();
+}
+
+function updateCallStatus() {
+  const ring = localStream ? null : incomingCall();
+  callStartBtn.textContent = ring ? "Accept call" : "Start call";
+  callStartBtn.classList.toggle("primary", !!ring);
+  callBar.classList.toggle("ringing", !!ring);
+  callBar.classList.toggle("idle", !localStream);
+  if (ring) {
+    const [first, ...more] = ring.callers;
+    const room = [...joinedRooms].find(([, r]) => r.id === ring.scope?.room)?.[0];
+    callStatus.textContent = `${peerLabel(first)}${more.length > 0 ? ` and ${more.length} more are` : " is"} calling` +
+      (room ? ` in ${friendlyRoom(room)}` : "");
+  } else if (!localStream) {
+    callStatus.textContent = "idle";
   } else {
-    const n = peerCount ?? callPeers(await linkedPeers()).length;
-    // Re-read after the await: a hang-up while the transport was answering means there is no
-    // call to report on any more, and the idle branch above has already had the last word.
-    if (!localStream) return;
+    const n = media.size;
     callStatus.textContent = n === 0
       ? "in call (waiting for peers)"
       : `in call · ${n} peer${n === 1 ? "" : "s"}`;
-    callBar.classList.remove("idle");
   }
 }
 
 function showTilesIfAny() {
   const has = !!localStream || remoteTiles.size > 0;
   videoTiles.classList.toggle("hidden", !has);
+}
+
+/** Draw a tile as its video, or as its label alone while it has none to show: no camera,
+ *  or one its peer has turned off, which mutes the track here. */
+function drawTile(wrap, stream) {
+  const video = stream.getVideoTracks().some((t) => t.readyState === "live" && !t.muted);
+  wrap.classList.toggle("no-video", !video);
 }
 
 function ensureLocalTile() {
@@ -1714,37 +1773,29 @@ function removeRemoteTile(pkHex) {
   updateCallStatus();
 }
 
-async function startCall() {
+/** Start a call with the open conversation, or join the one it is in, with the microphone
+ *  and the camera on. A call the browser gives neither to goes on with both off, each
+ *  button then asking for its own. */
+function startCall() {
   if (localStream) return;
+  // A call waiting to be accepted is the one entered, whatever is open in the app.
+  const ring = incomingCall();
+  localStream = new MediaStream();
+  callScope = ring ? ring.scope : installedApps.get(activeAppKey)?.conv;
+  media.start(callName(callScope), callPeers, linkedNow);
   callStartBtn.disabled = true;
-  callStatus.textContent = "requesting camera + mic...";
-  try {
-    localStream = await navigator.mediaDevices.getUserMedia({
-      audio: true, video: true,
-    });
-  } catch (err) {
-    shellPrint(`getUserMedia failed: ${err.message}`, "err");
-    callStartBtn.disabled = false;
-    updateCallStatus();
-    return;
-  }
-  micEnabled = true;
-  callMuteBtn.textContent = "Mute";
-  callMuteBtn.disabled = false;
   callEndBtn.disabled = false;
-  callStartBtn.disabled = true;
   ensureLocalTile();
-  // Published to the open conversation's linked peers now, and to any of them that links
-  // later (pollPeerViews).
-  callScope = installedApps.get(activeAppKey)?.conv;
-  media.start(localStream.getTracks().map((track) => ({ track, stream: localStream })), callPeers(await linkedPeers()));
-  const joined = remoteTiles.size > 0;
+  showCapture();
   updateCallStatus();
-  shellPrint(joined ? "Joined the call." : "Call started.", "sys");
+  shellPrint(ring ? "Call accepted." : "Call started.", "sys");
+  void capture({ audio: true, video: true });
 }
 
 function endCall() {
   if (!localStream) return;
+  // Hung up on, the call does not ring here again for as long as others stay in it.
+  declined.add(callId(callScope?.to, callName(callScope)));
   media.end();
   for (const t of localStream.getTracks()) t.stop();
   localStream = null;
@@ -1752,21 +1803,89 @@ function endCall() {
   for (const pkHex of Array.from(remoteTiles.keys())) removeRemoteTile(pkHex);
   callStartBtn.disabled = false;
   callMuteBtn.disabled = true;
+  callCamBtn.disabled = true;
   callEndBtn.disabled = true;
-  updateCallStatus();
+  showCapture();
+  callersChanged();
   shellPrint("Call ended.", "sys");
 }
 
+/** Turn the waiting call down: its callers are not told, and it rings here no more. */
+function declineCall() {
+  const ring = incomingCall();
+  if (!ring) return;
+  declined.add(ring.id);
+  updateCallStatus();
+}
+
+/** The microphone and camera buttons, each reading what a click on it does, and our own
+ *  tile, showing the camera while it is on. */
+function showCapture() {
+  const [mic] = localStream?.getAudioTracks() ?? [];
+  const [cam] = localStream?.getVideoTracks() ?? [];
+  callMuteBtn.textContent = mic?.enabled ? "Mute" : "Unmute";
+  callCamBtn.textContent = cam ? "Stop video" : "Start video";
+  const tile = document.getElementById("tile-local");
+  if (tile) drawTile(tile, localStream);
+}
+
+/** Turn on the microphone (`audio`), the camera (`video`), or both in one asking: ask the
+ *  browser for just that, and publish it to the peers in the call, and to any that enters
+ *  it later. */
+async function capture(what) {
+  const stream = localStream;
+  if (what.audio) callMuteBtn.disabled = true;
+  if (what.video) callCamBtn.disabled = true;
+  let tracks = [];
+  try {
+    tracks = (await navigator.mediaDevices.getUserMedia(what)).getTracks();
+  } catch (err) {
+    shellPrint(`getUserMedia failed: ${err.message}`, "err");
+  }
+  // A hang-up while the browser was asking leaves no call to add it to.
+  if (localStream !== stream) { for (const t of tracks) t.stop(); return; }
+  if (what.audio) callMuteBtn.disabled = false;
+  if (what.video) callCamBtn.disabled = false;
+  for (const track of tracks) {
+    // A device that goes away, unplugged or its permission withdrawn, ends its track.
+    track.addEventListener("ended", () => release(track));
+    stream.addTrack(track);
+    media.publish(track, stream);
+  }
+  showCapture();
+}
+
+/** Let go of a captured track: stop sending it, and stop capturing it. */
+function release(track) {
+  if (!localStream?.getTracks().includes(track)) return;
+  media.unpublish(track);
+  track.stop();
+  localStream.removeTrack(track);
+  showCapture();
+}
+
+/** A mute only silences the microphone, which stays captured, so the unmute is at once.
+ *  One the call never got is asked for here. */
 function toggleMute() {
   if (!localStream) return;
-  micEnabled = !micEnabled;
-  for (const t of localStream.getAudioTracks()) t.enabled = micEnabled;
-  callMuteBtn.textContent = micEnabled ? "Mute" : "Unmute";
+  const [mic] = localStream.getAudioTracks();
+  if (!mic) { void capture({ audio: true }); return; }
+  mic.enabled = !mic.enabled;
+  showCapture();
+}
+
+/** The camera is captured only while its video is on: stopping it lets the camera go. */
+function toggleCamera() {
+  if (!localStream) return;
+  const [cam] = localStream.getVideoTracks();
+  if (cam) release(cam); else void capture({ video: true });
 }
 
 callStartBtn.addEventListener("click", startCall);
+callDeclineBtn.addEventListener("click", declineCall);
 callEndBtn.addEventListener("click", endCall);
 callMuteBtn.addEventListener("click", toggleMute);
+callCamBtn.addEventListener("click", toggleCamera);
 
 // ─── relay connection ───────────────────────────────────────────────────
 //
@@ -2213,8 +2332,8 @@ async function pollPeerViews() {
     linkedNow = peers;
     tellNick(peers);
     postContext();
-    media.sync(callPeers(peers));
-    if (localStream) await updateCallStatus(callPeers(peers).length);
+    media.sync(peers);
+    updateCallStatus();
   } catch {}
   setTimeout(pollPeerViews, 750);
 }
