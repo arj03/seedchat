@@ -12,17 +12,43 @@
 //   requires      everything its guest reaches: `_net`, `fs`, `timer`
 //   guest         its guest's source files, joined in order behind seedkernel's op-frame.
 //                 A library two apps share is one more path in the list.
-//   ui            its view, an HTML page; left out for an app with nothing to show
+//   ui            its view, an HTML page; left out for an app with nothing to show. The
+//                 stylesheets and scripts it names beside it are put into it (`readView`)
 //   modules       its pure wasm modules, by the name the guest calls each; may be empty
 
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { appFacts } from "../browser/app-api.js";
 
 /** The label names the version file beside the author key, so it is held to what is safe
  *  in a filename on every platform. */
 const APP_LABEL = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** An app's view as the one page that is signed. The shell loads a view from a `blob:` URL
+ *  into a sandbox, where there is no file beside it to fetch, so what the page at `rel`
+ *  names with `<link rel="stylesheet" href>` and `<script src>` is put into it here: a view
+ *  is written as a page with its CSS and JS in files of their own, and travels as one.
+ *  Each is a path relative to the page. `text` reads a file of the app as LF text. */
+function readView(rel, text) {
+  const beside = (ref, close) => {
+    if (/^([a-z][a-z0-9+.-]*:|\/)/i.test(ref))
+      throw new Error(`${rel}: "${ref}" must be a file beside the view, which is all a view can carry`);
+    const body = text(join(dirname(rel), ref));
+    // Its text goes between a pair of tags, so it must not hold the one that ends them.
+    if (body.toLowerCase().includes(close))
+      throw new Error(`${rel}: ${ref} contains "${close}", which would end it early inside the page`);
+    return body.endsWith("\n") ? body : body + "\n";
+  };
+  return text(rel)
+    .replace(/<link\b[^>]*>/gi, (tag) => {
+      const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1];
+      if (!/\brel\s*=\s*["']stylesheet["']/i.test(tag) || !href) return tag;
+      return `<style>\n${beside(href, "</style")}</style>`;
+    })
+    .replace(/<script\b([^>]*?)\s*\bsrc\s*=\s*["']([^"']+)["']([^>]*)>\s*<\/script>/gi,
+      (tag, before, src, after) => `<script${before}${after}>\n${beside(src, "</script")}</script>`);
+}
 
 /** Everything `authorBundle` takes for the app in `appDir` but its version, which is the
  *  author's count to keep. `guestOpFraming` is seedkernel's, from `/bundle-author`. */
@@ -50,7 +76,7 @@ export function readAppSource(appDir, guestOpFraming) {
         name: app.name ?? app.app,
         version: app.version ?? "",
         description: app.description ?? "",
-        ...(app.ui ? { ui: text(app.ui) } : {}),
+        ...(app.ui ? { ui: readView(app.ui, text) } : {}),
       },
     },
   };

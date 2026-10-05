@@ -5,7 +5,11 @@
 // drives two tabs of one — two nodes, since the identity is per tab — with a real
 // seedrelay between them, through what a person would do: drop a bundle, join a room, set
 // a nick, write, upgrade an app in place, offer it, install the offer, write to one peer,
-// start a call, remove an app, reload. Run it after a change to the shell or a view:
+// start a call, remove an app, reload. Then the jam app beside chat: a message, a reaction,
+// a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the
+// list moved on, a peer held to a slow uplink, the list reordered and trimmed, a reload
+// that gets the room and its music back from the other tab, and a tab left alone in the
+// room. Run it after a change to the shell or a view:
 //
 //   npm run e2e            (after `npm run build`)
 //
@@ -58,6 +62,7 @@ if (!browserPath || !existsSync(browserPath)) {
 const relayPath = join(root, "node_modules", "seedrelay", "server.mjs");
 for (const [path, why] of [
   [join(root, "bundle", "chat-app-v2.skb"), "run `npm run build` first"],
+  [join(root, "bundle", "jam.skb"), "run `npm run build` first"],
   [join(root, "browser", "vendor", "host"), "run `npm run build` first"],
   [relayPath, "run `npm install` first"],
 ]) {
@@ -96,10 +101,14 @@ for (let i = 0; ; i++) {
   await sleep(100);
 }
 
-// The browser. A fake camera and microphone, granted without a prompt, let a call start.
+// The browser. A fake camera and microphone, granted without a prompt, let a call start,
+// and a page may play audio without a click first, since nothing here is a person's click.
 const profile = mkdtempSync(join(tmpdir(), "seedchat-e2e-"));
+/** Where the browser puts a file a view saves, each under the id its download was given. */
+const saved = mkdtempSync(join(tmpdir(), "seedchat-e2e-saved-"));
 const browser = spawn(browserPath, ["--headless=new", "--remote-debugging-pipe", `--user-data-dir=${profile}`,
   "--no-first-run", "--disable-gpu", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
+  "--autoplay-policy=no-user-gesture-required",
   "about:blank"], { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
 browser.on("error", (err) => {
   console.error(`e2e: could not start ${browserPath}: ${err.message}`);
@@ -114,7 +123,9 @@ async function cleanup() {
   for (const p of procs) { try { p.kill(); } catch {} }
   server.close();
   await sleep(500);
-  try { rmSync(profile, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 }); } catch {}
+  for (const dir of [profile, saved]) {
+    try { rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 }); } catch {}
+  }
 }
 
 // ── the DevTools protocol, over the browser's pipe ────────────────────────────
@@ -143,12 +154,18 @@ function send(method, params = {}, sessionId) {
   });
 }
 
-// What the pages logged as an error, and the frames that run in a process of their own.
+// What the pages logged as an error, the frames that run in a process of their own, and
+// the files a view saved.
 const errors = [];
 const frames = new Map(); // tab session → sessions of its out-of-process frames
+const downloads = new Map(); // download id → { name, done }
 listeners.push((m) => {
+  if (m.method === "Browser.downloadWillBegin") downloads.set(m.params.guid, { name: m.params.suggestedFilename, done: false });
+  if (m.method === "Browser.downloadProgress" && m.params.state === "completed" && downloads.has(m.params.guid)) downloads.get(m.params.guid).done = true;
   if (m.method === "Target.attachedToTarget" && m.params.targetInfo.type === "iframe") {
     frames.set(m.sessionId, [...(frames.get(m.sessionId) ?? []), m.params.sessionId]);
+    // What a view logs as an error counts as its page's.
+    for (const domain of ["Runtime", "Log"]) void send(`${domain}.enable`, {}, m.params.sessionId).catch(() => {});
   }
   if (m.method === "Target.detachedFromTarget") {
     for (const [tab, list] of frames) frames.set(tab, list.filter((s) => s !== m.params.sessionId));
@@ -193,6 +210,21 @@ async function view(tab, expression) {
   return evaluate(tab.sid, expression, executionContextId);
 }
 
+/** Evaluate in one of the tab's app views, the one whose page has this title: for a tab
+ *  with two apps installed. Reached the way `view` reaches the only one. */
+async function viewTitled(tab, title, expression) {
+  const isIt = `document.title === ${JSON.stringify(title)}`;
+  for (const sid of frames.get(tab.sid) ?? []) {
+    if (await evaluate(sid, isIt).catch(() => false)) return evaluate(sid, expression);
+  }
+  const kids = (await send("Page.getFrameTree", {}, tab.sid)).frameTree.childFrames ?? [];
+  for (const kid of kids) {
+    const { executionContextId } = await send("Page.createIsolatedWorld", { frameId: kid.frame.id, worldName: "e2e" }, tab.sid);
+    if (await evaluate(tab.sid, isIt, executionContextId)) return evaluate(tab.sid, expression, executionContextId);
+  }
+  throw new Error(`no ${title} view`);
+}
+
 // ── the steps ─────────────────────────────────────────────────────────────────
 
 const ok = (what) => console.log(`  OK   ${what}`);
@@ -232,7 +264,125 @@ const logOf = (tab) => view(tab, text("log"));
 /** v2's conversation list names the room once its view has heard the context. */
 const roomsInView = (tab) => view(tab, text("room-list"));
 
-// A whole run takes well under a minute; a browser that hangs must not hang the caller.
+/** Evaluate in the tab's jam view, which stands beside its chat view. */
+const jam = (tab, expression) => viewTitled(tab, "Jam", expression);
+const jamSay = (tab, message) => jam(tab, `document.getElementById('msg').value = ${JSON.stringify(message)}; document.getElementById('form').requestSubmit()`);
+/** The titles in jam's playlist, in order. */
+const jamList = (tab) => jam(tab, "[...document.querySelectorAll('#list .t-title')].map((e) => e.textContent).join(' | ')");
+/** What jam's playlist says of there being nobody to play to, or nothing if it says none. */
+const jamAlone = (tab) => jam(tab, "(() => { const note = document.getElementById('alone'); return note.hidden ? '' : note.textContent; })()");
+/** Where the tab's own audio is in its track, in seconds, or -1 while it makes no sound. */
+const jamAudio = (tab) => jam(tab, "Number(document.getElementById('player').dataset.at ?? -1)");
+/** Click a button on a track's row in jam's playlist, by the track's title. */
+const jamTrack = (tab, title, label) => jam(tab, `[...document.querySelectorAll('#list .track')].find((li) => li.querySelector('.t-title').textContent === ${JSON.stringify(title)})
+  .querySelector(${JSON.stringify(`button[title^="${label}"]`)}).click()`);
+/** A FLAC file of a tone `seconds` long, as bytes: 16-bit mono at 44.1 or 96 kHz, every
+ *  subframe VERBATIM, which is the samples as they are and so needs no compressor to
+ *  write. Run in the view, not here: it is passed over as its own source, so it leans on
+ *  nothing outside itself.
+ *
+ *  Inside the audio of each frame it plants the header of the frame that follows, checksum
+ *  and all. A FLAC frame does not say how long it is, so jam finds where one ends by the
+ *  next one's header, and only the frame's own CRC-16 tells these from the real thing: a
+ *  file cut at one would not decode to the samples its list says. */
+function makeFlac(seconds, rate = 44100) {
+  const block = 4096, total = Math.round(seconds * rate);
+  const crc8 = (bytes) => {
+    let crc = 0;
+    for (const x of bytes) {
+      crc ^= x;
+      for (let bit = 0; bit < 8; bit++) crc = crc & 0x80 ? ((crc << 1) ^ 0x07) & 0xff : (crc << 1) & 0xff;
+    }
+    return crc;
+  };
+  const crc16 = (bytes, n) => {
+    let crc = 0;
+    for (let j = 0; j < n; j++) {
+      crc ^= bytes[j] << 8;
+      for (let bit = 0; bit < 8; bit++) crc = crc & 0x8000 ? ((crc << 1) ^ 0x8005) & 0xffff : (crc << 1) & 0xffff;
+    }
+    return crc;
+  };
+  // [sync][block size, rate][mono, 16 bits][frame number, as UTF-8][block size - 1, if not 4096][CRC-8]
+  const headerOf = (num, count) => {
+    const h = [0xff, 0xf8, ((count === block ? 12 : 7) << 4) | (rate === 96000 ? 11 : 9), 4 << 1, ...(num < 0x80 ? [num] : [0xc0 | (num >> 6), 0x80 | (num & 63)])];
+    if (count !== block) h.push((count - 1) >> 8, (count - 1) & 255);
+    h.push(crc8(h));
+    return h;
+  };
+  const pcm = new Int16Array(total);
+  for (let n = 0; n < total; n++) pcm[n] = Math.round(Math.sin((n * 2 * Math.PI * 440) / rate) * 6000);
+  const frames = [];
+  for (let n = 0, num = 0; n < total; n += block, num++) {
+    const count = Math.min(block, total - n);
+    if (count === block && n + block < total) {
+      const decoy = headerOf(num + 1, Math.min(block, total - n - block));
+      for (let k = 0; k + 1 < decoy.length; k += 2) pcm[n + 300 + k / 2] = (((decoy[k] << 8) | decoy[k + 1]) << 16) >> 16;
+    }
+    const head = headerOf(num, count);
+    const frame = new Uint8Array(head.length + 1 + count * 2 + 2);
+    frame.set(head);
+    let o = head.length;
+    frame[o++] = 0x02;   // one VERBATIM subframe
+    for (let i = 0; i < count; i++) {
+      frame[o++] = (pcm[n + i] >> 8) & 255;
+      frame[o++] = pcm[n + i] & 255;
+    }
+    const crc = crc16(frame, o);
+    frame[o++] = crc >> 8;
+    frame[o++] = crc & 255;
+    frames.push(frame);
+  }
+  // "fLaC", then STREAMINFO as the only metadata block
+  const out = new Uint8Array(42 + frames.reduce((size, f) => size + f.length, 0));
+  out.set([0x66, 0x4c, 0x61, 0x43, 0x80, 0, 0, 34, block >> 8, block & 255, block >> 8, block & 255]);
+  out.set([rate >> 12, (rate >> 4) & 255, (rate & 15) << 4, 15 << 4, (total >>> 24) & 255, (total >>> 16) & 255, (total >>> 8) & 255, total & 255], 18);
+  let at = 42;
+  for (const frame of frames) {
+    out.set(frame, at);
+    at += frame.length;
+  }
+  return out;
+}
+
+/** Give jam's file field a file, as picking one would. `bytes` is an expression for what
+ *  the file holds, evaluated in the view. */
+const jamPick = (tab, name, bytes) => jam(tab, `(() => {
+  const picked = new DataTransfer();
+  picked.items.add(new File([${bytes}], ${JSON.stringify(name)}));
+  const field = document.getElementById("file");
+  field.files = picked.files;
+  field.dispatchEvent(new Event("change"));
+})()`);
+/** Give it a FLAC file of this many seconds: at a megabyte for twelve, several of the pieces
+ *  jam cuts a file into. */
+const jamAddFlac = (tab, name, seconds, rate = 44100) => jamPick(tab, name, `(${makeFlac})(${seconds}, ${rate})`);
+/** Hold a tab's jam to sending audio at `rate` bytes a second, as a thin uplink would, or
+ *  with 0 let it go again. This is the one place the test reaches inside a view, because
+ *  nothing outside one can make a peer slow: it puts in place of the view's `tell` one that
+ *  sends each block only when those before it have had their time on the wire. */
+const jamUplink = (tab, rate) => jam(tab, `(() => {
+  const script = document.createElement("script");
+  script.textContent = ${JSON.stringify(`(() => {
+    if (typeof tell !== "function" || typeof BLOCK !== "number") throw new Error("jam's view has no tell to hold back");
+    const send = window.tellAtFullSpeed ??= tell;
+    let line = Promise.resolve();
+    tell = ${rate} === 0 ? send : (room, to, type, body) => {
+      if (type !== BLOCK) return send(room, to, type, body);
+      line = line.then(() => new Promise((sent) => setTimeout(sent, (body.length / ${rate}) * 1000))).then(() => send(room, to, type, body));
+    };
+    document.documentElement.dataset.uplink = "${rate}";
+  })();`)};
+  document.body.appendChild(script);
+  return document.documentElement.dataset.uplink;
+})()`);
+/** Click jam's seek bar this far along it. */
+const jamSeek = (tab, part) => jam(tab, `(() => {
+  const bar = document.getElementById("seek"), box = bar.getBoundingClientRect();
+  bar.dispatchEvent(new MouseEvent("click", { clientX: box.left + box.width * ${part}, bubbles: true }));
+})()`);
+
+// A whole run takes about a minute; a browser that hangs must not hang the caller.
 setTimeout(() => { console.error("\ne2e: gave up after 5 minutes"); void cleanup().then(() => process.exit(1)); }, 300000).unref();
 
 let A, B;
@@ -348,6 +498,147 @@ try {
   // (and its last dial of the old tab fails). Anything else is a real one.
   const expected = /^\[transport\] link \d+ .*down: |^WebSocket connection to .*splice=/;
   check(errors.every((e) => expected.test(e)), "a reload logs nothing but the old tab's links going down");
+
+  // 14. jam installs beside chat: another label and another protocol, so both stand, each
+  //     with a view of its own, in the shell that until now hosted only chat
+  for (const tab of [A, B]) {
+    await drop(tab, "jam.skb");
+    await waitFor(`${tab.name}: jam installs beside chat`, async () => (await appShown(tab)) === "Jam v1" && (await frameCount(tab)) === 2);
+    await page(tab, click("tab-app"));
+  }
+  const jamRow = await page(A, text("app-list"));
+  check(/serves “jam”/.test(jamRow) && /serves “chat”/.test(jamRow), "A: the Apps tab lists both apps, each with its own claim");
+  for (const tab of [A, B]) {
+    await waitFor(`${tab.name}: jam's view hears of the room and who is in it`, async () =>
+      (await jam(tab, "document.getElementById('room').selectedOptions[0]?.textContent")) === "# e2e" && (await jam(tab, text("here"))) === "2 here");
+  }
+
+  // 15. a message, and emoji on it: one chip an emoji, counting who put it there
+  await jamSay(A, "shall we jam?");
+  await waitFor("B: jam draws A's message under its nick", async () => /annie.*shall we jam\?/.test(await jam(B, text("logs"))));
+  const chip = "document.querySelector('.msg .chip')?.textContent";
+  await jam(B, "document.querySelector('.msg .react').click(); document.querySelector('#picker button').click()");
+  await waitFor("A: B's reaction is on A's message", async () => (await jam(A, chip)) === "👍1");
+  await jam(A, "document.querySelector('.msg .chip').click()");
+  await waitFor("B: the same emoji from A is counted on the one chip", async () => (await jam(B, chip)) === "👍2");
+  await jam(B, "document.querySelector('.msg .chip').click()");
+  await waitFor("A: B takes its own off, and A's stays", async () => (await jam(A, chip)) === "👍1"
+    && (await jam(A, "document.querySelector('.msg .chip').classList.contains('mine')")));
+
+  // 16. A adds two tracks, FLAC files, and is refused one that is neither FLAC nor Ogg
+  //     Vorbis. A file is cut into pieces and not changed: its audio stays with A, and what
+  //     the room gets is the list
+  await jamPick(A, "notes.wav", `new TextEncoder().encode("RIFF____WAVEfmt ")`);
+  await waitFor("A: a file that is not FLAC or Ogg Vorbis is refused, saying so", async () =>
+    /notes\.wav was not added: only FLAC and Ogg Vorbis files can be added/.test(await jam(A, text("toasts"))));
+  await jamAddFlac(A, "first.flac", 12);
+  await jamAddFlac(A, "second.flac", 4);
+  await waitFor("A: both tracks are in its list", async () => (await jamList(A)) === "first | second");
+  await waitFor("B: the list reaches B, and the chat says who added what", async () => (await jamList(B)) === "first | second"
+    && /annie added second/.test(await jam(B, text("logs"))));
+  check((await jam(B, text("list-count"))) === "2 tracks · 0:16", "B: each track's length came with it, counted off its frames");
+
+  //     a track is a file to keep, too. B was given none of the second and is not
+  //     listening: it fetches every piece from A, and saves them end to end behind the head
+  await send("Browser.setDownloadBehavior", { behavior: "allowAndName", downloadPath: saved, eventsEnabled: true });
+  await jamTrack(B, "second", "Download");
+  await waitFor("B: downloads a track it was never given the file of", async () => [...downloads.values()].some((d) => d.done));
+  const [savedAs, download] = [...downloads].find(([, d]) => d.done);
+  check(download.name === "second.flac" && Buffer.from(makeFlac(4)).equals(readFileSync(join(saved, savedAs))),
+    "B: the file is named for the track, and is the one A added, byte for byte");
+
+  // 17. B starts the first track for the room. B asks A for its pieces, each checked against
+  //     its name by B's own guest, and sounds them as they come; A is told what is on, and
+  //     hears it once it tunes in, at the place the room has reached
+  await jamTrack(B, "first", "Play");
+  await waitFor("B: plays a track it was never given the file of", async () => (await jamAudio(B)) > 0.2);
+  await waitFor("A: is told what the room is playing, and by whom", async () => (await jam(A, text("np-title"))) === "first"
+    && /^started by [0-9a-f]{8}$/.test(await jam(A, text("np-sub"))));
+  check((await jamAudio(A)) === -1 && (await jam(A, "document.getElementById('listen').classList.contains('nudge')")),
+    "A: hears nothing until it tunes in, and is nudged to");
+  await jam(A, click("listen"));
+  await waitFor("A: tunes in, and plays", async () => (await jamAudio(A)) > 0.2);
+  const [atA, atB] = [await jamAudio(A), await jamAudio(B)];
+  check(Math.abs(atA - atB) < 1.5, `the two tabs are at the same place in the track (${atA.toFixed(2)}s and ${atB.toFixed(2)}s)`);
+
+  // 18. where the room is in a track is the room's too. A moves it halfway through, and each
+  //     tab picks up from the piece that place falls in, without the ones before it
+  await jamSeek(A, 0.5);
+  for (const tab of [A, B]) {
+    await waitFor(`${tab.name}: sounds from where A moved the room to`, async () => {
+      const at = await jamAudio(tab);
+      return at >= 6 && at < 9;
+    });
+  }
+  await jam(A, click("play"));
+  await waitFor("B: A's pause stops B's audio", async () => (await jamAudio(B)) === -1 && /^paused by annie/.test(await jam(B, text("np-sub"))));
+  await jam(B, click("play"));
+  await waitFor("A: B's play starts A's audio again", async () => (await jamAudio(A)) > 0);
+
+  //     and the list moves on by itself when a track ends: B is moved near the end of the
+  //     first, and already holds the start of the second
+  await jamSeek(B, 0.9);
+  for (const tab of [A, B]) {
+    await waitFor(`${tab.name}: the room moves on to the second track, and plays it`, async () =>
+      (await jam(tab, text("np-title"))) === "second" && (await jamAudio(tab)) > 0.2, 30000);
+  }
+  for (const tab of [A, B]) {
+    await waitFor(`${tab.name}: and stops after the last`, async () => (await jam(tab, text("np-title"))) === "Nothing playing", 30000);
+  }
+
+  // 19. a slow peer. A is held to sending 140 KB of audio a second and adds a track that
+  //     plays at 192, so nobody can fetch it as fast as it plays, and a node that started
+  //     at once would run dry and stall. B does not: it finds out how fast the blocks
+  //     come, aims at a place further on that it can play from to the end, says when that
+  //     is, and from there sounds without a break
+  check((await jamUplink(A, 140 * 1024)) === String(140 * 1024), "A: is held to a slow uplink");
+  await jamAddFlac(A, "third.flac", 20, 96000);
+  await waitFor("B: the third track is listed", async () => (await jamList(B)) === "first | second | third", 30000);
+  await jamTrack(B, "third", "Play");
+  const heard = { said: false, from: null, to: null, breaks: 0 };
+  for (const began = Date.now(); Date.now() - began < 60000; await sleep(120)) {
+    const [title, sub, at, part] = JSON.parse(await jam(B, `JSON.stringify([document.getElementById("np-title").textContent,
+      document.getElementById("np-sub").textContent, document.getElementById("player").dataset.at ?? null,
+      parseFloat(document.getElementById("seek-fill").style.width) / 100])`));
+    if (title !== "third") break;
+    if (/^buffering… joins in /.test(sub)) heard.said = true;
+    if (at !== null) heard.to = Number(at), heard.from ??= Number(at);
+    // silent after it has started, with the room still well inside the track
+    else if (heard.from !== null && part * 20 < 19) heard.breaks++;
+  }
+  check(heard.said, "B: finds its blocks come slower than the track plays, and says when it will join");
+  check(heard.from !== null && heard.from > 4 && heard.from < 17, `B: holds off, and joins partway through (at ${heard.from?.toFixed(1)}s of 20)`);
+  check(heard.breaks === 0 && heard.to > 19, `B: sounds from there to the end without a break (to ${heard.to?.toFixed(1)}s)`);
+  await jamUplink(A, 0);
+  await jamTrack(A, "third", "Remove");
+  await waitFor("B: the track is gone again", async () => (await jamList(B)) === "first | second");
+
+  // 20. the list is everyone's to reorder and trim
+  await jamTrack(B, "second", "Move up");
+  await waitFor("A: B's reordering reaches A", async () => (await jamList(A)) === "second | first");
+  await jamTrack(A, "first", "Remove");
+  await waitFor("B: A's removal reaches B", async () => (await jamList(B)) === "second");
+
+  // 21. A reloads, and so loses the room's state and the files it added. It gets the chat,
+  //     the reactions and the list back from B, and the music too: B fetched the track to
+  //     play it, so B now serves it
+  await send("Page.reload", {}, A.sid);
+  await waitFor("A: jam is back after a reload, and shown", async () => (await appShown(A)) === "Jam v1");
+  await waitFor("A: the room's chat, reactions and list come back from B", async () => (await jamList(A)) === "second"
+    && /shall we jam\?/.test(await jam(A, text("logs"))) && (await jam(A, chip)) === "👍1", 30000);
+  await jamTrack(A, "second", "Play");
+  await waitFor("A: plays a track whose file it no longer has, fetched from B", async () => (await jamAudio(A)) > 0.2, 30000);
+
+  // 22. music is added to a room, for whoever else is in it. B leaves: A is told nobody
+  //     else is there, and may still add music for whoever comes; B is told it is in no
+  //     room, in place of a button to add music with
+  check((await jamAlone(A)) === "" && (await jamAlone(B)) === "", "with both in the room, neither says it is alone");
+  await page(B, clickButton("room-list", "Leave"));
+  await waitFor("A: says nobody else is connected, and still offers to add music", async () =>
+    /^Nobody else is connected here/.test(await jamAlone(A)) && !(await jam(A, "document.getElementById('add').hidden")));
+  await waitFor("B: says it is in no room, in place of offering to add music", async () =>
+    /^Not connected to a room/.test(await jamAlone(B)) && (await jam(B, "document.getElementById('add').hidden")));
+  check(errors.every((e) => expected.test(e)), "jam logged no error in either tab");
 } catch (err) {
   failure = err;
 }

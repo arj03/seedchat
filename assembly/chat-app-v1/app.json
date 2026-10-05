@@ -6,7 +6,7 @@
   "description": "text only",
   "protocols": ["chat"],
   "requires": ["_net"],
-  "guest": ["../guest-lib/net.js", "../chat-lib/chat-guest.js", "guest.js"],
+  "guest": ["../guest-lib/net.js", "../guest-lib/context.js", "../chat-lib/chat-guest.js", "guest.js"],
   "ui": "ui.html",
   "modules": { "chat": "../../build/chat-app-v1.wasm" }
 }

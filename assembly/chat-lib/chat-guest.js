@@ -1,18 +1,15 @@
 // The chat guest library: what every version of the chat app's guest does the same way.
-// Each version's app.json names it in front of its own guest.js, after guest-lib/net.js, so
-// the source is written once and each signed bundle still carries all of it.
+// Each version's app.json names it in front of its own guest.js, after guest-lib/net.js and
+// guest-lib/context.js, so the source is written once and each signed bundle still carries
+// all of it.
 //
-// It holds the chat wire protocol's vocabulary, the node's context as the shell hands it
-// over, and a chat guest's whole `handle` (`serve`): decide whether a peer's frame is for
-// this node, send its own to the peers it is for, and have the app's module draw it. What
-// a version's guest.js says is which frame types it speaks.
+// It holds the chat wire protocol's vocabulary and a chat guest's whole `handle` (`serve`):
+// decide whether a peer's frame is for this node, send its own to the peers it is for, and
+// have the app's module draw it. The node's context, and the rooms a guest reads out of
+// it, are guest-lib/context.js's. What a version's guest.js says is which frame types it
+// speaks.
 
 const EMPTY = new Uint8Array(0);
-
-/** The shell's two loopback ops (browser/app-api.js): the node's context, and bytes from
- *  this app's own view. */
-const OP_CONTEXT = "ctx";
-const OP_UI = "ui";
 
 /** The wire protocol every chat app speaks (§12.10), the one id in each version's
  *  app.json `protocols`. It names the conversation, not the code: two peers running
@@ -38,32 +35,9 @@ const isRoom = (type) => type === ROOM_TEXT || type === ROOM_IMAGE;
 /** This node's key, which the host writes (seedkernel §12.3). */
 const ME = fromHex(HOST.identity);
 
-/** The rooms this node is in, by id in hex, each the set of keys the relay lists there. */
-let rooms = new Map();
-
-/** The `ctx` op: keep the part of the context a guest decides with, and answer all of it
- *  for the view as render type 0, `[0][the same JSON]`. The view hears of rooms, linked
- *  peers, contacts and names only this way, so it and the guest never hold two different
- *  pictures. The JSON is ASCII, so it reads one character per byte: a realm has no
- *  TextDecoder. */
-function setContext(json) {
-  let text = "";
-  for (let i = 0; i < json.length; i++) text += String.fromCharCode(json[i]);
-  rooms = new Map(JSON.parse(text).rooms.map((r) => [r.id, new Set(r.members)]));
-  const out = new Uint8Array(1 + json.length);
-  out.set(json, 1);
-  return out;
-}
-
 /** The id in front of a frame's body, in hex: its room, or its addressee. */
 function headOf(frame) {
   return frame.length >= 33 ? toHex(frame.subarray(1, 33)) : "";
-}
-
-/** Whether `peer` is in the joined room `room`. Who is linked is not who is in a room. */
-function inRoom(room, peer) {
-  const members = rooms.get(room);
-  return members !== undefined && members.has(peer);
 }
 
 /** Whether a peer's frame is for this node: a room frame from someone in the room it

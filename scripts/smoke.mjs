@@ -546,7 +546,59 @@ try {
   ok("call signaling end-to-end: A's calls app → call/v1 → B's calls app → onInbound");
 } catch (err) { fail("call signaling end-to-end", err); }
 
-// 8. the gate a bundle passes before it is installed (peekBundle → appFacts). A peer's
+// 8. the jam app: a second app beside chat, under its own label and its own protocol, with
+//    no module at all. Its guest is a pipe scoped to a room that names the blocks of audio
+//    passing through it: a frame its view casts reaches the room's members, one it tells
+//    reaches one of them, and a block is drawn under the hash the RECEIVING guest gave it.
+try {
+  const jam = authorBundle(sodium, authorA, { ...readAppSource(appDir("jam-app"), guestOpFraming), version: 1 });
+  const JAM_PROTO = jam.manifest.protocols[0];
+  const facts = appFacts(jam.manifest);
+  assert(facts.name === "Jam" && typeof facts.ui === "string", "the manifest carries jam's row and view");
+  assert(facts.requires.length === 1 && facts.requires[0] === NET_PROTO && jam.manifest.modules.length === 0,
+    "jam reaches the network and nothing else, and has no module");
+  const jamRenders = [];
+  consent(jam.blob);
+  const jamA = await A.install(jam.blob);
+  consent(jam.blob);
+  const jamB = await B.install(jam.blob, { onInbound: (claim, from, answer) => { if (answer.length > 0) jamRenders.push(new Uint8Array(answer)); } });
+  assert(A.resolve(JAM_PROTO) === jamA.manifest.app && A.resolve(CHAT_PROTO) === chatKey,
+    "jam and chat stand side by side, each holding its own claim");
+  assert(B.resolve(JAM_PROTO) === jamB.manifest.app, `B routes "${JAM_PROTO}" to the app it installed`);
+
+  // A is in two rooms with B, as far as A knows; B is in one of them.
+  const told = await jamA.invoke(writeOp(APP_OP_CONTEXT, contextOf(peerA, [roomWith(ROOM, peerB), roomWith(STRAY, peerB)], [peerB])));
+  assert(told[0] === 0 && JSON.parse(text(told.slice(1))).me === peerA, "jam's guest hands its view the context");
+  await jamB.invoke(writeOp(APP_OP_CONTEXT, contextOf(peerB, [roomWith(ROOM, peerA)], [peerA])));
+
+  const ASK_CAST = 1, ASK_TELL = 2, ASK_HASH = 3, DOC = 1, BLOCK = 4;
+  const jamFrame = (type, room, body) => concat([type], fromHex(room), body);
+  // Cast into the room B is not in, then into the one it is: one link carries both in
+  // order, so the first render B sees says the first was not passed on.
+  await jamA.invoke(writeOp(APP_OP_UI, concat([ASK_CAST], jamFrame(DOC, STRAY, utf8('{"msgs":[]}')))));
+  const doc = jamFrame(DOC, ROOM, utf8('{"hello":true}'));
+  const castAnswer = await jamA.invoke(writeOp(APP_OP_UI, concat([ASK_CAST], doc)));
+  assert(castAnswer.length === 0, "a cast answers nothing: the view has already applied what it sent");
+  await until(() => jamRenders.length >= 1, 4000, "jam's frame");
+  assert(jamRenders[0][0] === 1 && toHex(jamRenders[0].slice(1, 33)) === peerA && toHex(jamRenders[0].slice(33)) === toHex(doc),
+    "a peer's frame is passed to the view with its sender in front, and one for a room B is not in is not");
+
+  // A block of the size the view cuts audio into, told to one member.
+  const block = Uint8Array.from({ length: 128 * 1024 }, (_, i) => (i * 31 + (i >> 8)) & 255);
+  const id = toHex(sodium.crypto_generichash(32, block));
+  await jamA.invoke(writeOp(APP_OP_UI, concat([ASK_TELL], identityB.publicKey, jamFrame(BLOCK, ROOM, block))));
+  await until(() => jamRenders.length >= 2, 4000, "jam's block");
+  const got = jamRenders[1];
+  assert(got[0] === 2 && toHex(got.slice(1, 33)) === peerA && toHex(got.slice(33, 65)) === ROOM, "a block is drawn with its sender and room");
+  assert(toHex(got.slice(65, 97)) === id, "a block is named by the BLAKE2b-256 of its bytes, by the guest that received it");
+  assert(got.length === 97 + block.length && toHex(got.slice(97)) === toHex(block), "a 128 KB block arrives whole");
+  // The same name from the sender's own guest, which is how a track's block list is made.
+  const named = await jamA.invoke(writeOp(APP_OP_UI, concat([ASK_HASH], [0, 0, 0, 7], block)));
+  assert(named[0] === 3 && named[4] === 7 && toHex(named.slice(5)) === id, "a view's hash ask is answered under its tag");
+  ok(`jam: cast and tell scoped to a room, and a ${block.length / 1024} KB block named by its hash at both ends`);
+} catch (err) { fail("jam app", err); }
+
+// 9. the gate a bundle passes before it is installed (peekBundle → appFacts). A peer's
 // bundle is installed on one click of a row showing a name and an author, so the reach it
 // declares is the whole of what that click grants. The shell hosts any app, so the gate is
 // not about what an app is for: it is the contract version it was built to, and a reach
@@ -575,7 +627,7 @@ try {
   ok("the install gate admits any app within the shell's grants and its contract version");
 } catch (err) { fail("install gate", err); }
 
-// 9. the two transport ops the page's rooms and contacts rest on: `welcome` names the
+// 10. the two transport ops the page's rooms and contacts rest on: `welcome` names the
 //    room-mates, whose calls need no contact secret, and `forget` drops one peer and its
 //    links, which is how leaving a room hangs up without touching anyone else.
 try {

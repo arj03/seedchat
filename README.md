@@ -13,7 +13,10 @@ that is its behaviour, an HTML **view** the shell runs in a sandboxed iframe, an
 and its guest and reads none of them, so a new version of an app is a new bundle and
 nothing else: the shell does not change. Chat is the app here, in two versions, so the
 upgrade can be watched: `v1` is room text, and `v2` adds images, direct chats and a
-conversation list.
+conversation list. **Jam** is a second app beside it, under its own label and protocol: a
+room's chat with emoji reactions, and a playlist the room keeps and plays together, FLAC
+and Ogg Vorbis files streamed from peer to peer as they are. The shell that hosts it is the
+one that hosted only chat.
 
 Two smaller apps ride alongside as **boot bundles**, pinned to the exact author and app
 the page was built with: **offers** (`browser/offers-app.js`), which owns the `offer/v1`
@@ -30,7 +33,8 @@ chat makes into the runtime goes through a published entry point of
 
 **Contents:** [Quick start](#quick-start) · [Using the shell](#using-the-shell) ·
 [What's here](#whats-here) · [Writing an app](#writing-an-app) · [The chat app](#the-chat-app) ·
-[Protocol interop](#protocol-interop) · [The seedkernel surface chat uses](#the-seedkernel-surface-chat-uses) ·
+[The jam app](#the-jam-app) · [Protocol interop](#protocol-interop) ·
+[The seedkernel surface chat uses](#the-seedkernel-surface-chat-uses) ·
 [Troubleshooting](#troubleshooting)
 
 ## Quick start
@@ -58,7 +62,8 @@ chat makes into the runtime goes through a published entry point of
 #    browser core libsodium and PQ wasm)
 cd ../seedkernel/WASM && npm install && npm run build:browser
 
-# 2. build chat (both app bundles + the offers and calls boot bundles) and vendor the runtime
+# 2. build the apps (both chat bundles and jam, + the offers and calls boot bundles)
+#    and vendor the runtime
 cd ../../seedchat && npm install && npm run build
 
 # 2b. (optional) headless check that chat still works against this seedkernel:
@@ -67,8 +72,9 @@ cd ../../seedchat && npm install && npm run build
 npm run smoke
 
 # 2c. (optional) the same in a real browser: two tabs of the shell and a relay,
-#     through install, chat, upgrade, offer, a call and a reload. Needs Chrome,
-#     Edge or Chromium.
+#     through install, chat, upgrade, offer, a call and a reload, then jam beside
+#     chat with a FLAC file added in one tab and streamed to the other. Needs
+#     Chrome, Edge or Chromium.
 npm run e2e
 
 # 3. the relay where peers meet and link before moving to WebRTC (the transport bundle
@@ -80,12 +86,13 @@ npm run serve        # → http://localhost:3000/shell.html
 ```
 
 Open the page in two tabs or two browsers and join the same room in both on the
-**Network** tab. Then load a chat app (below) in each.
+**Network** tab. Then load an app (below) in each: chat, jam, or both.
 
 | Script | What it does |
 | --- | --- |
-| `npm run build` | Compiles both AssemblyScript modules, signs `bundle/chat-app-v1.skb` and `bundle/chat-app-v2.skb` from their app directories, signs the offers and calls boot bundles, then vendors the runtime. |
+| `npm run build` | Compiles both AssemblyScript modules, signs `bundle/chat-app-v1.skb`, `bundle/chat-app-v2.skb` and `bundle/jam.skb` from their app directories, signs the offers and calls boot bundles, then vendors the runtime. |
 | `npm run build:chat-app-v1` / `build:chat-app-v2` | One app's compile → sign pipeline. |
+| `npm run build:jam-app` | Signs `bundle/jam.skb`. Jam has no module, so there is nothing to compile. |
 | `npm run build:boot-bundles` | Signs the offers and calls apps into `bundle/offers.skb` and `bundle/calls.skb` and generates `browser/offers-bundle.js` and `browser/calls-bundle.js`. |
 | `npm run vendor` | Copies the built seedkernel host, libsodium and QuickJS into `browser/vendor/`. |
 | `npm run smoke` | Headless regression test (needs `npm run build` first). Run it after every seedkernel update. |
@@ -107,8 +114,9 @@ proof of who it is: anyone can take any nick, and the key is what the channel
 authenticated.
 
 **Loading an app.** On the **Apps** tab, pick or drop `bundle/chat-app-v1.skb` (or
-`v2`). The browser only verifies the bundle's signature and admits it under the
-shell's consent policy; it never signs anything itself. Dropping a newer `.skb` of
+`v2`), or `bundle/jam.skb`, which installs beside chat. The browser only verifies the
+bundle's signature and admits it under the shell's consent policy; it never signs anything
+itself. Dropping a newer `.skb` of
 an app you already have is how you upgrade it. Each installed app has a view of its own;
 **Open** on its row puts it in front.
 
@@ -203,16 +211,18 @@ when both tabs are on this machine. Reaching the shell from another device needs
 | `browser/calls-app.js` | The calls app *shape*: the `call/v1` id, the app id `calls`, its one reach (`_net`), and its guest source — a claim that hands a peer's call signal to the page, and a `send` op that puts the page's on the wire. What else two pages tell each other rides it too: `{ peer }`, that one added or removed the other as a peer, and `{ nick }`, what a peer calls itself. |
 | `browser/media-rtc.js` | The call feature: `MediaCalls`, one `RTCPeerConnection` per peer that the page owns, beside the transport's, with perfect negotiation signaled over `call/v1`. Live media is the page's own — the host holds only the transport's connections. |
 | `assembly/chat-app-v1/` | Chat v1 — text only, written to one room at a time. `app.json` says what the bundle is, `guest.js` is its guest, `ui.html` its view, `index.ts` its module. |
-| `assembly/chat-app-v2/` | Chat v2 — text and images, in several rooms and in direct chats. Same shape; upgrading v1→v2 is a re-admit at the same name under the same key. |
+| `assembly/chat-app-v2/` | Chat v2 — text and images, in several rooms and in direct chats. Same shape, with its view's CSS and JS in files of their own (`ui.css`, `ui.js`) beside the page; upgrading v1→v2 is a re-admit at the same name under the same key. |
 | `assembly/chat-lib/` | What the two chat versions share, written once and carried by each bundle: `chat-guest.js`, a chat guest's whole `handle` and the chat wire vocabulary, and `render.ts`, the module's one transform. A version's own files say which frame types it speaks. |
-| `assembly/guest-lib/net.js` | Guest source any guest that reaches the network puts in front of its own: the transport's `send` and `peers` ops, and keys as hex. The chat apps and both boot bundles use it. |
+| `assembly/jam-app/` | Jam: a room's chat, emoji reactions, and a playlist kept and played together. `guest.js` is a pipe scoped to a room that names blocks of audio by their hash, its view (`ui.html`, `ui.css`, `ui.js`) holds the room's state and plays it, `formats.js` finds where a FLAC or Ogg Vorbis file may be cut, and there is no module. See [The jam app](#the-jam-app). |
+| `assembly/guest-lib/net.js` | Guest source any guest that reaches the network puts in front of its own: the transport's `send` and `peers` ops, and keys as hex. Every app and both boot bundles use it. |
+| `assembly/guest-lib/context.js` | Guest source for a guest whose frames are written to rooms: the shell's two ops by name, the rooms read out of the node's context, and the context passed on to the view as render type 0. The chat apps and jam use it. |
 | `asconfig.chat-app-v*.json` | AssemblyScript compiler config for each module (`build/chat-app-v*.wasm`). |
-| `scripts/app-source.mjs` | Reads an app directory (`app.json` and what it names) into what gets signed. The builder and the smoke test share it. |
+| `scripts/app-source.mjs` | Reads an app directory (`app.json` and what it names) into what gets signed, putting a view's stylesheets and scripts into its page. The builder and the smoke test share it. |
 | `scripts/build-app-bundle.mjs` | The offline bundle author: signs an app directory into a `.skb` under `chat-author.key`, tracking a monotonic freshness mark per app label in `<app>-author.version`. |
 | `scripts/build-boot-bundles.mjs` | Signs the offers and calls apps' guest-only bundles under the same key, each with its own freshness mark in `<name>-author.version`. |
 | `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/`, plus the browser libsodium and the QuickJS realm engine. Refuses a stale seedkernel build. |
-| `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat apps and the shell's two ops, upgrades v1 to v2 in place, and round-trips an offer through the offers app and a call signal through the calls app. |
-| `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, messages on both chat versions, the in-place upgrade, an offer, a direct message, a call, removing an app, and a reload. |
+| `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat apps and the shell's two ops, upgrades v1 to v2 in place, round-trips an offer through the offers app and a call signal through the calls app, and carries a frame and a block of audio through jam's guest. |
+| `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, messages on both chat versions, the in-place upgrade, an offer, a direct message, a call, removing an app, and a reload. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. The FLAC file it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
 | `scripts/clean.mjs` | Deletes `build/` and `browser/vendor/` when a rebuild isn't taking. |
 
 What the shell reads of an app — its name, version, description and view — rides in the
@@ -225,11 +235,11 @@ reads none of it. Nothing is read out of a module, so an app needs none.
 | Path | What it is |
 | --- | --- |
 | `build/` | Compiled `.wasm` (and `.wat`) handlers. |
-| `bundle/` | Signed bundles: `chat-app-v1.skb`, `chat-app-v2.skb`, `offers.skb`, `calls.skb`. |
+| `bundle/` | Signed bundles: `chat-app-v1.skb`, `chat-app-v2.skb`, `jam.skb`, `offers.skb`, `calls.skb`. |
 | `browser/vendor/` | The vendored runtime the page loads. |
 | `browser/offers-bundle.js`, `browser/calls-bundle.js` | The boot bundles embedded as JS modules, since the page is served from `browser/` and `bundle/` is not. |
 | `chat-author.key` | The author signing key, minted on the first build. |
-| `chat-author.version`, `offers-author.version`, `calls-author.version` | Each app label's version high-water mark. Both chat versions are the app `chat`, so they share one. |
+| `chat-author.version`, `jam-author.version`, `offers-author.version`, `calls-author.version` | Each app label's version high-water mark. Both chat versions are the app `chat`, so they share one. |
 
 **Back up `chat-author.key` and the `.version` files together.** The key *is* the
 author identity: bundles signed under a new key are a different author, so peers
@@ -259,6 +269,7 @@ The channel handshake is in
 
 Anything the shell installs has the same parts, and `browser/app-api.js` is the whole of
 what it and the shell agree on. Chat v1 is the minimal reference: `assembly/chat-app-v1/`.
+Jam (`assembly/jam-app/`) is one with no module, whose state lives in its view.
 
 ### 1. `app.json`: what the bundle is
 
@@ -273,7 +284,7 @@ One file beside the app's sources. Every path in it is relative to it.
   "description": "text only",
   "protocols": ["chat"],
   "requires": ["_net"],
-  "guest": ["../guest-lib/net.js", "../chat-lib/chat-guest.js", "guest.js"],
+  "guest": ["../guest-lib/net.js", "../guest-lib/context.js", "../chat-lib/chat-guest.js", "guest.js"],
   "ui": "ui.html",
   "modules": { "chat": "../../build/chat-app-v1.wasm" }
 }
@@ -287,7 +298,7 @@ One file beside the app's sources. Every path in it is relative to it.
 | `protocols` | The protocol ids the app claims. A peer's frame under one of them reaches its guest. |
 | `requires` | Everything its guest reaches: `_net` (the network), `fs` (a keyspace of its own), `timer` (one wake). The shell grants nothing else, and the consent row shows the list. |
 | `guest` | The guest's source files, joined in order behind seedkernel's op-frame. A library two apps share is one more path. |
-| `ui` | The view, an HTML page. Left out for an app with nothing to show. |
+| `ui` | The view, an HTML page, with any stylesheets and scripts it names beside it. Left out for an app with nothing to show. |
 | `modules` | Pure WASM modules, by the name the guest calls each. May be empty. |
 
 `scripts/build-app-bundle.mjs <app-dir> <skb-out>` signs it. The name, version,
@@ -309,7 +320,14 @@ answers. Each answer is **render bytes** for the view, or nothing.
 The 32-byte caller id tells a peer from the shell, and `callerOf`/`readOp` from
 seedkernel's op-frame split both. To send, a guest calls `_net` (`netSend` in
 `assembly/guest-lib/net.js`); to draw, it calls its own module by name, or builds the
-bytes itself.
+bytes itself. A guest whose frames are written to rooms reads them out of the context with
+`setContext` and `inRoom` (`assembly/guest-lib/context.js`).
+
+An answer to a peer's frame is **render bytes and nothing else**. The shell hands every
+one to the view (seedkernel's `onInbound`), so a guest that answered a peer's request with
+the reply itself would be drawing that reply on its own page. An app that asks a peer for
+something therefore has the peer send it back as a frame of its own, which is how jam moves
+audio.
 
 The **context** is ASCII JSON, with every key and room id in lowercase hex:
 
@@ -330,9 +348,21 @@ tab, and a nick is set there. A contact's secret is never in it.
 
 ### 3. The view: `ui.html`
 
-A self-contained HTML page. The shell loads it into an iframe sandboxed `allow-scripts
-allow-forms` from a `blob:` URL, so it has no access to the page's keys. The same opaque
-origin is refused the camera and microphone, which is why a call is the shell's. Each
+An HTML page, signed and loaded as one self-contained document. It can be written as
+several files: a `<link rel="stylesheet" href="ui.css">` or a `<script src="ui.js"></script>`
+naming a file beside the page is replaced by that file's text when the bundle is built
+(`readView` in `scripts/app-source.mjs`), so the page opens in a browser as it stands and
+travels as one. Nothing else can be named: there is no file beside a view once it is
+running. Chat v1's view is a single file; chat v2's is three, and jam's has a second
+script beside its own.
+
+The shell loads it into an iframe sandboxed `allow-scripts allow-forms
+allow-downloads` from a `blob:` URL, so it has no access to the page's keys. A view may
+hand the user a file it has put together, as a link to a blob of its own, which is how
+jam saves a track; it reads and writes nothing on disk. The same opaque
+origin is refused the camera and microphone, which is why a call is the shell's. Nor will a
+media element there load a `blob:` URL: in Chromium an `<audio>` given one stalls without
+an error, so a view that plays audio decodes it with Web Audio, as jam's does. Each
 installed app has its own, kept until the app is removed or replaced. It talks to the
 shell only via `postMessage`:
 
@@ -403,6 +433,119 @@ room text. And either way it has the module draw the frame, and answers the rend
 
 A sender's nick is not in a frame or a render. It is the shell's, and the view reads it
 out of the context.
+
+## The jam app
+
+A room's chat, emoji reactions on what is said, and a playlist the room keeps and plays
+together. It follows [seedstore](https://github.com/arj03/seedstore)'s split into two
+planes: small frames that say what the room agrees on, and blocks of audio that are named
+by their hash and so need no trust in whoever sent them.
+
+**A frame** is `[type u8][room 32][body]`, under the protocol id `jam`.
+
+| `type` | Body | For |
+| --- | --- | --- |
+| `1` DOC | JSON | A part of the room's state, or all of it |
+| `2` WANT | block ids, 32 bytes each | Send me these blocks |
+| `3` NACK | block ids | I do not have these |
+| `4` BLOCK | the bytes of one block | A block that was asked for |
+
+**The guest** (`jam-app/guest.js`) reads the room of every frame and the body of none. A
+frame its view *casts* goes to the linked members of the frame's room, and one it *tells*
+goes to a single member. A peer's frame is passed to the view only if the relay lists its
+sender in that room. A BLOCK is hashed on the way in, so its render carries the id this
+node's own guest gave those bytes, never the one the sender claimed. The view also asks it
+to name the blocks of a file being added, so the two never name a block two ways.
+
+**The room's state** is the view's (`jam-app/ui.js`), and is one document:
+
+```
+msgs    [{ by, id, n, at, text }]      added, never changed
+reacts  [{ t, e, by, on, n }]          per (target, emoji, peer), the latest n wins
+tracks  [{ id, by, n, title, codec, rate, ch, size, head, blocks, lens, pre,
+           pos, gone, v, vBy }]        what a track is never changes; pos goes to the
+                                       latest (v, vBy); gone, once set, stays set
+play    { v, by, id, pos, on }         what is playing: the latest (v, by) wins
+```
+
+Every change is a smaller document of the same shape, merged the same way whoever sent it
+and however often. `n` and `v` are a clock the room shares: a change takes one more than
+the highest its author has seen. So a newcomer is caught up by being sent the state, a
+change heard twice changes nothing the second time, and two peers that move the same track
+at once end up agreeing on one of the moves. A node asks each linked member for the state
+when it first sees it (`hello`), which is also what brings a reloaded tab back.
+
+**Audio** is the file's own bytes: nothing is re-encoded, on the way in or on the way
+out. A file is cut into pieces that each decode without the rest (`jam-app/formats.js`),
+of at most 256 KB or five seconds, and each piece is a block, named by the BLAKE2b-256 of
+its bytes.
+
+- A **FLAC** file is a header and then frames, and every frame decodes on its own, so a
+  piece is whole frames. A frame does not say how long it is: it ends where the next
+  begins, which is found by the next one's sync code and header and proved by the CRC-16
+  the frame ends with, since audio can hold bytes that read as a header.
+- An **Ogg Vorbis** file is pages, each saying how long it is and how many samples the
+  stream has reached, so a piece is whole pages, cut where no packet runs over. A Vorbis
+  packet is decoded against the one before it, so a piece is decoded with the last page of
+  the piece before it in front (`pre`), and the samples that page yields are dropped.
+
+A track lists its blocks, how many samples each holds (`lens`), and one more block that
+every piece is decoded behind (`head`): FLAC's STREAMINFO, or Vorbis's three header
+packets. Whoever added a track serves it from the file on disk, a slice at a time, and
+everyone who has fetched a track serves it too, so the one who added it can leave. Blocks
+are asked of any member that says it holds the track (`have`), a few at a time, and one
+that does not arrive is asked for again, of someone else if there is anyone.
+
+A track is a file to keep, too: **Download** on its row fetches whatever of it is not
+here yet, listening or not, and saves the head and then the pieces, end to end. The audio
+is the bytes that were added. An Ogg Vorbis track comes out as the file itself. A FLAC
+track comes out as the file's frames behind a STREAMINFO that says how long the stream is,
+without the tags and pictures the file carried, which no peer was sent.
+
+**Playing** is the room's, and listening is each node's own. `play` says which track,
+from where, and whether it is running, so play, pause, seek and skip are for everyone. A
+node that has tuned in asks first for the piece the room has reached, then the ones after
+it, and needs only those to sound: it comes in anywhere in a track as readily as at its
+start. Each piece is decoded by Web Audio into the samples it holds and set down on the
+audio clock at the sample the one before it stopped at, in a context that runs at the
+track's own sample rate. Decoded that way a piece is the same samples a decode of the
+whole file gives, and a node holds a few seconds of them however long the track. One that
+has not tuned in sees what is on and is nudged. When a track ends each node works out the
+next from the same list, and the one with the highest key says so first.
+
+**Buffering.** The room's clock does not stop for a node whose blocks are slow, so a node
+does not start sounding until it will not run dry. It measures how fast blocks have been
+arriving and counts on four fifths of that.
+
+- *Faster than the track plays*, it starts once it holds four seconds ahead of the room,
+  which is what carries it over a link that stutters. From then on its lead only grows: it
+  goes on to fetch the rest of the track, and the one after it.
+- *Slower than the track plays*, sound started at once would stall. So it works out how
+  much it must hold for the rest to arrive in time, aims at the place in the track where
+  the room will be when it holds that much, and asks for pieces from there rather than
+  ones the room will have passed. It says when it will join, and from there plays to the
+  end of the track without a break.
+
+Until a block has arrived there is nothing to measure, so a node asks for little at first:
+what is asked for cannot be called back, and a slow link has to deliver all of it before
+anything asked for after. A peer that is still delivering is not given up on for being
+slow. And a track someone starts begins a second and a half later when not everyone holds
+it yet, so that the others have its opening by the time it sounds.
+
+What it does not do:
+
+- **Nothing is signed.** A frame is attributed by the channel it arrived on, and only
+  members of a room are heard, so the state is the members' to write. What one member
+  relays of another's messages is its own word for them.
+- **Nothing is kept.** The room's state and its audio live in the page, so they last as
+  long as someone in the room stays. A tab that reloads gets both back from the others; a
+  room everyone has left is empty when they return.
+- **Only FLAC and Ogg Vorbis.** They are the two formats it knows how to cut. A file of
+  another kind is refused rather than converted: MP3, AAC and Opus could each be cut too,
+  and are not yet. A file is at most 512 MB.
+- **The room does not wait for a slow node.** One whose blocks come slower than a track
+  plays cannot hear all of it, whatever it does. It hears the later part of each track,
+  unbroken, rather than all of it in pieces.
 
 ## Protocol interop
 
@@ -518,6 +661,15 @@ out here.
 - **The relay reads as unreachable, but it is running.** It may be private: a relay
   started with `--secret` drops a client without its secret, or with another one.
   Enter the relay's secret in the **Relay secret** field.
+- **Jam shows what is playing, with no sound.** Press **Tune in**: listening is each
+  node's own choice, and a browser lets a page make sound only after a click in it.
+- **Jam says `Not connected to a room`, or `Nobody else is connected here yet`.** Music is
+  added to a room, for whoever else is in it running jam. Join one on the **Network** tab.
+  With a room and nobody else in it, music can still be added: whoever joins is sent the
+  list, and fetches the audio from this node.
+- **A track in jam says `nobody here has it`.** Its audio is held by whoever added it and
+  by everyone who has played it since. If they have all left or reloaded, the entry is
+  still in the list and its audio is gone: remove it and add the file again.
 - **A dropped `.skb` is refused, or a peer's Offer never shows up.** The notice says
   why, and for an Offer the reason is in the App tab's **Diagnostics**. Either the
   bundle failed verification ("not a valid app bundle"), or it is not an app this shell

@@ -688,6 +688,10 @@ function postContext() {
 // allow-forms lets a view use a normal <form> element for its input. A view still
 // preventDefault()s in its submit handler so no actual navigation happens; the null
 // sandbox origin contains anything the form could attempt regardless.
+//
+// allow-downloads lets a view hand the user a file it has put together, as a link to a
+// blob of its own: jam saves a track that way. A file is all it is. The view still reads
+// and writes nothing on disk, and the browser shows a download like any other.
 
 /** Renders held for a view that has not said it is ready; past this the oldest go. */
 const MAX_QUEUED_RENDERS = 512;
@@ -696,7 +700,7 @@ function mountView(rec) {
   if (!rec.ui) return;
   const frame = document.createElement("iframe");
   frame.className = "app-frame hidden";
-  frame.setAttribute("sandbox", "allow-scripts allow-forms");
+  frame.setAttribute("sandbox", "allow-scripts allow-forms allow-downloads");
   frame.title = `${rec.name} UI`;
   rec.blobUrl = URL.createObjectURL(new Blob([rec.ui], { type: "text/html" }));
   frame.src = rec.blobUrl;

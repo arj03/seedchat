@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>Jam</title>
+<link rel="stylesheet" href="ui.css" />
+</head>
+<body>
+
+<header>
+  <span class="logo">♪ Jam</span>
+  <select id="room" aria-label="Room"></select>
+  <span id="here"></span>
+  <span class="spacer"></span>
+  <span id="me"></span>
+</header>
+
+<nav id="tabs">
+  <button type="button" data-tab="chat" class="active">Chat</button>
+  <button type="button" data-tab="side">Playlist</button>
+</nav>
+
+<main id="main" data-tab="chat">
+  <section id="chat" aria-label="Chat">
+    <div id="logs"><div id="empty" class="note"></div></div>
+    <form id="form" autocomplete="off">
+      <button id="emoji" class="icon" type="button" title="Emoji" aria-label="Insert an emoji">😀</button>
+      <input id="msg" type="text" placeholder="Message" maxlength="2000" autocapitalize="sentences" />
+      <button class="primary" type="submit">Send</button>
+    </form>
+  </section>
+
+  <section id="side" aria-label="Playlist">
+    <div id="player">
+      <div id="np">
+        <div id="np-art"><span class="eq"><i></i><i></i><i></i><i></i></span></div>
+        <div id="np-text">
+          <div id="np-title">Nothing playing</div>
+          <div id="np-sub"></div>
+        </div>
+      </div>
+      <div id="seek" role="slider" tabindex="0" aria-label="Position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div id="seek-track"><div id="seek-fill"></div></div>
+      </div>
+      <div id="np-times"><span id="np-pos">0:00</span><span id="np-dur">0:00</span></div>
+      <div id="controls">
+        <button id="prev" class="icon" type="button" title="Previous" aria-label="Previous"></button>
+        <button id="play" class="icon primary" type="button" title="Play" aria-label="Play"></button>
+        <button id="next" class="icon" type="button" title="Next" aria-label="Next"></button>
+        <span class="spacer"></span>
+        <input id="volume" type="range" min="0" max="1" step="0.05" value="0.8" aria-label="Volume" />
+        <button id="listen" type="button" aria-pressed="false">Tune in</button>
+      </div>
+    </div>
+    <div id="list-head">
+      <h2>Playlist</h2>
+      <span id="list-count"></span>
+      <span class="spacer"></span>
+      <button id="add" type="button">+ Add music</button>
+    </div>
+    <p id="alone" class="note" hidden></p>
+    <ol id="list"></ol>
+    <input id="file" type="file" accept=".flac,.ogg,.oga,audio/flac,audio/ogg" multiple hidden />
+  </section>
+</main>
+
+<div id="picker" hidden></div>
+<div id="toasts" role="status" aria-live="polite"></div>
+
+<script src="formats.js"></script>
+<script src="ui.js"></script>
+</body>
+</html>
