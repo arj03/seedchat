@@ -52,7 +52,7 @@ const sodium = await loadCrypto();
 const keyPath = join(root, "chat-author.key");
 if (!existsSync(keyPath)) {
   throw new Error(`${keyPath} not found — run a chat-app build first `
-    + "(npm run build:chat-app-v1 mints it via scripts/build-app-bundle.mjs)");
+    + "(npm run build:chat-app mints it via scripts/build-app-bundle.mjs)");
 }
 const keys = hybridAuthorKeysFromSeed(sodium, fromHex(readFileSync(keyPath, "utf8").trim()).slice(0, 32));
 

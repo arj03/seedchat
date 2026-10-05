@@ -1,24 +1,20 @@
-// The chat guest library: what every version of the chat app's guest does the same way.
-// Each version's app.json names it in front of its own guest.js, after guest-lib/net.js and
-// guest-lib/context.js, so the source is written once and each signed bundle still carries
-// all of it.
+// Chat's guest: rooms and direct chats, text and images. It holds the chat wire protocol's
+// vocabulary and the whole of what chat does with a frame: decide whether a peer's is for
+// this node, send its own to the peers it is for, and have the app's module draw it.
 //
-// It holds the chat wire protocol's vocabulary and a chat guest's whole `handle` (`serve`):
-// decide whether a peer's frame is for this node, send its own to the peers it is for, and
-// have the app's module draw it. The node's context, and the rooms a guest reads out of
-// it, are guest-lib/context.js's. What a version's guest.js says is which frame types it
-// speaks.
+// app.json names two libraries in front of it: guest-lib/net.js, the way onto the network,
+// and guest-lib/context.js, the node's context and the rooms a guest reads out of it.
 
 const EMPTY = new Uint8Array(0);
 
-/** The wire protocol every chat app speaks (§12.10), the one id in each version's
- *  app.json `protocols`. It names the conversation, not the code: two peers running
- *  different versions, or different authors' chat apps, interoperate because both claim
- *  it, and a frame says only which protocol it is. */
+/** The wire protocol every chat app speaks (§12.10), the one id in app.json `protocols`.
+ *  It names the conversation, not the code: two peers running different versions, or
+ *  different authors' chat apps, interoperate because both claim it, and a frame says only
+ *  which protocol it is. */
 const CHAT = "chat";
 
 /** This app's module, by its name in app.json `modules`: a pure transform from
- *  `[sender 32][frame]` to the render bytes the view draws (render.ts). */
+ *  `[sender 32][frame]` to the render bytes the view draws (index.ts). */
 const MODULE = "chat";
 
 /** A chat frame is `[type u8][body]`, the same bytes on the wire, from the view and into
@@ -67,13 +63,11 @@ function render(sender, frame) {
   return host.call(MODULE, input);
 }
 
-/** A chat guest's whole `handle`, for a version that speaks the frame types in `speaks`.
- *  It has two callers.
+/** It has two callers.
  *
- *  A PEER's frame is drawn when it is a type this version speaks and it is for this node,
- *  so a version stays silent on every frame a later one adds. The render bytes ARE the
- *  answer: the page that installed the app reads them off its own load's onInbound
- *  (seedkernel §12.10) and hands them to the view.
+ *  A PEER's frame is drawn when it is for this node, which a frame of a type chat does not
+ *  speak never is. The render bytes ARE the answer: the page that installed the app reads
+ *  them off its own load's onInbound (seedkernel §12.10) and hands them to the view.
  *
  *  The SHELL's two ops are the node's context, and a frame from this app's own view. That
  *  frame is sent to the peers it is for, fire-and-forget, and then drawn here as this
@@ -83,14 +77,12 @@ function render(sender, frame) {
  *  Every `host.call` is awaited: the seedkernel seam is uniformly asynchronous, and the
  *  await is what makes the returned render bytes real bytes rather than a pending
  *  Promise. */
-async function serve(arg, speaks) {
+async function handle(arg) {
   const { fromHost, caller, body } = callerOf(arg);
-  if (!fromHost) {
-    return speaks.includes(body[0]) && isForMe(toHex(caller), body) ? await render(caller, body) : EMPTY;
-  }
+  if (!fromHost) return isForMe(toHex(caller), body) ? await render(caller, body) : EMPTY;
   const { op, args: frame } = readOp(body);
   if (op === OP_CONTEXT) return setContext(frame);
-  if (op !== OP_UI || !speaks.includes(frame[0]) || frame.length < 33) return EMPTY;
+  if (op !== OP_UI || frame.length < 33 || !(isRoom(frame[0]) || isDirect(frame[0]))) return EMPTY;
   await Promise.all((await audienceOf(frame)).map((p) => netSend(fromHex(p), CHAT, frame).catch(() => {})));
   return await render(ME, frame);
 }

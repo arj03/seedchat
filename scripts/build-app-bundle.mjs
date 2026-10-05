@@ -5,12 +5,12 @@
 //
 //   node scripts/build-app-bundle.mjs <app-dir> <skb-out>
 //
-//   node scripts/build-app-bundle.mjs assembly/chat-app-v1 bundle/chat-app-v1.skb
-//   node scripts/build-app-bundle.mjs assembly/chat-app-v2 bundle/chat-app-v2.skb
+//   node scripts/build-app-bundle.mjs assembly/chat-app bundle/chat.skb
+//   node scripts/build-app-bundle.mjs assembly/jam-app bundle/jam.skb
 //
 // The directory's `app.json` is the only source of what the bundle is (scripts/
 // app-source.mjs reads it). A module it names is a built .wasm, so an app with one compiles
-// it first: the `build:chat-app-v*` npm scripts run `asc` ahead of this.
+// it first: the `build:chat-app` npm script runs `asc` ahead of this.
 //
 // Output: <skb-out> — the signed manifest + guest + modules packed into one blob
 // (seedkernel §12.4).
@@ -57,8 +57,8 @@ if (existsSync(keyPath)) {
 }
 
 // Freshness: a monotonic high-water mark per app LABEL, because the runtime's freshness
-// store keys on (author, app). chat-app-v1 and chat-app-v2 are the same app ("chat"), so
-// they share one lineage and the later build is the newer version. It is persisted NEXT TO
+// store keys on (author, app). Every build of an app is one lineage under its label, and
+// the later build is the newer version. It is persisted NEXT TO
 // THE AUTHOR KEY (not derived from bundle/, which is gitignored and gets wiped) so it
 // survives a `git clean` or a build on a second machine — mirrors seedstore's
 // build-bundle.mjs. shell.js does not itself gate installs on this (installs are

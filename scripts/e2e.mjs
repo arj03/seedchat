@@ -4,8 +4,8 @@
 // but the page: browser/shell.js and each app's view only run in a browser. This
 // drives two tabs of one — two nodes, since the identity is per tab — with a real
 // seedrelay between them, through what a person would do: drop a bundle, join a room, set
-// a nick, write, upgrade an app in place, offer it, install the offer, write to one peer,
-// start a call, remove an app, reload. Then the jam app beside chat: a message, a reaction,
+// a nick, offer the app, install the offer, write, replace an app in place, write to one
+// peer, start a call, remove an app, reload. Then the jam app beside chat: a message, a reaction,
 // a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the
 // list moved on, a peer held to a slow uplink, the list reordered and trimmed, a reload
 // that gets the room and its music back from the other tab, and a tab left alone in the
@@ -61,7 +61,7 @@ if (!browserPath || !existsSync(browserPath)) {
 }
 const relayPath = join(root, "node_modules", "seedrelay", "server.mjs");
 for (const [path, why] of [
-  [join(root, "bundle", "chat-app-v2.skb"), "run `npm run build` first"],
+  [join(root, "bundle", "chat.skb"), "run `npm run build` first"],
   [join(root, "bundle", "jam.skb"), "run `npm run build` first"],
   [join(root, "browser", "vendor", "host"), "run `npm run build` first"],
   [relayPath, "run `npm install` first"],
@@ -258,10 +258,10 @@ const peerPill = (tab) => page(tab, text("peer-pill-text"));
 const contactsOf = (tab) => page(tab, "sessionStorage.getItem('chat.contacts') ?? ''");
 const keyOf = (tab) => page(tab, "JSON.parse(sessionStorage.getItem('chat.identity')).pk.map((b) => b.toString(16).padStart(2, '0')).join('')");
 const setNick = (tab, nick) => page(tab, `document.getElementById('nick').value = ${JSON.stringify(nick)}; ${click("set-nick")}`);
-/** Write a message in the app's view and send it. Both chat versions have this form. */
+/** Write a message in chat's view and send it. */
 const say = (tab, message) => view(tab, `document.getElementById('msg').value = ${JSON.stringify(message)}; document.getElementById('form').requestSubmit()`);
 const logOf = (tab) => view(tab, text("log"));
-/** v2's conversation list names the room once its view has heard the context. */
+/** Chat's conversation list names the room once its view has heard the context. */
 const roomsInView = (tab) => view(tab, text("room-list"));
 
 /** Evaluate in the tab's jam view, which stands beside its chat view. */
@@ -396,67 +396,64 @@ try {
   }
   const [keyA, keyB] = [await keyOf(A), await keyOf(B)];
 
-  // 2. install chat v1 by dropping its bundle; the row says what the bundle serves and
+  // 2. A installs chat by dropping its bundle; the row says what the bundle serves and
   //    reaches, read off its signed manifest
-  for (const tab of [A, B]) {
-    await drop(tab, "chat-app-v1.skb");
-    await waitFor(`${tab.name}: chat v1 installs from a dropped .skb`, async () => (await appShown(tab)) === "Chat v1");
-  }
+  await drop(A, "chat.skb");
+  await waitFor("A: chat installs from a dropped .skb", async () => (await appShown(A)) === "Chat v2");
   const row = await page(A, text("app-list"));
   check(/serves “chat”/.test(row) && /reaches the network/.test(row) && /bundle [0-9a-f]{12}/.test(row),
     "A: the app's row says what it serves and reaches");
 
-  // 3. join one room on the relay; each app's view hears of it from its own guest
+  // 3. join one room on the relay, which takes no app; an app's view hears of the room
+  //    from its own guest
   for (const tab of [A, B]) {
     await page(tab, `document.getElementById('relay-url').value = 'ws://127.0.0.1:${relayPort}'; document.getElementById('relay-room').value = 'e2e'; ${click("join-room")}`);
   }
   for (const tab of [A, B]) await waitFor(`${tab.name}: linked to the other tab`, async () => /^1 peer/.test(await peerPill(tab)));
-  for (const tab of [A, B]) {
-    await waitFor(`${tab.name}: v1's view hears of the room`, async () => (await view(tab, "document.getElementById('room').options.length")) === 1);
-  }
+  await waitFor("A: chat's view hears of the room", async () => (await roomsInView(A)).includes("e2e"));
 
-  // 4. a nick is the shell's: set on A's Network tab, told to B's page, shown by B's
-  //    shell and handed to B's app in its context, with no app carrying it
+  // 4. a nick is the shell's: set on A's Network tab, told to B's page and shown by B's
+  //    shell, with no app carrying it. B has none yet
   await setNick(A, "ann");
   await waitFor("B: the shell names A by its nick", async () => (await page(B, text("room-list"))).includes("ann"));
 
-  // 5. v1: a room message, drawn at the far end and echoed at the near one
-  await say(A, "hello from A on v1");
-  await waitFor("B: v1 draws A's room message under its nick", async () => /#e2e ann \([0-9a-f]{8}\):hello from A on v1/.test(await logOf(B)));
-  await waitFor("A: v1 draws its own echo", async () => (await logOf(A)).includes("hello from A on v1"));
-
-  // 6. upgrade A to v2 by dropping it: a new guest, module and view under the same label,
-  //    and the same shell. The two versions still speak room text to each other.
-  await drop(A, "chat-app-v2.skb");
-  await waitFor("A: chat v2 replaces v1 in place", async () => (await appShown(A)) === "Chat v2");
-  check((await frameCount(A)) === 1, "A: v1's view is gone, and v2 has the one frame");
-  await waitFor("A: v2's view hears of the room", async () => (await roomsInView(A)).includes("e2e"));
-  await say(A, "v2 to v1");
-  await waitFor("B: v1 draws a room message from a v2 peer", async () => (await logOf(B)).includes("v2 to v1"));
-
-  // 7. A offers v2 through the offers app; B's row for it shows what Install grants
+  // 5. A offers chat through the offers app; B's row for it shows what Install grants,
+  //    and installing it is how B comes by the app
   await page(A, clickButton("app-list", "Offer to peers"));
   await waitFor("B: the offer arrives", async () => (await page(B, "document.querySelectorAll('#offer-list .offer-row').length")) === 1);
   const offer = await page(B, text("offer-list"));
   check(/serves “chat”/.test(offer) && /reaches the network/.test(offer) && offer.includes(keyA.slice(0, 8)),
     "B: the offer's row says what it serves and reaches, and who it is from");
   await page(B, clickButton("offer-list", "Install"));
-  await waitFor("B: chat v2 installs from the offer", async () => (await appShown(B)) === "Chat v2");
-  await waitFor("B: v2's view hears of the room", async () => (await roomsInView(B)).includes("e2e"));
+  await waitFor("B: chat installs from the offer", async () => (await appShown(B)) === "Chat v2");
+  await waitFor("B: chat's view hears of the room", async () => (await roomsInView(B)).includes("e2e"));
 
-  // 8. v2 reads the same nick out of the same context; a change is news it announces
-  await waitFor("A: v2's view says who this node is", async () => /^ann \([0-9a-f]{8}\)$/.test(await view(A, text("me"))));
-  await say(A, "room message on v2");
-  await waitFor("B: v2 draws A's room message under its nick", async () => /ann \([0-9a-f]{8}\):room message on v2/.test(await logOf(B)));
+  // 6. a room message, drawn at the far end under the nick its view read out of the
+  //    context, and echoed at the near one
+  await waitFor("A: chat's view says who this node is", async () => /^ann \([0-9a-f]{8}\)$/.test(await view(A, text("me"))));
+  await say(A, "hello from A");
+  await waitFor("B: chat draws A's room message under its nick", async () => /ann \([0-9a-f]{8}\):hello from A/.test(await logOf(B)));
+  await waitFor("A: chat draws its own echo", async () => (await logOf(A)).includes("hello from A"));
+
+  // 7. a bundle dropped over an app already installed replaces it in place, which is how
+  //    an app is upgraded: a new guest, module and view under the same label, in the one
+  //    frame, and the same shell
+  await drop(A, "chat.skb");
+  await waitFor("A: the dropped bundle replaces chat in place, and its view starts afresh", async () =>
+    (await frameCount(A)) === 1 && !(await logOf(A)).includes("hello from A") && (await roomsInView(A)).includes("e2e"));
+  await say(A, "and from its replacement");
+  await waitFor("B: chat draws a room message from the app that replaced it", async () => (await logOf(B)).includes("and from its replacement"));
+
+  // 8. a nick that changes is news chat announces
   await setNick(A, "annie");
-  await waitFor("B: v2 announces A's new nick", async () => (await logOf(B)).includes("is now known as annie"));
-  await waitFor("A: v2 announces its own new nick", async () => (await logOf(A)).includes("is now known as annie"));
+  await waitFor("B: chat announces A's new nick", async () => (await logOf(B)).includes("is now known as annie"));
+  await waitFor("A: chat announces its own new nick", async () => (await logOf(A)).includes("is now known as annie"));
 
   // 9. a direct message, which makes its addressee a contact: the view asks the shell,
   //    and the shell tells the other end
   await view(A, "document.querySelector('#direct-list button').click()");
   await say(A, "psst, just you");
-  await waitFor("B: v2 draws A's direct message", async () => (await logOf(B)).includes("psst, just you"));
+  await waitFor("B: chat draws A's direct message", async () => (await logOf(B)).includes("psst, just you"));
   await waitFor("A: B is a contact, as the view asked", async () => (await contactsOf(A)).includes(keyB));
   await waitFor("B: and lists A as its peer too", async () => (await contactsOf(B)).includes(keyA));
 
@@ -478,7 +475,7 @@ try {
   // 12. removing an app takes its view with it, and it installs again
   await page(B, clickButton("app-list", "Remove"));
   await waitFor("B: the app is removed, and its view", async () => (await appShown(B)) === "no app loaded" && (await frameCount(B)) === 0);
-  await drop(B, "chat-app-v2.skb");
+  await drop(B, "chat.skb");
   await waitFor("B: and installs again", async () => (await appShown(B)) === "Chat v2");
   await waitFor("B: the new view hears of the room", async () => (await roomsInView(B)).includes("e2e"));
 
@@ -487,7 +484,7 @@ try {
   // 13. a reload: the app set, the app shown, the nick and the rooms all come back, and
   //     the two nodes link again
   await send("Page.reload", {}, A.sid);
-  await waitFor("A: chat v2 is back after a reload, and shown", async () => (await appShown(A)) === "Chat v2");
+  await waitFor("A: chat is back after a reload, and shown", async () => (await appShown(A)) === "Chat v2");
   check((await page(A, "document.getElementById('nick').value")) === "annie", "A: its nick is kept");
   await waitFor("A: links to B again", async () => /^1 peer/.test(await peerPill(A)));
   await waitFor("A: the restored view hears of the room", async () => (await roomsInView(A)).includes("e2e"));
@@ -632,7 +629,7 @@ try {
   // 22. music is added to a room, for whoever else is in it. B leaves: A is told nobody
   //     else is there, and may still add music for whoever comes; B is told it is in no
   //     room, in place of a button to add music with
-  check((await jamAlone(A)) === "" && (await jamAlone(B)) === "", "with both in the room, neither says it is alone");
+  await waitFor("with both in the room, neither says it is alone", async () => (await jamAlone(A)) === "" && (await jamAlone(B)) === "");
   await page(B, clickButton("room-list", "Leave"));
   await waitFor("A: says nobody else is connected, and still offers to add music", async () =>
     /^Nobody else is connected here/.test(await jamAlone(A)) && !(await jam(A, "document.getElementById('add').hidden")));

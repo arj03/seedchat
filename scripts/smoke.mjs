@@ -3,9 +3,9 @@
 // Replays the boot path browser/shell.js actually runs — the bootShell
 // assembly + its boot-selected transport + consent-gated app install +
 // protocol dispatch — minus the browser-only WebRTC/DOM. Two shells link through
-// injected ChannelFactory sinks (the shape RtcNetwork implements), the real chat apps
-// round-trip messages through the shell's two ops (browser/app-api.js), v1 is upgraded
-// to v2 in place, and the offers app (a second boot bundle, browser/offers-app.js)
+// injected ChannelFactory sinks (the shape RtcNetwork implements), the real chat app
+// round-trips messages through the shell's two ops (browser/app-api.js), a later build of
+// it replaces it in place, and the offers app (a second boot bundle, browser/offers-app.js)
 // round-trips an offer. Run it after a seedkernel update:
 //
 //   node scripts/smoke.mjs
@@ -240,7 +240,7 @@ const CONTACT = new Uint8Array(32).fill(7); // each node's contact secret, which
 // a frame the guest did not draw.
 const renders = [];
 const onChatInbound = (claim, from, answer) => { if (answer.length > 0) renders.push(new Uint8Array(answer)); };
-// A's handle into a second app beside chat (3b), which plays a misbehaving peer in 5b.
+// A's handle into a second app beside chat (3b), which plays a misbehaving peer in 5c.
 let rogueApp = null;
 
 // The adapter is bootShell's, exactly as shell.js gets it: the factory exists first
@@ -316,20 +316,21 @@ try {
 //    scripts/build-app-bundle.mjs signs (this test assembles its own so it signs under a
 //    key it holds, rather than shelling out)
 const appDir = (name) => resolve(here, "../assembly", name);
-const chatV1 = authorBundle(sodium, authorA, { ...readAppSource(appDir("chat-app-v1"), guestOpFraming), version: 1 });
-const CHAT_PROTO = chatV1.manifest.protocols[0];
+const chatSource = readAppSource(appDir("chat-app"), guestOpFraming);
+const chat = authorBundle(sodium, authorA, { ...chatSource, version: 1 });
+const CHAT_PROTO = chat.manifest.protocols[0];
 let chatApp = null;   // A's handle into its chat app's guest
 let chatAppB = null;  // B's
 let chatKey = "";
 try {
   // What the shell reads off the signed manifest (`appFacts`): the app's row, its claim and
   // reach, and its view. All of it rides in the manifest, none of it in a module.
-  const facts = appFacts(chatV1.manifest);
-  assert(facts.name === "Chat" && facts.version === "v1", "the manifest carries the app's name and version");
+  const facts = appFacts(chat.manifest);
+  assert(facts.name === "Chat" && facts.version === "v2", "the manifest carries the app's name and version");
   assert(typeof facts.ui === "string" && facts.ui.includes("<html"), "the manifest carries the app's view");
   assert(facts.requires.length === 1 && facts.requires[0] === NET_PROTO, "a chat app reaches the network and nothing else");
-  consent(chatV1.blob);            // dropping the file is the consent
-  chatApp = await A.install(chatV1.blob);
+  consent(chat.blob);              // dropping the file is the consent
+  chatApp = await A.install(chat.blob);
   chatKey = chatApp.manifest.app;
   // The app's module is private to its slot, so there is no table to ask what landed:
   // a load builds every module or none (§12.4), and what the shell exposes is the claim.
@@ -338,10 +339,10 @@ try {
   // claims "chat" and B's load routes it there (§12.10). Each peer's routing is its own
   // — B would answer the same frames with a different author's chat app, as long as it
   // claimed the same protocol.
-  consent(chatV1.blob);
+  consent(chat.blob);
   // B's view of what its own chat app answered for an inbound frame is this load's own
   // `onInbound` (seedkernel §12.10) — no second name for the guest to push through.
-  chatAppB = await B.install(chatV1.blob, { onInbound: onChatInbound });
+  chatAppB = await B.install(chat.blob, { onInbound: onChatInbound });
   assert(B.resolve(CHAT_PROTO) === chatKey, `B routes "${CHAT_PROTO}" to the app it installed`);
   ok(`chat app installed on both shells under '${chatKey}', its row and view read off the signed manifest`);
 } catch (err) { fail("chat app install", err); }
@@ -431,46 +432,57 @@ try {
     "the ui answer is the frame drawn as this node's own");
   await until(() => renders.length > 0, 4000, "rendered message");
   const delivered = renders[0];
-  // chat v1 render: [type 1][pk_len 1][pk 32][body], the body passed through
+  // a chat render: [type 1][pk_len 1][pk 32][body], the body passed through
   assert(delivered[0] === 0x05, "render type");
   assert(delivered[1] === 32, "render pk_len");
   assert(toHex(delivered.slice(2, 34)) === peerA, "render sender pk = A's key");
   assert(toHex(delivered.slice(34, 66)) === ROOM, "render room");
   assert(text(delivered.slice(66)) === "hi there", "render text — the frame for a room B is not in was not drawn");
-  // v1 speaks room text only: any other frame from its view goes nowhere.
-  assert((await chatApp.invoke(writeOp(APP_OP_UI, roomFrame(0x06, ROOM, "an image")))).length === 0,
-    "v1's guest sends only room text");
+  // A frame of a type chat does not speak goes nowhere, and is not drawn.
+  assert((await chatApp.invoke(writeOp(APP_OP_UI, roomFrame(0x07, ROOM, "not a chat frame")))).length === 0,
+    "chat's guest sends only the frame types it speaks");
   ok(`dispatch round-trip: A's view → ui op → A's guest → _net → B's guest → onInbound → ${delivered.length} render bytes`);
 } catch (err) { fail("chat dispatch round-trip", err); }
 
-// 5b. the upgrade: chat v2 replaces v1 under the same label on both shells, with no change
-//     to the shell — a new guest, module and view, driven through the same two ops. Then
-//     what v2 adds, all of it the bundle's doing: images, and direct messages.
+/** A chat render, read: it is [type][pk_len][pk 32][body]. */
+const parse = (r) => ({ type: r[0], from: toHex(r.slice(2, 34)), body: r.slice(34) });
+
+// 5b. the upgrade: a later build of chat replaces it under the same label on both shells,
+//     with no change to the shell — a new guest, module and view, driven through the same
+//     two ops. A bundle under a standing label says which slot it retires (`replaces`), as
+//     shell.js `applyAppBundle` does for one dropped over an app already installed.
 try {
-  const chatV2 = authorBundle(sodium, authorA, { ...readAppSource(appDir("chat-app-v2"), guestOpFraming), version: 2 });
-  assert(digestOf(verifyBundle(sodium, chatV2.blob)) !== digestOf(verifyBundle(sodium, chatV1.blob)), "v2 is another bundle");
-  consent(chatV2.blob);
-  chatApp = await A.install(chatV2.blob, { replaces: chatKey });
-  consent(chatV2.blob);
-  chatAppB = await B.install(chatV2.blob, { replaces: chatKey, onInbound: onChatInbound });
-  assert(appFacts(chatApp.manifest).version === "v2" && A.resolve(CHAT_PROTO) === chatKey, "v2 holds the chat claim");
+  const next = authorBundle(sodium, authorA, { ...chatSource, version: 2 });
+  assert(digestOf(verifyBundle(sodium, next.blob)) !== digestOf(verifyBundle(sodium, chat.blob)), "a later build is another bundle");
+  consent(next.blob);
+  chatApp = await A.install(next.blob, { replaces: chatKey });
+  consent(next.blob);
+  chatAppB = await B.install(next.blob, { replaces: chatKey, onInbound: onChatInbound });
+  assert(chatApp.manifest.version === 2 && A.resolve(CHAT_PROTO) === chatKey, "the later build holds the chat claim");
   // A replacement is a fresh realm: its guest is told the context again.
   await chatApp.invoke(writeOp(APP_OP_CONTEXT, contextOf(peerA, [roomWith(ROOM, peerB)], [peerB])));
   await chatAppB.invoke(writeOp(APP_OP_CONTEXT, contextOf(peerB, [roomWith(ROOM, peerA)], [peerA])));
   renders.length = 0;
+  await chatApp.invoke(writeOp(APP_OP_UI, roomFrame(0x05, ROOM, "from the later build")));
+  await until(() => renders.length >= 1, 4000, "the later build's render");
+  const room = parse(renders[0]);
+  assert(room.type === 0x05 && room.from === peerA && text(room.body.slice(32)) === "from the later build",
+    "a room message from the later build");
+  ok("upgrade under the same label: a later build replaces the app on both shells, with nothing but the bundle changed");
+} catch (err) { fail("upgrade to a later build of chat", err); }
 
-  // A render is [type][pk_len][pk 32][body], whichever version drew it.
-  const parse = (r) => ({ type: r[0], from: toHex(r.slice(2, 34)), body: r.slice(34) });
-  await chatApp.invoke(writeOp(APP_OP_UI, roomFrame(0x05, ROOM, "from v2")));
+// 5c. the rest of what chat speaks: images, and direct messages. And what a guest draws of
+//     a peer's frames is its own decision.
+try {
+  renders.length = 0;
   await chatApp.invoke(writeOp(APP_OP_UI, roomFrame(0x06, ROOM, "not really a jpeg")));
   await chatApp.invoke(writeOp(APP_OP_UI, concat([0x03], fromHex(peerB), utf8("just you"))));
-  await until(() => renders.length >= 3, 4000, "v2's renders");
-  const [room, image, direct] = renders.map(parse);
-  assert(room.type === 0x05 && room.from === peerA && text(room.body.slice(32)) === "from v2", "a room message from v2");
-  assert(image.type === 0x06 && toHex(image.body.slice(0, 32)) === ROOM, "a room image, which v1 would not have drawn");
+  await until(() => renders.length >= 2, 4000, "chat's renders");
+  const [image, direct] = renders.map(parse);
+  assert(image.type === 0x06 && image.from === peerA && toHex(image.body.slice(0, 32)) === ROOM, "a room image");
   assert(direct.type === 0x03 && toHex(direct.body.slice(0, 32)) === peerB && text(direct.body.slice(32)) === "just you",
     "a direct message reaches its addressee");
-  ok("upgrade v1 → v2 under the same label: images and direct messages, with nothing but the bundle changed");
+  ok("chat draws room images and direct messages");
 
   // What B's guest draws is its own decision, not the sender's. The rogue app on A plays a
   // peer that sends what an honest chat guest never would.
@@ -479,11 +491,11 @@ try {
   await asPeer(roomFrame(0x05, ROOM, "from outside the room"));
   await asPeer(concat([0x03], fromHex(peerA), utf8("addressed to someone else")));
   await asPeer(concat([0x03], fromHex(peerB), utf8("addressed to B")));
-  await until(() => renders.length >= 4, 4000, "the one frame that is for B");
-  assert(renders.length === 4 && text(parse(renders[3]).body.slice(32)) === "addressed to B",
+  await until(() => renders.length >= 3, 4000, "the one frame that is for B");
+  assert(renders.length === 3 && text(parse(renders[2]).body.slice(32)) === "addressed to B",
     "a room frame from a peer not in the room, and a direct one for someone else, are not drawn");
   ok("the receive filter is the guest's: only frames for this node are drawn");
-} catch (err) { fail("upgrade to chat v2", err); }
+} catch (err) { fail("chat's frames and its receive filter", err); }
 
 // 6. the offers app: a second boot bundle on both shells (browser/offers-app.js), and
 //    a real offer/v1 frame end to end. A's offers app sends an opaque blob under

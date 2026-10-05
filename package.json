@@ -5,11 +5,10 @@
   "type": "module",
   "scripts": {
     "vendor": "node scripts/vendor.mjs",
-    "build:chat-app-v1": "asc assembly/chat-app-v1/index.ts --config asconfig.chat-app-v1.json --target release && node scripts/build-app-bundle.mjs assembly/chat-app-v1 bundle/chat-app-v1.skb",
-    "build:chat-app-v2": "asc assembly/chat-app-v2/index.ts --config asconfig.chat-app-v2.json --target release && node scripts/build-app-bundle.mjs assembly/chat-app-v2 bundle/chat-app-v2.skb",
+    "build:chat-app": "asc assembly/chat-app/index.ts --config asconfig.chat-app.json --target release && node scripts/build-app-bundle.mjs assembly/chat-app bundle/chat.skb",
     "build:jam-app": "node scripts/build-app-bundle.mjs assembly/jam-app bundle/jam.skb",
     "build:boot-bundles": "node scripts/build-boot-bundles.mjs",
-    "build": "npm run build:chat-app-v1 && npm run build:chat-app-v2 && npm run build:jam-app && npm run build:boot-bundles && npm run vendor",
+    "build": "npm run build:chat-app && npm run build:jam-app && npm run build:boot-bundles && npm run vendor",
     "relay": "seedrelay --stun 3478",
     "smoke": "node scripts/smoke.mjs",
     "e2e": "node scripts/e2e.mjs",

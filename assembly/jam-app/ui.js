@@ -1287,10 +1287,11 @@ function drawPlayer() {
   listenBtn.setAttribute("aria-pressed", String(listening));
   volume.hidden = !listening;
   // Music is added to a room, and is for whoever else is in it. Where there is no room, or
-  // nobody else, the list says so: a button that only greys out does not say why.
+  // nobody else in it is linked, the list says so: a button that only greys out does not
+  // say why. Linked, not jamming: a peer that has yet to answer `hello` is there all the same.
   addBtn.hidden = !room;
   const alone = !room ? "Not connected to a room. Join one on the Network tab to add music."
-    : jamming(room).length > 0 ? ""
+    : room.peers.size > 0 ? ""
     : "Nobody else is connected here yet: music you add is shared once someone joins.";
   aloneNote.textContent = alone;
   aloneNote.hidden = alone === "";

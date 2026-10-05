@@ -6,7 +6,7 @@
   "description": "text + images, rooms and direct chats",
   "protocols": ["chat"],
   "requires": ["_net"],
-  "guest": ["../guest-lib/net.js", "../guest-lib/context.js", "../chat-lib/chat-guest.js", "guest.js"],
+  "guest": ["../guest-lib/net.js", "../guest-lib/context.js", "guest.js"],
   "ui": "ui.html",
-  "modules": { "chat": "../../build/chat-app-v2.wasm" }
+  "modules": { "chat": "../../build/chat-app.wasm" }
 }

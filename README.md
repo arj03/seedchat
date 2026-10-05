@@ -11,12 +11,11 @@ An **app** is a signed bundle that carries everything of its own: a confined JS 
 that is its behaviour, an HTML **view** the shell runs in a sandboxed iframe, and any
 **pure-transform** WASM modules the guest drives. The shell passes bytes between a view
 and its guest and reads none of them, so a new version of an app is a new bundle and
-nothing else: the shell does not change. Chat is the app here, in two versions, so the
-upgrade can be watched: `v1` is room text, and `v2` adds images, direct chats and a
-conversation list. **Jam** is a second app beside it, under its own label and protocol: a
-room's chat with emoji reactions, and a playlist the room keeps and plays together, FLAC
-and Ogg Vorbis files streamed from peer to peer as they are. The shell that hosts it is the
-one that hosted only chat.
+nothing else: the shell does not change. Two apps are here, and the shell that hosts one
+is the shell that hosts the other. **Chat** is text and images, in rooms and in direct
+chats. **Jam** stands beside it, under its own label and protocol: a room's chat with
+emoji reactions, and a playlist the room keeps and plays together, FLAC and Ogg Vorbis
+files streamed from peer to peer as they are.
 
 Two smaller apps ride alongside as **boot bundles**, pinned to the exact author and app
 the page was built with: **offers** (`browser/offers-app.js`), which owns the `offer/v1`
@@ -62,19 +61,19 @@ chat makes into the runtime goes through a published entry point of
 #    browser core libsodium and PQ wasm)
 cd ../seedkernel/WASM && npm install && npm run build:browser
 
-# 2. build the apps (both chat bundles and jam, + the offers and calls boot bundles)
+# 2. build the apps (chat and jam, + the offers and calls boot bundles)
 #    and vendor the runtime
 cd ../../seedchat && npm install && npm run build
 
 # 2b. (optional) headless check that chat still works against this seedkernel:
-#     two shells, the real chat apps, a message round-trip, the v1 → v2 upgrade,
+#     two shells, the real chat app, a message round-trip, an upgrade in place,
 #     an offer round-trip, a call signal round-trip
 npm run smoke
 
 # 2c. (optional) the same in a real browser: two tabs of the shell and a relay,
-#     through install, chat, upgrade, offer, a call and a reload, then jam beside
-#     chat with a FLAC file added in one tab and streamed to the other. Needs
-#     Chrome, Edge or Chromium.
+#     through install, an offer, chat, an app replaced in place, a call and a
+#     reload, then jam beside chat with a FLAC file added in one tab and streamed
+#     to the other. Needs Chrome, Edge or Chromium.
 npm run e2e
 
 # 3. the relay where peers meet and link before moving to WebRTC (the transport bundle
@@ -90,8 +89,8 @@ Open the page in two tabs or two browsers and join the same room in both on the
 
 | Script | What it does |
 | --- | --- |
-| `npm run build` | Compiles both AssemblyScript modules, signs `bundle/chat-app-v1.skb`, `bundle/chat-app-v2.skb` and `bundle/jam.skb` from their app directories, signs the offers and calls boot bundles, then vendors the runtime. |
-| `npm run build:chat-app-v1` / `build:chat-app-v2` | One app's compile → sign pipeline. |
+| `npm run build` | Compiles chat's AssemblyScript module, signs `bundle/chat.skb` and `bundle/jam.skb` from their app directories, signs the offers and calls boot bundles, then vendors the runtime. |
+| `npm run build:chat-app` | Chat's compile → sign pipeline. |
 | `npm run build:jam-app` | Signs `bundle/jam.skb`. Jam has no module, so there is nothing to compile. |
 | `npm run build:boot-bundles` | Signs the offers and calls apps into `bundle/offers.skb` and `bundle/calls.skb` and generates `browser/offers-bundle.js` and `browser/calls-bundle.js`. |
 | `npm run vendor` | Copies the built seedkernel host, libsodium and QuickJS into `browser/vendor/`. |
@@ -113,8 +112,8 @@ so a name is the same in every app and needs none installed. It is a peer's own 
 proof of who it is: anyone can take any nick, and the key is what the channel
 authenticated.
 
-**Loading an app.** On the **Apps** tab, pick or drop `bundle/chat-app-v1.skb` (or
-`v2`), or `bundle/jam.skb`, which installs beside chat. The browser only verifies the
+**Loading an app.** On the **Apps** tab, pick or drop `bundle/chat.skb`, or
+`bundle/jam.skb`, which installs beside chat. The browser only verifies the
 bundle's signature and admits it under the shell's consent policy; it never signs anything
 itself. Dropping a newer `.skb` of
 an app you already have is how you upgrade it. Each installed app has a view of its own;
@@ -210,19 +209,17 @@ when both tabs are on this machine. Reaching the shell from another device needs
 | `browser/offers-app.js` | The offers app *shape*: the `offer/v1` id, the app id `offers`, its authority (`fs` for the offers that arrive, `_net` for the ones this node makes), and its guest source — a claim, a keyspace and a `send` op, no module. `scripts/build-boot-bundles.mjs` signs it into the boot bundle. |
 | `browser/calls-app.js` | The calls app *shape*: the `call/v1` id, the app id `calls`, its one reach (`_net`), and its guest source — a claim that hands a peer's call signal to the page, and a `send` op that puts the page's on the wire. What else two pages tell each other rides it too: `{ peer }`, that one added or removed the other as a peer, and `{ nick }`, what a peer calls itself. |
 | `browser/media-rtc.js` | The call feature: `MediaCalls`, one `RTCPeerConnection` per peer that the page owns, beside the transport's, with perfect negotiation signaled over `call/v1`. Live media is the page's own — the host holds only the transport's connections. |
-| `assembly/chat-app-v1/` | Chat v1 — text only, written to one room at a time. `app.json` says what the bundle is, `guest.js` is its guest, `ui.html` its view, `index.ts` its module. |
-| `assembly/chat-app-v2/` | Chat v2 — text and images, in several rooms and in direct chats. Same shape, with its view's CSS and JS in files of their own (`ui.css`, `ui.js`) beside the page; upgrading v1→v2 is a re-admit at the same name under the same key. |
-| `assembly/chat-lib/` | What the two chat versions share, written once and carried by each bundle: `chat-guest.js`, a chat guest's whole `handle` and the chat wire vocabulary, and `render.ts`, the module's one transform. A version's own files say which frame types it speaks. |
+| `assembly/chat-app/` | Chat — text and images, in several rooms and in direct chats. `app.json` says what the bundle is, `guest.js` is its guest, which holds the chat wire vocabulary and decides who each frame is for, `index.ts` is its module, the one transform that draws a frame, and `ui.html` its view, with the view's CSS and JS in files of their own (`ui.css`, `ui.js`) beside the page. |
 | `assembly/jam-app/` | Jam: a room's chat, emoji reactions, and a playlist kept and played together. `guest.js` is a pipe scoped to a room that names blocks of audio by their hash, its view (`ui.html`, `ui.css`, `ui.js`) holds the room's state and plays it, `formats.js` finds where a FLAC or Ogg Vorbis file may be cut, and there is no module. See [The jam app](#the-jam-app). |
 | `assembly/guest-lib/net.js` | Guest source any guest that reaches the network puts in front of its own: the transport's `send` and `peers` ops, and keys as hex. Every app and both boot bundles use it. |
-| `assembly/guest-lib/context.js` | Guest source for a guest whose frames are written to rooms: the shell's two ops by name, the rooms read out of the node's context, and the context passed on to the view as render type 0. The chat apps and jam use it. |
-| `asconfig.chat-app-v*.json` | AssemblyScript compiler config for each module (`build/chat-app-v*.wasm`). |
+| `assembly/guest-lib/context.js` | Guest source for a guest whose frames are written to rooms: the shell's two ops by name, the rooms read out of the node's context, and the context passed on to the view as render type 0. Chat and jam use it. |
+| `asconfig.chat-app.json` | AssemblyScript compiler config for chat's module (`build/chat-app.wasm`). |
 | `scripts/app-source.mjs` | Reads an app directory (`app.json` and what it names) into what gets signed, putting a view's stylesheets and scripts into its page. The builder and the smoke test share it. |
 | `scripts/build-app-bundle.mjs` | The offline bundle author: signs an app directory into a `.skb` under `chat-author.key`, tracking a monotonic freshness mark per app label in `<app>-author.version`. |
 | `scripts/build-boot-bundles.mjs` | Signs the offers and calls apps' guest-only bundles under the same key, each with its own freshness mark in `<name>-author.version`. |
 | `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/`, plus the browser libsodium and the QuickJS realm engine. Refuses a stale seedkernel build. |
-| `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat apps and the shell's two ops, upgrades v1 to v2 in place, round-trips an offer through the offers app and a call signal through the calls app, and carries a frame and a block of audio through jam's guest. |
-| `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, messages on both chat versions, the in-place upgrade, an offer, a direct message, a call, removing an app, and a reload. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. The FLAC file it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
+| `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat app and the shell's two ops, replaces it in place with a later build, round-trips an offer through the offers app and a call signal through the calls app, and carries a frame and a block of audio through jam's guest. |
+| `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, an offer, messages, an app replaced in place by a bundle dropped over it, a direct message, a call, removing an app, and a reload. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. The FLAC file it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
 | `scripts/clean.mjs` | Deletes `build/` and `browser/vendor/` when a rebuild isn't taking. |
 
 What the shell reads of an app — its name, version, description and view — rides in the
@@ -235,11 +232,11 @@ reads none of it. Nothing is read out of a module, so an app needs none.
 | Path | What it is |
 | --- | --- |
 | `build/` | Compiled `.wasm` (and `.wat`) handlers. |
-| `bundle/` | Signed bundles: `chat-app-v1.skb`, `chat-app-v2.skb`, `jam.skb`, `offers.skb`, `calls.skb`. |
+| `bundle/` | Signed bundles: `chat.skb`, `jam.skb`, `offers.skb`, `calls.skb`. |
 | `browser/vendor/` | The vendored runtime the page loads. |
 | `browser/offers-bundle.js`, `browser/calls-bundle.js` | The boot bundles embedded as JS modules, since the page is served from `browser/` and `bundle/` is not. |
 | `chat-author.key` | The author signing key, minted on the first build. |
-| `chat-author.version`, `jam-author.version`, `offers-author.version`, `calls-author.version` | Each app label's version high-water mark. Both chat versions are the app `chat`, so they share one. |
+| `chat-author.version`, `jam-author.version`, `offers-author.version`, `calls-author.version` | Each app label's version high-water mark. |
 
 **Back up `chat-author.key` and the `.version` files together.** The key *is* the
 author identity: bundles signed under a new key are a different author, so peers
@@ -268,8 +265,8 @@ The channel handshake is in
 ## Writing an app
 
 Anything the shell installs has the same parts, and `browser/app-api.js` is the whole of
-what it and the shell agree on. Chat v1 is the minimal reference: `assembly/chat-app-v1/`.
-Jam (`assembly/jam-app/`) is one with no module, whose state lives in its view.
+what it and the shell agree on. Chat (`assembly/chat-app/`) is the reference for an app
+with a module. Jam (`assembly/jam-app/`) is one with none, whose state lives in its view.
 
 ### 1. `app.json`: what the bundle is
 
@@ -280,13 +277,13 @@ One file beside the app's sources. Every path in it is relative to it.
   "app": "chat",
   "api": 1,
   "name": "Chat",
-  "version": "v1",
-  "description": "text only",
+  "version": "v2",
+  "description": "text + images, rooms and direct chats",
   "protocols": ["chat"],
   "requires": ["_net"],
-  "guest": ["../guest-lib/net.js", "../guest-lib/context.js", "../chat-lib/chat-guest.js", "guest.js"],
+  "guest": ["../guest-lib/net.js", "../guest-lib/context.js", "guest.js"],
   "ui": "ui.html",
-  "modules": { "chat": "../../build/chat-app-v1.wasm" }
+  "modules": { "chat": "../../build/chat-app.wasm" }
 }
 ```
 
@@ -353,8 +350,7 @@ several files: a `<link rel="stylesheet" href="ui.css">` or a `<script src="ui.j
 naming a file beside the page is replaced by that file's text when the bundle is built
 (`readView` in `scripts/app-source.mjs`), so the page opens in a browser as it stands and
 travels as one. Nothing else can be named: there is no file beside a view once it is
-running. Chat v1's view is a single file; chat v2's is three, and jam's has a second
-script beside its own.
+running. Chat's view is three files, and jam's has a second script beside its own.
 
 The shell loads it into an iframe sandboxed `allow-scripts allow-forms
 allow-downloads` from a `blob:` URL, so it has no access to the page's keys. A view may
@@ -382,14 +378,14 @@ never hold different pictures.
 A WASM module exporting `scratch` (a pointer) and `handle(input_len) → output_len`. The
 host stages the guest's input at `scratch`, calls `handle`, and reads the output back
 from the same region. It may export `scratchSize` to ask for a larger region than the
-128 KB default (chat v2 does, for images). A module does no I/O and holds no authority;
+128 KB default (chat does, for images). A module does no I/O and holds no authority;
 see seedkernel PROTOCOL §4 for the full ABI.
 
 ### Building it
 
-For an app with an AssemblyScript module, copy `asconfig.chat-app-v1.json` to
+For an app with an AssemblyScript module, copy `asconfig.chat-app.json` to
 `asconfig.my-app.json`, point its entry and output paths at your app, then run the same
-two steps the `build:chat-app-v*` npm scripts do:
+two steps the `build:chat-app` npm script does:
 
 ```sh
 npx asc assembly/my-app/index.ts --config asconfig.my-app.json --target release
@@ -402,27 +398,25 @@ consent to install this bundle", never "did I sign it as myself".
 
 ## The chat app
 
-Chat's two versions share most of their source (`assembly/chat-lib/`); what differs is
-the frame types each speaks, and the view.
+Text and images, written to a room or to one peer. All of it is in `assembly/chat-app/`.
 
 **A frame** is `[type u8][body …]`, the same bytes on the wire, from the view to the
 guest, and into the module. The shell never reads one.
 
-| `type` | Body | Spoken by |
-| --- | --- | --- |
-| `0x03` / `0x04` direct text / image | `[to 32][content]` | v2 |
-| `0x05` room text | `[room 32][content]`, `room` the room's id on the relay | v1, v2 |
-| `0x06` room image | `[room 32][content]` | v2 |
+| `type` | Body |
+| --- | --- |
+| `0x03` / `0x04` direct text / image | `[to 32][content]` |
+| `0x05` / `0x06` room text / image | `[room 32][content]`, `room` the room's id on the relay |
 
 A message is written to a room or to one peer, never to everyone linked. A node can be in
 several rooms at once, so a room message names its room.
 
-**The guest** (`chat-lib/chat-guest.js`) does three things with a frame. Its own, from
+**The guest** (`chat-app/guest.js`) does three things with a frame. Its own, from
 the view, it sends to the linked members of the frame's room, or to the one peer a direct
 frame names. A peer's it draws only if it is for this node: a room frame from someone the
-relay lists in that room, or a direct one addressed to this node. Frames of a type the
-version does not speak are not drawn, which is how v1 stays silent on every v2 frame but
-room text. And either way it has the module draw the frame, and answers the render.
+relay lists in that room, or a direct one addressed to this node. A frame of a type it
+does not speak is not drawn. And either way it has the module draw the frame, and answers
+the render.
 
 **A render** is what the view draws:
 
@@ -590,7 +584,7 @@ Chat owns only the selected URL, room, credentials, and UI.
 
 Plus two on the guest side. The chat module defines its two memory-layout
 literals — `PK_LEN = 32` and `PRIV_USER_OFF = 0` — alongside its layout
-comments (§4, `assembly/chat-lib/render.ts`). And guest source spells the
+comments (§4, `assembly/chat-app/index.ts`). And guest source spells the
 transport's `send` and `peers` ops and its service name `_net` by hand
 (`assembly/guest-lib/net.js`), since a guest imports nothing; the smoke test runs
 them against the shipped transport.
@@ -649,7 +643,7 @@ out here.
   minifying. Rerun `npm run build:browser` in `../seedkernel/WASM`.
 - **`seedkernel-wasm not found`.** The sibling checkouts
   are missing or misnamed; see [Prerequisites](#prerequisites).
-- **`npm run smoke` can't find `build/chat-app-v1.wasm` or a boot bundle.**
+- **`npm run smoke` can't find `build/chat-app.wasm` or a boot bundle.**
   Run `npm run build` first.
 - **`npm run e2e` finds no browser.** It looks for Edge, Chrome or Chromium in their
   usual places. Set `E2E_BROWSER` to the path of one installed elsewhere.
@@ -664,9 +658,9 @@ out here.
 - **Jam shows what is playing, with no sound.** Press **Tune in**: listening is each
   node's own choice, and a browser lets a page make sound only after a click in it.
 - **Jam says `Not connected to a room`, or `Nobody else is connected here yet`.** Music is
-  added to a room, for whoever else is in it running jam. Join one on the **Network** tab.
-  With a room and nobody else in it, music can still be added: whoever joins is sent the
-  list, and fetches the audio from this node.
+  added to a room, for whoever else is in it. Join one on the **Network** tab. With a room
+  and nobody else linked in it, music can still be added: whoever joins is sent the list,
+  and fetches the audio from this node.
 - **A track in jam says `nobody here has it`.** Its audio is held by whoever added it and
   by everyone who has played it since. If they have all left or reloaded, the entry is
   still in the list and its audio is gone: remove it and add the file again.

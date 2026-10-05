@@ -1,11 +1,11 @@
 {
   "entries": [
-    "assembly/chat-app-v2/index.ts"
+    "assembly/chat-app/index.ts"
   ],
   "targets": {
     "release": {
-      "outFile": "build/chat-app-v2.wasm",
-      "textFile": "build/chat-app-v2.wat",
+      "outFile": "build/chat-app.wasm",
+      "textFile": "build/chat-app.wat",
       "optimizeLevel": 3,
       "shrinkLevel": 2,
       "converge": false,
