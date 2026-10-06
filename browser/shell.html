@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="color-scheme" content="dark" />
 <meta name="theme-color" content="#0e0f12" />
-<title>seedkernel chat</title>
+<title>seedshell</title>
 <!-- script-src includes 'unsafe-inline' on purpose: the app UIs run in a sandboxed
      blob: iframe, and a blob: document inherits this page's CSP. The UI is arbitrary
      app content (any author's signed bundle) — the shell cannot pre-authorize its
@@ -270,10 +270,10 @@
 
 </main>
 
-<!-- The seedkernel surface chat depends on, declared in one place. `npm run vendor`
+<!-- The seedkernel surface the shell depends on, declared in one place. `npm run vendor`
      copies seedkernel-wasm's built host (build-min: host/ + services/) into ./vendor/;
      the seedkernel-wasm/* specifiers below are the entire contract between this
-     app and the runtime. The QuickJS entries are not chat's own: they are the realm
+     page and the runtime. The QuickJS entries are not the shell's own: they are the realm
      engine every app's guest runs in, imported by bare specifier from the vendored
      safe-js that shell-core loads on the first realm (seedkernel's own quickjs-ng
      build, whose .wasm rides beside its variant, plus quickjs-emscripten-core, the

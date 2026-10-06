@@ -103,9 +103,9 @@ for (let i = 0; ; i++) {
 
 // The browser. A fake camera and microphone, granted without a prompt, let a call start,
 // and a page may play audio without a click first, since nothing here is a person's click.
-const profile = mkdtempSync(join(tmpdir(), "seedchat-e2e-"));
+const profile = mkdtempSync(join(tmpdir(), "seedshell-e2e-"));
 /** Where the browser puts a file a view saves, each under the id its download was given. */
-const saved = mkdtempSync(join(tmpdir(), "seedchat-e2e-saved-"));
+const saved = mkdtempSync(join(tmpdir(), "seedshell-e2e-saved-"));
 const browser = spawn(browserPath, ["--headless=new", "--remote-debugging-pipe", `--user-data-dir=${profile}`,
   "--no-first-run", "--disable-gpu", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
   "--autoplay-policy=no-user-gesture-required",
@@ -255,8 +255,8 @@ async function drop(tab, file) {
 const appShown = (tab) => page(tab, text("app-status"));
 const frameCount = (tab) => page(tab, "document.querySelectorAll('iframe.app-frame').length");
 const peerPill = (tab) => page(tab, text("peer-pill-text"));
-const contactsOf = (tab) => page(tab, "sessionStorage.getItem('chat.contacts') ?? ''");
-const keyOf = (tab) => page(tab, "JSON.parse(sessionStorage.getItem('chat.identity')).pk.map((b) => b.toString(16).padStart(2, '0')).join('')");
+const contactsOf = (tab) => page(tab, "sessionStorage.getItem('shell.contacts') ?? ''");
+const keyOf = (tab) => page(tab, "JSON.parse(sessionStorage.getItem('shell.identity')).pk.map((b) => b.toString(16).padStart(2, '0')).join('')");
 const setNick = (tab, nick) => page(tab, `document.getElementById('nick').value = ${JSON.stringify(nick)}; ${click("set-nick")}`);
 /** Write a message in chat's view and send it. */
 const say = (tab, message) => view(tab, `document.getElementById('msg').value = ${JSON.stringify(message)}; document.getElementById('form').requestSubmit()`);

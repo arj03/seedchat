@@ -1,11 +1,12 @@
-# seedchat: an app shell, and a chat app, for [seedkernel](https://github.com/arj03/seedkernel)
+# seedshell: an app shell, and its apps, for [seedkernel](https://github.com/arj03/seedkernel)
 
 Two things live here, and the line between them is the point.
 
 The **shell** (`browser/shell.*`) is a browser page that hosts apps. It owns what is
 the same for every app: this node's identity and nick, the relay, rooms, peers and
 contacts, installing and offering apps, and calls. It knows nothing about what any app
-does.
+does. Seedkernel has a `Shell` of its own, the node assembly `bootShell` returns (§12.8):
+that one lives in seedkernel, and this page is built around it.
 
 An **app** is a signed bundle that carries everything of its own: a confined JS **guest**
 that is its behaviour, an HTML **view** the shell runs in a sandboxed iframe, and any
@@ -26,14 +27,14 @@ the Offer is offering, so until someone accepts it there is no app to route it t
 This lives outside the seedkernel repo for the same reason
 [seedstore](https://github.com/arj03/seedstore) does: an app is a *consumer* of
 the runtime, not part of it. The seedkernel repo stays runtime-only, and every reach
-chat makes into the runtime goes through a published entry point of
+the shell makes into the runtime goes through a published entry point of
 `seedkernel-wasm` — see seedkernel's
 [CLIENT](https://github.com/arj03/seedkernel/blob/main/docs/CLIENT.md) guide.
 
 **Contents:** [Quick start](#quick-start) · [Using the shell](#using-the-shell) ·
 [What's here](#whats-here) · [Writing an app](#writing-an-app) · [The chat app](#the-chat-app) ·
 [The jam app](#the-jam-app) · [Protocol interop](#protocol-interop) ·
-[The seedkernel surface chat uses](#the-seedkernel-surface-chat-uses) ·
+[The seedkernel surface the shell uses](#the-seedkernel-surface-the-shell-uses) ·
 [Troubleshooting](#troubleshooting)
 
 ## Quick start
@@ -50,7 +51,7 @@ chat makes into the runtime goes through a published entry point of
   some-dir/
   ├── seedkernel/
   ├── seedrelay/
-  └── seedchat/     ← this repo
+  └── seedshell/    ← this repo
   ```
 - **clang**, for seedkernel's post-quantum C → wasm step.
 
@@ -63,9 +64,9 @@ cd ../seedkernel/WASM && npm install && npm run build:browser
 
 # 2. build the apps (chat and jam, + the offers and calls boot bundles)
 #    and vendor the runtime
-cd ../../seedchat && npm install && npm run build
+cd ../../seedshell && npm install && npm run build
 
-# 2b. (optional) headless check that chat still works against this seedkernel:
+# 2b. (optional) headless check that the shell still works against this seedkernel:
 #     two shells, the real chat app, a message round-trip, an upgrade in place,
 #     an offer round-trip, a call signal round-trip
 npm run smoke
@@ -569,7 +570,7 @@ click; a different author's app asks first, because it takes over the label's da
 signing scope along with the slot (seedkernel §12.4). One under a different label is
 refused while the first holds `chat` — remove the first to install it.
 
-## The seedkernel surface chat uses
+## The seedkernel surface the shell uses
 
 Eleven published entry points of `seedkernel-wasm`, across the browser shell and the
 build/smoke scripts:
@@ -577,7 +578,7 @@ build/smoke scripts:
 | Import | Used for |
 | --- | --- |
 | `seedkernel-wasm` | Node `loadCrypto()` in the offline bundle builders and the headless smoke test. |
-| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.9): the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. Chat's `admit` composes the offers and calls pins and the consent gate. Its `Shell.call` is the host's own door into a co-resident guest's `services` claim, which is how the peer pill and the peer list ask the transport who is linked, and whether directly or through the relay. |
+| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.8): the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. The page's `admit` composes the offers and calls pins and the consent gate. Its `Shell.call` is the host's own door into a co-resident guest's `services` claim, which is how the peer pill and the peer list ask the transport who is linked, and whether directly or through the relay. |
 | `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` and `TRANSPORT_SERVICE` — the seedkernel-shipped transport bundle as raw bytes, and the local service id it claims, used by the headless smoke assertions (§12.6); browser boot gets the same artifact through `bootShell`. |
 | `seedkernel-wasm/bundle` | `verifyBundle` — the one call that unpacks and checks an offered bundle (`peekBundle`) — and `genesisHash`, the hash the consent gate's digest of a whole bundle is built from. The browser only verifies; peer attribution uses its node public key. |
 | `seedkernel-wasm/bundle-author` | `authorBundle`, `guestOpFraming` and `hybridAuthorKeysFromSeed` in the offline `build-app-bundle.mjs` and `build-boot-bundles.mjs` scripts. This entry point is never imported by the browser shell. |
@@ -588,13 +589,13 @@ build/smoke scripts:
 | `seedkernel-wasm/crypto-browser` | `loadCrypto` — the browser build of the same crypto seam Node's `loadCrypto` provides. |
 | `seedkernel-wasm/libsodium` | The browser libsodium build. |
 
-The import map in `shell.html` also maps `seedkernel-wasm/quickjs`. Chat
+The import map in `shell.html` also maps `seedkernel-wasm/quickjs`. The shell
 never imports it; the vendored host does, for its QuickJS realms.
 
 The relay is deliberately not a seedkernel entry point. `seedrelay` is the server;
 the transport bundle speaks its control wire, registering through its `relay` operation
-and redialing a relay that drops, and chat meets the room with seedrelay's room client.
-Chat owns only the selected URL, room, credentials, and UI.
+and redialing a relay that drops, and the shell meets the room with seedrelay's room
+client. The shell owns only the selected URL, room, credentials, and UI.
 
 Plus two on the guest side. The chat module defines its two memory-layout
 literals — `PK_LEN = 32` and `PRIV_USER_OFF = 0` — alongside its layout
@@ -612,7 +613,7 @@ Three properties serve as the summary; the details live in the seedkernel docs:
   `bootShell`'s channel adapter, built around a WebSocket and the platform's
   `RtcNetwork`, combined and supplied as `transport.channels`; transport policy and its
   defaults belong to the signed bundle, as do the address book and contact gate,
-  which live in that bundle's own realm rather than under the adapter. Chat sets
+  which live in that bundle's own realm rather than under the adapter. The shell sets
   the gate, this node's own contact secret, with the transport's local `contact`
   operation, and names its room-mates with `welcome`, so their calls pass it. It
   registers on the relay with the `relay` operation, hands the transport each room-mate
@@ -620,11 +621,11 @@ Three properties serve as the summary; the details live in the seedkernel docs:
   wants with `forget`; the transport links to them through the relay and moves each
   link to WebRTC itself
   (§12.6, §12.7, [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)).
-- **The offers and calls apps get a pin, chat's own half of it.** `offer/v1` carries a
+- **The offers and calls apps get a pin, the shell's own half of it.** `offer/v1` carries a
   signed bundle for an app that does not exist yet, so something already
   installed at boot owns the name and `admit` allows exactly the author and app
   the page was built with — a pin, not a consent prompt. The calls app, which carries
-  a call's signaling, is pinned the same way. Chat's own consent gate
+  a call's signaling, is pinned the same way. The shell's own consent gate
   is everything else.
 - **Both directions cross an app's guest.** The host has no send and no receive:
   an inbound frame reaches the shell as the link occupant's own delivery return,
@@ -642,8 +643,8 @@ The browser JS entry points are declared in exactly two places: the imports at t
 inline scripts (`'unsafe-inline'`) because app UIs run in a sandboxed `blob:`
 iframe that inherits this page's policy — the iframe sandbox is the actual
 boundary. Nothing else in this repo reaches into `node_modules`. If a seedkernel
-change breaks chat, it broke a public export — which is the point of chat living
-out here.
+change breaks the shell, it broke a public export — which is the point of the shell
+living out here.
 
 ## Troubleshooting
 

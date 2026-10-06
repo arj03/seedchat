@@ -1,5 +1,5 @@
-// Build chat's own boot bundles: the offers app (browser/offers-app.js) and the calls app
-// (browser/calls-app.js). Unlike a chat app's `.skb` (scripts/build-app-bundle.mjs), these
+// Build the shell's own boot bundles: the offers app (browser/offers-app.js) and the calls
+// app (browser/calls-app.js). Unlike an app's `.skb` (scripts/build-app-bundle.mjs), these
 // are not something a user drops in — they are loaded at BOOT, alongside the transport
 // bundle, so their bytes have to reach the served page rather than sit in the gitignored
 // bundle/ directory. This script therefore also generates browser/<name>-bundle.js for
@@ -9,7 +9,7 @@
 //
 //   node scripts/build-boot-bundles.mjs
 //
-// Signed under chat-author.key — the SAME author every chat-app build signs under
+// Signed under chat-author.key — the SAME author every app build signs under
 // (scripts/build-app-bundle.mjs mints it on first run): an author is a key set, not a
 // program, and this demo has exactly one. Each app's freshness lineage is its own,
 // though: <name>-author.version tracks that app's high-water mark, because the runtime's
@@ -84,7 +84,7 @@ for (const b of BUNDLES) {
 // like seedkernel's transport bundle, signed by
 //   ${toHex(author)}
 // under the hybrid suite 0x02 (Ed25519 + ML-DSA-65) with chat-author.key, the same
-// author every chat-app bundle signs under. Its own freshness lineage lives in
+// author every app bundle signs under. Its own freshness lineage lives in
 // ${b.name}-author.version: the runtime's freshness store keys on (author, app).
 //
 // The page is served from browser/ (bundle/ is not), so this embedded module is how the

@@ -2,9 +2,9 @@
 // a *published* entry point of seedkernel-wasm (its package.json "exports"), so
 // this file can only reach what seedkernel has deliberately made public — the
 // import map in shell.html resolves them to the vendored build. If a future
-// seedkernel change breaks chat, it broke a public export, which is the point.
+// seedkernel change breaks the shell, it broke a public export, which is the point.
 import sodium from "seedkernel-wasm/libsodium";
-// bootShell is the assembly itself (§12.9): platform members defaulted, the
+// bootShell is the assembly itself (§12.8): platform members defaulted, the
 // transport bundle pinned to its own author, the channel adapter built from the
 // `transport` options passed to it. The page's admit is then ONLY its consent gate —
 // who may be the network is the assembly's, so nobody can lose it by forgetting it.
@@ -186,7 +186,7 @@ const peerNicks = new Map();
 /** The longest nick kept, a peer's or this node's. */
 const MAX_NICK = 32;
 // What this node calls itself: its nick, or "" for none. Kept with the identity.
-let myNick = (sessionStorage.getItem("chat.nick") ?? "").slice(0, MAX_NICK);
+let myNick = (sessionStorage.getItem("shell.nick") ?? "").slice(0, MAX_NICK);
 // The notices peers are owed, by key in hex: true for one this node added, false for one
 // it removed. Each is sent once its peer is linked (`tellPeers`).
 const untoldPeers = new Map();
@@ -196,7 +196,7 @@ const leavingPeers = new Set();
 // ─── per-tab Ed25519 identity ──────────────────────────────────────────
 let myKeys;
 // FIXME: this is just a demo
-const stored = sessionStorage.getItem("chat.identity");
+const stored = sessionStorage.getItem("shell.identity");
 if (stored) {
   const parsed = JSON.parse(stored);
   myKeys = {
@@ -206,7 +206,7 @@ if (stored) {
 } else {
   const kp = sodium.crypto_sign_keypair();
   myKeys = { publicKey: kp.publicKey, privateKey: kp.privateKey };
-  sessionStorage.setItem("chat.identity", JSON.stringify({
+  sessionStorage.setItem("shell.identity", JSON.stringify({
     pk: Array.from(kp.publicKey),
     sk: Array.from(kp.privateKey),
   }));
@@ -231,17 +231,17 @@ shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 //
 // `myContactSecret` is this node's, or null. `contacts` holds the contacts, by key in hex,
 // each with its contact secret or null. Both are kept with the identity, as the rooms are.
-const savedContact = sessionStorage.getItem("chat.contactSecret");
+const savedContact = sessionStorage.getItem("shell.contactSecret");
 let myContactSecret = savedContact && HEX32_RE.test(savedContact) ? hexToBytes(savedContact) : null;
 const contacts = new Map();
 try {
-  for (const [key, secret] of Object.entries(JSON.parse(sessionStorage.getItem("chat.contacts") ?? "{}"))) {
+  for (const [key, secret] of Object.entries(JSON.parse(sessionStorage.getItem("shell.contacts") ?? "{}"))) {
     if (HEX32_RE.test(key)) contacts.set(key, HEX32_RE.test(secret) ? hexToBytes(secret) : null);
   }
 } catch {}
 
 function saveContacts() {
-  sessionStorage.setItem("chat.contacts",
+  sessionStorage.setItem("shell.contacts",
     JSON.stringify(Object.fromEntries([...contacts].map(([k, s]) => [k, s ? bytesToHex(s) : ""]))));
 }
 
@@ -252,13 +252,13 @@ function saveContacts() {
 const net = combineChannels(new WsNetwork(), new RtcNetwork());
 
 // Assemble the shared shell now that the identity exists — via bootShell, the ONE
-// assembly (§12.9). The platform is a browser seam: sodium, our identity, a
+// assembly (§12.8). The platform is a browser seam: sodium, our identity, a
 // WebAssembly-backed module builder, an in-memory freshness store — all defaulted by
 // bootShell — and the channel adapter, which bootShell CONSTRUCTS from the `transport`
 // options (identity taken from the top-level fields, never restated) and returns with
 // the shell. The adapter is the platform's: link ids and sockets. Transport policy belongs
 // to the signed bundle, and so does the address book — it lives in that bundle's own realm
-// now (§12.10), and chat writes nothing to it: a peer here is met in the relay room the
+// now (§12.10), and the page writes nothing to it: a peer here is met in the relay room the
 // transport joins, and linked by it.
 // The sockets above are passed in as `channels`; bootShell registers their accept sink
 // while starting the transport. Raw-link
@@ -287,7 +287,7 @@ const net = combineChannels(new WsNetwork(), new RtcNetwork());
 const booted = await bootShell({
   sodium,
   identity: myKeys,
-  // The transport asks the relay a peer is linked through for STUN (§12.7). A chat room
+  // The transport asks the relay a peer is linked through for STUN (§12.7). A room
   // keeps its members linked, so links do not idle out; the page redials a member whose
   // link drops (`pollPeerViews`).
   transport: {
@@ -1319,8 +1319,8 @@ function tellNick(peers) {
  *  counts as told any more, and the apps hear of it in their context. */
 function setMyNick(nick) {
   myNick = nick.trim().slice(0, MAX_NICK);
-  if (myNick) sessionStorage.setItem("chat.nick", myNick);
-  else sessionStorage.removeItem("chat.nick");
+  if (myNick) sessionStorage.setItem("shell.nick", myNick);
+  else sessionStorage.removeItem("shell.nick");
   nickInput.value = myNick;
   nickTold.clear();
   tellNick(linkedNow);
@@ -1364,7 +1364,7 @@ function roomsOf(key) {
 
 /** The joined rooms changed: keep them, show them, and bring the links in step. */
 function roomsChanged() {
-  sessionStorage.setItem("chat.rooms", JSON.stringify([...joinedRooms.keys()]));
+  sessionStorage.setItem("shell.rooms", JSON.stringify([...joinedRooms.keys()]));
   renderRoomList();
   syncPeers();
 }
@@ -1576,8 +1576,8 @@ function connectPeer(key, field) {
 async function setMyContact(secret) {
   await setTransportContact(secret);
   myContactSecret = secret;
-  if (secret) sessionStorage.setItem("chat.contactSecret", bytesToHex(secret));
-  else sessionStorage.removeItem("chat.contactSecret");
+  if (secret) sessionStorage.setItem("shell.contactSecret", bytesToHex(secret));
+  else sessionStorage.removeItem("shell.contactSecret");
   updateContactHint();
 }
 
@@ -1980,8 +1980,8 @@ async function disconnectRelay() {
   syncPeers();
   hangUpUnwanted(before);
   // A reload stays off the relay too.
-  sessionStorage.removeItem("chat.relayUrl");
-  sessionStorage.removeItem("chat.relaySecret");
+  sessionStorage.removeItem("shell.relayUrl");
+  sessionStorage.removeItem("shell.relaySecret");
   await netOp(new OpArgs("relay").text(""));
   showRelayState(0);
   shellPrint("Disconnected from the relay.", "sys");
@@ -2031,10 +2031,10 @@ function showRelayState(state) {
     shellPrint(`Relay link up — ${roomsLabel()}.`, "sys");
     showConnected();
     // Remember the relay so a reload picks it, and the rooms, back up automatically.
-    sessionStorage.setItem("chat.relayUrl", base);
+    sessionStorage.setItem("shell.relayUrl", base);
     // The relay secret belongs to the relay, so it is saved and cleared with the relay.
-    if (relaySecret) sessionStorage.setItem("chat.relaySecret", relaySecret);
-    else sessionStorage.removeItem("chat.relaySecret");
+    if (relaySecret) sessionStorage.setItem("shell.relaySecret", relaySecret);
+    else sessionStorage.removeItem("shell.relaySecret");
   } else {
     relayStatus.textContent = "unreachable — retrying";
     setRelayPill("err", "relay down");
@@ -2263,13 +2263,13 @@ function defaultRelayUrl() {
 // Auto-reconnect to the last relay that successfully accepted us, in the rooms we were
 // in. This is the other half of the reload story: rejoining a room announces our key to
 // its members, and the transport links each of them with our new tab.
-const savedRelayUrl = sessionStorage.getItem("chat.relayUrl");
-const savedRelaySecret = sessionStorage.getItem("chat.relaySecret");
+const savedRelayUrl = sessionStorage.getItem("shell.relayUrl");
+const savedRelaySecret = sessionStorage.getItem("shell.relaySecret");
 relayUrlInput.value = savedRelayUrl || defaultRelayUrl();
 if (savedRelaySecret) relaySecretInput.value = savedRelaySecret;
 if (myContactSecret) contactInput.value = bytesToHex(myContactSecret);
 let savedRooms = [];
-try { savedRooms = JSON.parse(sessionStorage.getItem("chat.rooms") ?? "[]"); } catch {}
+try { savedRooms = JSON.parse(sessionStorage.getItem("shell.rooms") ?? "[]"); } catch {}
 
 // A link that was followed: its room is joined beside the saved ones, and its contact
 // added. Nothing of it stays in the address bar, a contact secret least of all.

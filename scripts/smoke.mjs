@@ -1,4 +1,4 @@
-// Headless smoke test: does chat still work on the seedkernel it depends on?
+// Headless smoke test: does the shell still work on the seedkernel it depends on?
 //
 // Replays the boot path browser/shell.js actually runs — the bootShell
 // assembly + its boot-selected transport + consent-gated app install +
@@ -10,8 +10,8 @@
 //
 //   node scripts/smoke.mjs
 //
-// Fails loudly (non-zero exit) on any regression in the seedkernel surface chat
-// consumes, so a seedkernel bump that breaks chat is caught headlessly instead of
+// Fails loudly (non-zero exit) on any regression in the seedkernel surface the shell
+// consumes, so a seedkernel bump that breaks it is caught headlessly instead of
 // in the browser.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -24,13 +24,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 // private to the signed transport bundle.
 const { loadCrypto } = await import("seedkernel-wasm");
 const sodium = await loadCrypto();
-// bootShell is the assembly itself (§12.9): platform members defaulted, the selected
+// bootShell is the assembly itself (§12.8): platform members defaulted, the selected
 // transport bundle installed at boot, the adapter built from the transport options passed
 // here. The shells' admit is then ONLY the consent gate.
 const { bootShell } = await import("seedkernel-wasm/shell-core");
 // `TRANSPORT_SERVICE` is emitted beside the blob it belongs to, not known to the host:
 // a replacement transport may spell its claim differently, and then THAT spelling is the
-// one the host reaches. Chat runs the shipped one, so this is the id chat must agree with.
+// one the host reaches. The shell runs the shipped one, so this is the id to agree with.
 const { transportBundleBytes, TRANSPORT_SERVICE } = await import("seedkernel-wasm/transport-bundle");
 const {
   verifyBundle, genesisHash,
@@ -196,7 +196,7 @@ async function setContactSecret(shell, secret) {
   if (!answer) throw new Error(`nothing claims ${NET_PROTO}`);
   await answer;
 }
-// The one string in the host's vocabulary chat spells by hand (app-api.js keeps a
+// The one string in the host's vocabulary the shell spells by hand (app-api.js keeps a
 // no-imports shape, and the guest library spells it again in guest source,
 // assembly/guest-lib/net.js) must be the transport bundle's own claim, or the guest calls
 // nothing. The host reserves no name for it: the claim is an ordinary LOCAL service
@@ -205,9 +205,9 @@ async function setContactSecret(shell, secret) {
 // itself is the ground truth.
 const transportManifest = verifyBundle(sodium, TRANSPORT_BYTES).manifest;
 assert((transportManifest.services ?? []).includes(NET_PROTO),
-  `chat's net id ${JSON.stringify(NET_PROTO)} must be the transport bundle's services claim`);
+  `the shell's net id ${JSON.stringify(NET_PROTO)} must be the transport bundle's services claim`);
 assert(NET_PROTO === TRANSPORT_SERVICE,
-  `chat's net id ${JSON.stringify(NET_PROTO)} must be the id the shipped transport publishes `
+  `the shell's net id ${JSON.stringify(NET_PROTO)} must be the id the shipped transport publishes `
   + `(${JSON.stringify(TRANSPORT_SERVICE)}) — that is the one a host-side call reaches`);
 assert(!Object.hasOwn(transportManifest.guest, "abi"),
   "the all-async guest seam has no manifest ABI field");

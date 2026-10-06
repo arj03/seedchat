@@ -353,7 +353,7 @@
 
   .hint.subtle { font-size: 0.78em; }
 
-  /* ── chat (app) panel ─────────────────────────────────────────────── */
+  /* ── app panel ────────────────────────────────────────────────────── */
   #panel-app {
     padding: 0;
     gap: 0;
@@ -488,7 +488,7 @@
   }
   #shell-log div { padding: 1px 0; word-break: break-word; }
 
-  /* empty state inside chat tab when no app installed */
+  /* empty state inside the App tab when no app installed */
   .empty-state {
     flex: 1;
     display: flex;

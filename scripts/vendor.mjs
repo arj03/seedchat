@@ -1,10 +1,10 @@
 // Copy seedkernel's built host into browser/vendor/ so a plain static server can
-// serve chat with no bundler. The import map in shell.html points at these
+// serve the shell with no bundler. The import map in shell.html points at these
 // files; nothing else in this repo reaches into node_modules.
 //
 // This is deliberately a dumb copy of `build-min` wholesale: shell-core.js and
 // bundle.js import their siblings and the `services/` tree by relative path, so the
-// whole tree has to arrive intact even though chat itself names only a handful
+// whole tree has to arrive intact even though the shell itself names only a handful
 // of entry points. The minified tree is what seedstore's p2p.html vendors too —
 // same convention across both apps — with the readable `build/` as a fallback.
 //
@@ -12,7 +12,7 @@
 // module and its .wasm relative to its own URL (`new URL('./libsodium.wasm',
 // import.meta.url)`), so the three files must stay in one directory.
 //
-// The QuickJS realm engine (safe-js) is vendored too: the transport bundle chat
+// The QuickJS realm engine (safe-js) is vendored too: the transport bundle the shell
 // admits runs as a confined guest program, and the realm factory lives in
 // host/safe-js.js, which names seedkernel's in-repo engine and
 // quickjs-emscripten-core as bare specifiers. Same set and layout seedstore's
@@ -62,7 +62,7 @@ if (hostSrc === rawDir) {
 // The browser runs the MINIFIED host; seedkernel's own Node tests run build/.
 // The two diverge silently when `build:host` (tsc) is re-run but `build:host:min`
 // (minify) is not — a real trap after switching branches, because seedkernel's tests
-// stay green against the fresh build/ while chat vendors a stale build-min and runs
+// stay green against the fresh build/ while the shell vendors a stale build-min and runs
 // old code. Catch it here, at the last step before the browser: if any compiled
 // build/ .js is newer than the whole build-min tree, the minify step lagged.
 // Scoped to the host/ and services/ subtrees — minify covers exactly those, and build/
@@ -85,7 +85,7 @@ if (hostSrc === minDir && existsSync(rawDir)) {
     if (raw > min + 1000) { // 1s slack for filesystem mtime granularity
       console.error(
         `seedkernel build-min is STALE: build/${sub} is newer, so the minify step did not\n` +
-        "re-run after the last compile. Chat would vendor and serve old seedkernel code.\n" +
+        "re-run after the last compile. The shell would vendor and serve old seedkernel code.\n" +
         "  fix: in the seedkernel checkout, cd WASM && npm run build"
       );
       process.exit(2);
@@ -98,7 +98,7 @@ rmSync(vendor, { recursive: true, force: true });
 mkdirSync(vendor, { recursive: true });
 
 // The whole minified tree: host/ and services/ (host modules import ../services/* by
-// relative path) plus the top-level ws/forwarder entry files, unused by chat but
+// relative path) plus the top-level ws/forwarder entry files, unused by the shell but
 // part of the same tree. libsodium and mldsa65.wasm live in seedkernel's
 // browser/ dir and are copied separately, below.
 cpSync(hostSrc, vendor, { recursive: true });
@@ -113,7 +113,7 @@ for (const f of ["libsodium-wrappers.mjs", "libsodium-core.mjs", "libsodium.wasm
 }
 
 // ML-DSA-65 for manifest suite 0x02 (§12.4). The same artifact Node reads and the native
-// binary embeds, so chat admits exactly the bundles they admit; the shell fetches it
+// binary embeds, so the shell admits exactly the bundles they admit; it fetches the file
 // by URL rather than importing it, so it does not need to sit beside a JS module.
 {
   const src = resolve(pkgRoot, "browser/mldsa65.wasm");
@@ -139,7 +139,7 @@ if (!existsSync(roomsSrc)) {
 mkdirSync(resolve(vendor, "seedrelay"), { recursive: true });
 copyFileSync(roomsSrc, resolve(vendor, "seedrelay", "rooms.mjs"));
 
-// ── vendor the QuickJS realm engine so chat runs offline ────────────────────
+// ── vendor the QuickJS realm engine so the shell runs offline ───────────────
 // Two pieces, because that is how seedkernel splits them: the ENGINE is the
 // seedkernel's own in-repo quickjs-ng 0.16.1 build (WASM/quickjs/dist — the same
 // blob its node tests and, at the same pin, the native binary run), and the JS API
