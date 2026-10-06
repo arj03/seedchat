@@ -610,9 +610,10 @@ function renderPeerList(routes) {
 // What an app DOES is its guest's, and the shell never reads it. Three things reach a
 // guest, each as bytes: a peer's frame under a protocol the app claims, with the sender
 // the channel authenticated in front; the node's context; and whatever the app's own view
-// sent. Each answer is render bytes, and goes to the view. So the format of a frame, of a
-// render and of what a view asks its guest are all the app's own, and an app changes them
-// by shipping a new bundle, with nothing here to change beside it.
+// sent. Each answer goes to the view: render bytes, or the answer to the view's own call.
+// So the format of a frame, of a render and of what a view asks its guest are all the
+// app's own, and an app changes them by shipping a new bundle, with nothing here to change
+// beside it.
 //
 // The key is node-local. Two peers need not agree on it: a frame carries a *protocol
 // id*, and each side resolves that to whichever app it installed that claims it — so two
@@ -725,7 +726,9 @@ function unmountView(rec) {
   rec.queue.length = 0;
 }
 
-/** Hand an app's view the render bytes its guest answered. The shell does not read them.
+/** Hand an app's view the render bytes its guest answered, to a peer's frame or to the
+ *  context. The shell does not read them. What a guest answers its view's own `call` is
+ *  not a render: it goes back to that call (below).
  *
  *  Renders that arrive before the view says "ready" are queued, so an app just installed
  *  does not drop its first message. A context answer is not: `viewReady` gives the view
@@ -1239,7 +1242,7 @@ openAppsBtn.addEventListener("click", () => showTab("apps"));
 // the shell passes bytes between a view and its guest and reads none of them. The other
 // two ask something of the shell, about things that are the shell's, a room or a peer
 // named by its id in hex: `conv` and `contact`. A view is any author's page, so each is
-// checked for shape, and neither hands it anything back.
+// checked for shape, and neither of those two hands it anything back.
 
 /** Whether `v` is 32 bytes as lowercase hex: a key, or a room's id. */
 const isHex32 = (v) => typeof v === "string" && HEX32_RE.test(v);
@@ -1251,12 +1254,17 @@ window.addEventListener("message", (ev) => {
 
   if (msg.type === "ready") { void viewReady(rec); return; }
 
-  // Bytes for the app's own guest. The answer is render bytes for the view that asked: a
-  // local echo, say, drawn the way a peer's frame is.
+  // Bytes for the app's own guest. Every call is answered, under the id the view gave it:
+  // with what the guest answered, empty or not, or with why it failed. So a view can ask
+  // its guest something and wait, and one whose guest threw is not left waiting.
   if (msg.type === "call") {
-    if (!(msg.bytes instanceof Uint8Array)) return;
-    invokeApp(rec, APP_OP_UI, msg.bytes)
-      .then((answer) => deliverRender(rec, answer), (err) => shellPrint(`${rec.name}: ${err.message}`, "err"));
+    if (!(msg.bytes instanceof Uint8Array) || !Number.isSafeInteger(msg.id)) return;
+    // To the view that asked, if it is still there: the app may be gone by the answer.
+    const answer = (fields) => rec.frame?.contentWindow.postMessage({ type: "answer", id: msg.id, ...fields }, "*");
+    invokeApp(rec, APP_OP_UI, msg.bytes).then((payload) => answer({ payload }), (err) => {
+      shellPrint(`${rec.name}: ${err.message}`, "err");
+      answer({ error: err.message });
+    });
     return;
   }
 

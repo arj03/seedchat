@@ -10,11 +10,13 @@
 //   the GUEST   is the app's behaviour. The shell hands it bytes and never reads what
 //               comes back: a peer's frame under a protocol the app claims, the node's
 //               context (`ctx`), and whatever the app's own view sent (`ui`). Each answer
-//               is render bytes, and goes to the view.
+//               goes to the view: to a peer's frame and to the context it is render bytes,
+//               and to the view's own bytes it is the answer to that call.
 //   the VIEW    is the app's UI, an HTML page the shell runs in a sandboxed iframe. It
 //               reaches the shell only with postMessage: `ready`, `call` (bytes for its
 //               guest), and two requests about things that are the shell's, `conv` and
-//               `contact`. The shell sends it one message, `render`.
+//               `contact`. The shell sends it two messages: `render`, and the `answer` to
+//               a `call`.
 //   MODULES     are pure compute the guest drives by name. The shell never sees them, and
 //               an app may have none.
 //
@@ -35,7 +37,7 @@
 /** The version of this contract. An app's manifest names the one it was built for
  *  (`guest.config.shell.api`), and the shell runs no other: a bundle from before a change
  *  to the doors below is refused by name instead of installed and left silent. */
-export const APP_API = 1;
+export const APP_API = 2;
 
 /** The local service name the transport bundle serves (the `_net` of the bundled
  *  composition; no host semantics attach to the spelling). Named here rather than
@@ -70,9 +72,11 @@ export const APP_GRANTS = {
  *          it is in and who is in each, the linked peers, the contacts, and what each
  *          is called. Sent after the install, when it changes, and when the app's view
  *          says it is ready.
- *    ui    bytes from the app's own view, unread by the shell.
+ *    ui    bytes from the app's own view (its `call`), unread by the shell. What the
+ *          guest answers goes back to the view as the `answer` to that call, under the id
+ *          the view gave it, so a view can ask its guest something and wait for it.
  *
- *  Each answers render bytes for the view, as a peer's frame does, or nothing. */
+ *  `ctx` answers render bytes for the view, as a peer's frame does, or nothing. */
 export const APP_OP_CONTEXT = "ctx";
 export const APP_OP_UI = "ui";
 

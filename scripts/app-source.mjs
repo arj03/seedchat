@@ -8,12 +8,14 @@
 //   app           the label it installs under, which is also its fs and signing scope
 //   api           the shell contract it was built for (browser/app-api.js `APP_API`)
 //   name, version, description   what its row in the shell says
-//   protocols     the protocol ids it claims, so peers' frames under them reach it
+//   protocols     the protocol ids it claims, so peers' frames under them reach it. The
+//                 guest is told them too, as `APP.protocols`
 //   requires      everything its guest reaches: `_net`, `fs`, `timer`
 //   guest         its guest's source files, joined in order behind seedkernel's op-frame.
-//                 A library two apps share is one more path in the list.
+//                 A library two apps share is one more path in the list, and
+//                 assembly/guest-lib/room-pipe.js is a guest whole
 //   ui            its view, an HTML page; left out for an app with nothing to show. The
-//                 stylesheets and scripts it names beside it are put into it (`readView`)
+//                 stylesheets and scripts it names are put into it (`readView`)
 //   modules       its pure wasm modules, by the name the guest calls each; may be empty
 
 import { readFileSync } from "node:fs";
@@ -29,11 +31,12 @@ const APP_LABEL = /^[A-Za-z0-9_-]{1,64}$/;
  *  into a sandbox, where there is no file beside it to fetch, so what the page at `rel`
  *  names with `<link rel="stylesheet" href>` and `<script src>` is put into it here: a view
  *  is written as a page with its CSS and JS in files of their own, and travels as one.
- *  Each is a path relative to the page. `text` reads a file of the app as LF text. */
+ *  Each is a path relative to the page: a file beside it, or a library two views share
+ *  (assembly/view-lib). `text` reads a file of the app as LF text. */
 function readView(rel, text) {
   const beside = (ref, close) => {
     if (/^([a-z][a-z0-9+.-]*:|\/)/i.test(ref))
-      throw new Error(`${rel}: "${ref}" must be a file beside the view, which is all a view can carry`);
+      throw new Error(`${rel}: "${ref}" must be a file named by its path from the view, which is all a view can carry`);
     const body = text(join(dirname(rel), ref));
     // Its text goes between a pair of tags, so it must not hold the one that ends them.
     if (body.toLowerCase().includes(close))
@@ -68,9 +71,12 @@ export function readAppSource(appDir, guestOpFraming) {
       .map(([name, rel]) => ({ name, wasm: new Uint8Array(readFileSync(join(appDir, rel))) })),
     guestSource: [guestOpFraming(), ...app.guest.map(text)].join("\n"),
     guestRequires: app.requires ?? [],
-    // What the shell reads (browser/app-api.js `appFacts`) rides in the SIGNED manifest, so
-    // an app's name and its view are vouched for by the same key as its code.
     guestConfig: {
+      // What the app claims, said again for its guest: a guest is handed its config (`APP`)
+      // and not its manifest's claims, and one that sends has to name a protocol.
+      protocols: app.protocols ?? [],
+      // What the shell reads (browser/app-api.js `appFacts`) rides in the SIGNED manifest,
+      // so an app's name and its view are vouched for by the same key as its code.
       shell: {
         api: app.api,
         name: app.name ?? app.app,

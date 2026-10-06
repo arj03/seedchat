@@ -559,9 +559,13 @@ try {
 } catch (err) { fail("call signaling end-to-end", err); }
 
 // 8. the jam app: a second app beside chat, under its own label and its own protocol, with
-//    no module at all. Its guest is a pipe scoped to a room that names the blocks of audio
-//    passing through it: a frame its view casts reaches the room's members, one it tells
-//    reaches one of them, and a block is drawn under the hash the RECEIVING guest gave it.
+//    no module at all. Its guest is the room pipe (assembly/guest-lib/room-pipe.js) and one
+//    thing more, a name for the blocks of audio passing through it: a frame its view casts
+//    reaches the room's members, one it tells reaches one of them, and a block is drawn
+//    under the hash the RECEIVING guest gave it.
+const ASK_CAST = 1, ASK_TELL = 2, RENDER_FRAME = 1;   // the pipe's asks, and its render
+/** A pipe frame: [room 32][body]. */
+const pipeFrame = (room, ...body) => concat(fromHex(room), ...body);
 try {
   const jam = authorBundle(sodium, authorA, { ...readAppSource(appDir("jam-app"), guestOpFraming), version: 1 });
   const JAM_PROTO = jam.manifest.protocols[0];
@@ -569,6 +573,7 @@ try {
   assert(facts.name === "Jam" && typeof facts.ui === "string", "the manifest carries jam's row and view");
   assert(facts.requires.length === 1 && facts.requires[0] === NET_PROTO && jam.manifest.modules.length === 0,
     "jam reaches the network and nothing else, and has no module");
+  assert(jam.manifest.guest.config.protocols[0] === JAM_PROTO, "the builder tells a guest the protocols its app claims");
   const jamRenders = [];
   consent(jam.blob);
   const jamA = await A.install(jam.blob);
@@ -583,32 +588,71 @@ try {
   assert(told[0] === 0 && JSON.parse(text(told.slice(1))).me === peerA, "jam's guest hands its view the context");
   await jamB.invoke(writeOp(APP_OP_CONTEXT, contextOf(peerB, [roomWith(ROOM, peerA)], [peerA])));
 
-  const ASK_CAST = 1, ASK_TELL = 2, ASK_HASH = 3, DOC = 1, BLOCK = 4;
-  const jamFrame = (type, room, body) => concat([type], fromHex(room), body);
+  const ASK_HASH = 3, DOC = 1, BLOCK = 4;   // what jam's own guest adds, and two of its frame types
   // Cast into the room B is not in, then into the one it is: one link carries both in
   // order, so the first render B sees says the first was not passed on.
-  await jamA.invoke(writeOp(APP_OP_UI, concat([ASK_CAST], jamFrame(DOC, STRAY, utf8('{"msgs":[]}')))));
-  const doc = jamFrame(DOC, ROOM, utf8('{"hello":true}'));
+  await jamA.invoke(writeOp(APP_OP_UI, concat([ASK_CAST], pipeFrame(STRAY, [DOC], utf8('{"msgs":[]}')))));
+  const doc = pipeFrame(ROOM, [DOC], utf8('{"hello":true}'));
   const castAnswer = await jamA.invoke(writeOp(APP_OP_UI, concat([ASK_CAST], doc)));
   assert(castAnswer.length === 0, "a cast answers nothing: the view has already applied what it sent");
   await until(() => jamRenders.length >= 1, 4000, "jam's frame");
-  assert(jamRenders[0][0] === 1 && toHex(jamRenders[0].slice(1, 33)) === peerA && toHex(jamRenders[0].slice(33)) === toHex(doc),
+  assert(jamRenders[0][0] === RENDER_FRAME && toHex(jamRenders[0].slice(1, 33)) === peerA && toHex(jamRenders[0].slice(33)) === toHex(doc),
     "a peer's frame is passed to the view with its sender in front, and one for a room B is not in is not");
 
   // A block of the size the view cuts audio into, told to one member.
   const block = Uint8Array.from({ length: 128 * 1024 }, (_, i) => (i * 31 + (i >> 8)) & 255);
   const id = toHex(sodium.crypto_generichash(32, block));
-  await jamA.invoke(writeOp(APP_OP_UI, concat([ASK_TELL], identityB.publicKey, jamFrame(BLOCK, ROOM, block))));
+  await jamA.invoke(writeOp(APP_OP_UI, concat([ASK_TELL], identityB.publicKey, pipeFrame(ROOM, [BLOCK], block))));
   await until(() => jamRenders.length >= 2, 4000, "jam's block");
   const got = jamRenders[1];
   assert(got[0] === 2 && toHex(got.slice(1, 33)) === peerA && toHex(got.slice(33, 65)) === ROOM, "a block is drawn with its sender and room");
   assert(toHex(got.slice(65, 97)) === id, "a block is named by the BLAKE2b-256 of its bytes, by the guest that received it");
   assert(got.length === 97 + block.length && toHex(got.slice(97)) === toHex(block), "a 128 KB block arrives whole");
   // The same name from the sender's own guest, which is how a track's block list is made.
-  const named = await jamA.invoke(writeOp(APP_OP_UI, concat([ASK_HASH], [0, 0, 0, 7], block)));
-  assert(named[0] === 3 && named[4] === 7 && toHex(named.slice(5)) === id, "a view's hash ask is answered under its tag");
+  // It is the answer to the view's call, with nothing in front of it.
+  const named = await jamA.invoke(writeOp(APP_OP_UI, concat([ASK_HASH], block)));
+  assert(toHex(named) === id, "a view's hash ask is answered with the block's id");
   ok(`jam: cast and tell scoped to a room, and a ${block.length / 1024} KB block named by its hash at both ends`);
 } catch (err) { fail("jam app", err); }
+
+// 8b. the room pipe on its own: an app whose state lives in its view writes no guest. Its
+//     app.json lists three library files, and they are a guest whole. This one is signed
+//     from them directly, as the builder would from such a list, with the protocol the pipe
+//     sends under where the builder writes it (`APP.protocols`).
+try {
+  const lib = (name) => readFileSync(resolve(here, "../assembly/guest-lib", name), "utf8").replace(/\r\n/g, "\n");
+  const PIPE_PROTO = "pipe/smoke";
+  const pipe = authorBundle(sodium, authorA, {
+    app: "pipe", version: 1, protocols: [PIPE_PROTO], modules: [], guestRequires: [NET_PROTO],
+    guestConfig: { protocols: [PIPE_PROTO], shell: { api: APP_API, name: "Pipe" } },
+    guestSource: [guestOpFraming(), lib("net.js"), lib("context.js"), lib("room-pipe.js")].join("\n"),
+  });
+  const pipeRenders = [];
+  consent(pipe.blob);
+  const pipeA = await A.install(pipe.blob);
+  consent(pipe.blob);
+  const pipeB = await B.install(pipe.blob, { onInbound: (claim, from, answer) => { if (answer.length > 0) pipeRenders.push(new Uint8Array(answer)); } });
+  assert(B.resolve(PIPE_PROTO) === pipeB.manifest.app, `B routes "${PIPE_PROTO}" to the app it installed`);
+  const told = await pipeA.invoke(writeOp(APP_OP_CONTEXT, contextOf(peerA, [roomWith(ROOM, peerB), roomWith(STRAY, peerB)], [peerB])));
+  assert(told[0] === 0 && JSON.parse(text(told.slice(1))).me === peerA, "the pipe hands its view the context");
+  await pipeB.invoke(writeOp(APP_OP_CONTEXT, contextOf(peerB, [roomWith(ROOM, peerA)], [peerA])));
+
+  // Cast into the room B is not in, then into the one it is, as for jam above.
+  await pipeA.invoke(writeOp(APP_OP_UI, concat([ASK_CAST], pipeFrame(STRAY, utf8("not for B")))));
+  const cast = pipeFrame(ROOM, utf8("to the room"));
+  assert((await pipeA.invoke(writeOp(APP_OP_UI, concat([ASK_CAST], cast)))).length === 0, "a cast answers nothing");
+  // A tell into a room A is not in is not sent at all; one to a member of a room arrives.
+  const NOWHERE = toHex(new Uint8Array(32).fill(7));
+  await pipeA.invoke(writeOp(APP_OP_UI, concat([ASK_TELL], identityB.publicKey, pipeFrame(NOWHERE, utf8("no such room")))));
+  const tell = pipeFrame(ROOM, utf8("to one member"));
+  await pipeA.invoke(writeOp(APP_OP_UI, concat([ASK_TELL], identityB.publicKey, tell)));
+  await until(() => pipeRenders.length >= 2, 4000, "the pipe's frames");
+  const frames = pipeRenders.map((r) => ({ type: r[0], from: toHex(r.slice(1, 33)), frame: toHex(r.slice(33)) }));
+  assert(pipeRenders.length === 2 && frames.every((f) => f.type === RENDER_FRAME && f.from === peerA),
+    "a peer's frame is passed to the view with its sender in front, and only from a member of its room");
+  assert(frames[0].frame === toHex(cast) && frames[1].frame === toHex(tell), "a cast and a tell arrive byte for byte, under the app's own protocol");
+  ok("the room pipe is a guest whole: cast and tell scoped to a room, with no guest code of the app's own");
+} catch (err) { fail("the room pipe on its own", err); }
 
 // 9. the gate a bundle passes before it is installed (peekBundle → appFacts). A peer's
 // bundle is installed on one click of a row showing a name and an author, so the reach it

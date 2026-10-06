@@ -1,20 +1,23 @@
 // chat-app v2 UI. Loaded into a sandboxed iframe by the shell.
 //
-// With the shell (browser/app-api.js), by postMessage:
-//   us → shell: { type: "ready" }
-//   us → shell: { type: "call", bytes }        a frame for this app's guest, which sends it
-//   us → shell: { type: "conv", room?: hex, to?: hex }
-//                  the conversation now open, which is who a call started from it is with
-//   us → shell: { type: "contact", peer: hex } make a peer a contact, ahead of a direct
-//                                              message to it
-//   shell → us: { type: "render", payload }    what this app's guest answered
+// With the shell (browser/app-api.js), through view-lib/app.js, which the page names ahead
+// of this file:
+//   app.ready()                    this view is listening
+//   app.call(...)                  a frame for this app's guest, which sends it and answers
+//                                  it drawn as this node's own
+//   app.conv({ room } | { to })    the conversation now open, which is who a call started
+//                                  from the shell is with
+//   app.contact(peer)              make a peer a contact, ahead of a direct message to it
+//   app.onContext, app.onRender    what this app's guest answered the context, and a
+//                                  peer's frame
 //
 // With this app's guest (guest.js), as bytes the shell does not read. A frame is
-// [type u8][body], and the guest knows who each type goes to. A render is one of:
+// [type u8][body], and the guest knows who each type goes to. What it answers is one of:
 //   [0][JSON]      the node's context, ids in hex:
 //                  { me, nick, rooms: [{ id, name, members }], linked, contacts, nicks }
 //   [type u8][pk_len u8][pk ..][body ..]
-//                  a frame as the module drew it, a peer's or this node's own
+//                  a frame as the module drew it: a peer's, as a render, or this node's
+//                  own, as the answer to the call that sent it
 //
 // What a peer is called is not in a frame. A nick is the shell's: this node's own is set
 // on its Network tab, and every peer's arrives in the context.
@@ -24,7 +27,6 @@
 // (type 3/4) goes to one peer only and names that peer in its body, so the sender's own
 // echo can be filed under the right conversation. The body is not secret from the shell
 // or the relay's peer, but only the addressee is sent it.
-const RENDER_CONTEXT  = 0x00;
 const CHAT_TYPE_DIRECT_TEXT  = 0x03;
 const CHAT_TYPE_DIRECT_IMAGE = 0x04;
 const CHAT_TYPE_ROOM_TEXT    = 0x05;
@@ -57,23 +59,11 @@ let myNick = "";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-function toHex(pk) {
-  return Array.from(pk, b => b.toString(16).padStart(2, "0")).join("");
-}
 function shortPk(pk) { return toHex(pk.slice(0, 4)); }
 function arraysEqual(a, b) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
-}
-function concat(...parts) {
-  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-  let o = 0;
-  for (const p of parts) { out.set(p, o); o += p.length; }
-  return out;
-}
-function fromHex(hex) {
-  return Uint8Array.from(hex.match(/../g), h => parseInt(h, 16));
 }
 
 // ── who we know ─────────────────────────────────────────────────────────
@@ -132,8 +122,7 @@ function openConv(key) {
   // A room is left on the shell's Network tab, not closed here.
   leaveBtn.hidden = c.kind === "room";
   side.classList.remove("open");
-  window.parent.postMessage(c.kind === "room"
-    ? { type: "conv", room: c.name } : { type: "conv", to: c.name }, "*");
+  app.conv(c.kind === "room" ? { room: c.name } : { to: c.name });
   renderSide();
 }
 
@@ -147,7 +136,7 @@ function closeConv(c) {
   if (first) { openConv(roomKey(first)); return; }
   emptyNote.hidden = false;
   leaveBtn.hidden = true;
-  window.parent.postMessage({ type: "conv" }, "*");
+  app.conv();
   renderSide();
 }
 
@@ -268,10 +257,12 @@ lightbox.addEventListener("click", () => {
   lightboxImg.src = "";
 });
 
-/** Hand this app's guest one frame, [type][body]. It knows who each type is for, sends it,
- *  and answers the frame drawn as this node's own, which comes back as a render. */
-function send(chatType, body) {
-  window.parent.postMessage({ type: "call", bytes: concat(Uint8Array.of(chatType), body) }, "*");
+/** Hand this app's guest one frame written in `c`, [type][body]. It knows who each type is
+ *  for, sends it, and answers the frame drawn as this node's own: the local echo. */
+function send(c, chatType, body) {
+  app.call([chatType], body).then(onFrame, (err) => {
+    if (convs.has(c.key)) print(`Not sent: ${err.message}`, "err", c);
+  });
 }
 
 // Send text or an image into one conversation: the frame's body starts with the room's
@@ -279,12 +270,12 @@ function send(chatType, body) {
 function sendInto(c, isImage, content) {
   const head = fromHex(c.name);
   if (c.kind === "room") {
-    send(isImage ? CHAT_TYPE_ROOM_IMAGE : CHAT_TYPE_ROOM_TEXT, concat(head, content));
+    send(c, isImage ? CHAT_TYPE_ROOM_IMAGE : CHAT_TYPE_ROOM_TEXT, concat(head, content));
   } else {
     // A direct message makes its addressee a contact, so the link to it outlives any
     // shared room. Contacts are the shell's, so it is asked, ahead of the frame.
-    window.parent.postMessage({ type: "contact", peer: c.name }, "*");
-    send(isImage ? CHAT_TYPE_DIRECT_IMAGE : CHAT_TYPE_DIRECT_TEXT, concat(head, content));
+    app.contact(c.name);
+    send(c, isImage ? CHAT_TYPE_DIRECT_IMAGE : CHAT_TYPE_DIRECT_TEXT, concat(head, content));
   }
 }
 
@@ -379,14 +370,8 @@ function onFrame(payload) {
   else printMessage(r.c, pk, tag, dec.decode(r.content), cls);
 }
 
-window.addEventListener("message", (ev) => {
-  if (ev.source !== window.parent) return;
-  const msg = ev.data;
-  if (!msg || msg.type !== "render") return;
-  const payload = new Uint8Array(msg.payload);
-  if (payload[0] === RENDER_CONTEXT) onContext(JSON.parse(dec.decode(payload.subarray(1))));
-  else onFrame(payload);
-});
+app.onContext(onContext);
+app.onRender(onFrame);
 
 leaveBtn.addEventListener("click", () => { if (active) closeConv(active); });
 menuBtn.addEventListener("click", () => side.classList.toggle("open"));
@@ -436,5 +421,5 @@ form.addEventListener("submit", (e) => {
 
 leaveBtn.hidden = true;
 renderSide();
-window.parent.postMessage({ type: "ready" }, "*");
+app.ready();
 msgInput.focus();

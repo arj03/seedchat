@@ -1,11 +1,11 @@
 {
   "app": "jam",
-  "api": 1,
+  "api": 2,
   "name": "Jam",
   "version": "v1",
   "description": "chat, emoji reactions and a playlist a room keeps and plays together",
   "protocols": ["jam"],
   "requires": ["_net"],
-  "guest": ["../guest-lib/net.js", "../guest-lib/context.js", "guest.js"],
+  "guest": ["../guest-lib/net.js", "../guest-lib/context.js", "../guest-lib/room-pipe.js", "guest.js"],
   "ui": "ui.html"
 }

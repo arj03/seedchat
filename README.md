@@ -225,15 +225,17 @@ when both tabs are on this machine. Reaching the shell from another device needs
 | `browser/calls-app.js` | The calls app *shape*: the `call/v1` id, the app id `calls`, its one reach (`_net`), and its guest source — a claim that hands a peer's call signal to the page, and a `send` op that puts the page's on the wire. What else two pages tell each other rides it too: `{ peer }`, that one added or removed the other as a peer, and `{ nick }`, what a peer calls itself. |
 | `browser/media-rtc.js` | The call feature: `MediaCalls`, one `RTCPeerConnection` per peer that the page owns, beside the transport's, with perfect negotiation signaled over `call/v1`. A node in a call tells its peers so (`{ call }`), and a connection is opened only between two that have each said they are in the same one. Live media is the page's own — the host holds only the transport's connections. |
 | `assembly/chat-app/` | Chat — text and images, in several rooms and in direct chats. `app.json` says what the bundle is, `guest.js` is its guest, which holds the chat wire vocabulary and decides who each frame is for, `index.ts` is its module, the one transform that draws a frame, and `ui.html` its view, with the view's CSS and JS in files of their own (`ui.css`, `ui.js`) beside the page. |
-| `assembly/jam-app/` | Jam: a room's chat, emoji reactions, and a playlist kept and played together. `guest.js` is a pipe scoped to a room that names blocks of audio by their hash, its view (`ui.html`, `ui.css`, `ui.js`) holds the room's state and plays it, `formats.js` finds where a FLAC or Ogg Vorbis file may be cut, and there is no module. See [The jam app](#the-jam-app). |
+| `assembly/jam-app/` | Jam: a room's chat, emoji reactions, and a playlist kept and played together. Its guest is the room pipe, to which `guest.js` adds a name for each block of audio, its hash. Its view (`ui.html`, `ui.css`, `ui.js`) holds the room's state and plays it, `formats.js` finds where a FLAC or Ogg Vorbis file may be cut, and there is no module. See [The jam app](#the-jam-app). |
 | `assembly/guest-lib/net.js` | Guest source any guest that reaches the network puts in front of its own: the transport's `send` and `peers` ops, and keys as hex. Every app and both boot bundles use it. |
-| `assembly/guest-lib/context.js` | Guest source for a guest whose frames are written to rooms: the shell's two ops by name, the rooms read out of the node's context, and the context passed on to the view as render type 0. Chat and jam use it. |
+| `assembly/guest-lib/context.js` | Guest source for a guest whose frames are written to rooms: the shell's two ops by name, the rooms read out of the node's context, the context passed on to the view as render type 0, and the entrypoint, which tells a peer's frame from the view's bytes so a guest is written as what it does with each (`guest.peer`, `guest.view`). Chat and jam use it. |
+| `assembly/guest-lib/room-pipe.js` | A guest, whole: a pipe scoped to a room, for an app whose state lives in its view. What the view casts goes to the room's linked members, what it tells goes to one of them, and a peer's frame is passed on only from a member of the room it names. An app that needs no more writes no guest. Jam builds on it. |
+| `assembly/view-lib/app.js` | View source any view puts in front of its own: bytes as hex, and the door to the shell as one object, `app`. A call to the guest is a promise of its answer, and `cast`, `tell` and `onFrame` are the view's half of the room pipe. Chat's and jam's views use it. |
 | `asconfig.chat-app.json` | AssemblyScript compiler config for chat's module (`build/chat-app.wasm`). |
 | `scripts/app-source.mjs` | Reads an app directory (`app.json` and what it names) into what gets signed, putting a view's stylesheets and scripts into its page. The builder and the smoke test share it. |
 | `scripts/build-app-bundle.mjs` | The offline bundle author: signs an app directory into a `.skb` under `chat-author.key`, tracking a monotonic freshness mark per app label in `<app>-author.version`. |
 | `scripts/build-boot-bundles.mjs` | Signs the offers and calls apps' guest-only bundles under the same key, each with its own freshness mark in `<name>-author.version`. |
 | `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/`, plus the browser libsodium and the QuickJS realm engine. Refuses a stale seedkernel build. |
-| `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat app and the shell's two ops, replaces it in place with a later build, round-trips an offer through the offers app and a call signal through the calls app, and carries a frame and a block of audio through jam's guest. |
+| `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat app and the shell's two ops, replaces it in place with a later build, round-trips an offer through the offers app and a call signal through the calls app, carries a frame and a block of audio through jam's guest, and a cast and a tell through the room pipe with no guest behind it. |
 | `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, an offer, messages, an app replaced in place by a bundle dropped over it, a direct message, a call that reaches its peer only once accepted, with a microphone muted and a camera turned off and on again, and one turned down, removing an app, and a reload. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. The FLAC file it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
 | `scripts/clean.mjs` | Deletes `build/` and `browser/vendor/` when a rebuild isn't taking. |
 
@@ -281,7 +283,31 @@ The channel handshake is in
 
 Anything the shell installs has the same parts, and `browser/app-api.js` is the whole of
 what it and the shell agree on. Chat (`assembly/chat-app/`) is the reference for an app
-with a module. Jam (`assembly/jam-app/`) is one with none, whose state lives in its view.
+with a guest of its own and a module. Jam (`assembly/jam-app/`) is one with no module,
+whose state lives in its view and whose guest is little more than the room pipe.
+
+The least an app can be is an `app.json` and a page. Its guest is three library files, and
+its view talks to the room through one object:
+
+```json
+{ "app": "hello", "api": 2, "protocols": ["hello"], "requires": ["_net"],
+  "guest": ["../guest-lib/net.js", "../guest-lib/context.js", "../guest-lib/room-pipe.js"],
+  "ui": "ui.html" }
+```
+
+```js
+// ui.js, which ui.html names behind ../view-lib/app.js
+const enc = new TextEncoder(), dec = new TextDecoder();
+let room = null;
+app.onContext((ctx) => { room = ctx.rooms[0]?.id ?? null; });   // who and where, from the shell
+app.onFrame((from, room, body) => log.append(`${from.slice(0, 8)}: ${dec.decode(body)}\n`));
+form.onsubmit = (e) => { e.preventDefault(); if (room) app.cast(room, enc.encode(msg.value)); };
+app.ready();
+```
+
+A cast goes to the linked members of a room, a frame is heard only from a member of the
+room it names, and what a room holds is the view's to keep. The rest of this section is
+what those two files stand on, for an app that needs more.
 
 ### 1. `app.json`: what the bundle is
 
@@ -290,7 +316,7 @@ One file beside the app's sources. Every path in it is relative to it.
 ```json
 {
   "app": "chat",
-  "api": 1,
+  "api": 2,
   "name": "Chat",
   "version": "v2",
   "description": "text + images, rooms and direct chats",
@@ -307,10 +333,10 @@ One file beside the app's sources. Every path in it is relative to it.
 | `app` | The label the app installs under, `[A-Za-z0-9_-]{1,64}`. A node holds one app per label, and the label is also its storage and signing scope. A bundle under a label already installed upgrades or replaces that app (see [Protocol interop](#protocol-interop)). |
 | `api` | The version of the shell contract the app was built for. The shell refuses any other by name, so a bundle from before a contract change is never installed and left silent. |
 | `name`, `version`, `description` | What the app's row in the shell says. |
-| `protocols` | The protocol ids the app claims. A peer's frame under one of them reaches its guest. |
+| `protocols` | The protocol ids the app claims. A peer's frame under one of them reaches its guest. The builder tells the guest them too, as `APP.protocols`, since a guest is handed its config and not its manifest's claims. |
 | `requires` | Everything its guest reaches: `_net` (the network), `fs` (a keyspace of its own), `timer` (one wake). The shell grants nothing else, and the consent row shows the list. |
-| `guest` | The guest's source files, joined in order behind seedkernel's op-frame. A library two apps share is one more path. |
-| `ui` | The view, an HTML page, with any stylesheets and scripts it names beside it. Left out for an app with nothing to show. |
+| `guest` | The guest's source files, joined in order behind seedkernel's op-frame. A library two apps share is one more path, and the three in `assembly/guest-lib/` are a guest by themselves. |
+| `ui` | The view, an HTML page, with any stylesheets and scripts it names. Left out for an app with nothing to show. |
 | `modules` | Pure WASM modules, by the name the guest calls each. May be empty. |
 
 `scripts/build-app-bundle.mjs <app-dir> <skb-out>` signs it. The name, version,
@@ -321,31 +347,59 @@ vouched for by the same key as the code.
 
 Confined JS with one entrypoint, `handle(bytes)`, and one way out, `host.call(name,
 bytes)` (seedkernel §12.2). The shell hands it three things and reads none of the
-answers. Each answer is **render bytes** for the view, or nothing.
+answers. Each answer goes to the view, or is nothing.
 
-| Caller | `handle` receives | Sent |
-| --- | --- | --- |
-| A peer | `[sender 32][frame …]` under a protocol the app claims. The sender's key is prepended by the host after the channel has authenticated the peer; the guest never verifies anything. | When the frame arrives. |
-| The shell, op `ctx` | `[zero 32][3]["ctx"][JSON]`: the node's context, below. | After the install, when the context changes, and when the view says it is ready. |
-| The shell, op `ui` | `[zero 32][2]["ui"][bytes …]`: whatever the app's own view posted with `call`. | When the view calls. |
+| Caller | `handle` receives | Sent | Its answer |
+| --- | --- | --- | --- |
+| A peer | `[sender 32][frame …]` under a protocol the app claims. The sender's key is prepended by the host after the channel has authenticated the peer; the guest never verifies anything. | When the frame arrives. | **Render bytes**, for the view. |
+| The shell, op `ctx` | `[zero 32][3]["ctx"][JSON]`: the node's context, below. | After the install, when the context changes, and when the view says it is ready. | Render bytes too. |
+| The shell, op `ui` | `[zero 32][2]["ui"][bytes …]`: whatever the app's own view posted with `call`. | When the view calls. | The **answer** to that call. |
 
 The 32-byte caller id tells a peer from the shell, and `callerOf`/`readOp` from
-seedkernel's op-frame split both. To send, a guest calls `_net` (`netSend` in
+seedkernel's op-frame split both. `assembly/guest-lib/context.js` does that once, as the
+`handle` of any guest that names it, so a guest is written as what it does with each
+caller:
+
+```js
+guest.peer = (caller, frame) => …;   // a peer's frame: render bytes, or EMPTY
+guest.view = async (bytes) => …;     // the view's call: its answer, or EMPTY
+```
+
+The context it keeps itself: the rooms a guest decides with (`inRoom`), and all of it
+passed on to the view as render type 0. To send, a guest calls `_net` (`netSend` in
 `assembly/guest-lib/net.js`); to draw, it calls its own module by name, or builds the
-bytes itself. A guest whose frames are written to rooms reads them out of the context with
-`setContext` and `inRoom` (`assembly/guest-lib/context.js`).
+bytes itself.
+
+`assembly/guest-lib/room-pipe.js` sets both, and is a guest whole. A frame on the wire is
+`[room 32][body]` under the app's first protocol, and the pipe reads the room and never
+the body:
+
+| What the view asks (`ui`) | |
+| --- | --- |
+| `[1][frame]` cast | The frame goes to every linked member of its room. |
+| `[2][to 32][frame]` tell | The frame goes to one member of its room. |
+
+| What it renders | |
+| --- | --- |
+| `[0][context JSON]` | The node's context (`context.js`). |
+| `[1][from 32][frame]` | A peer's frame, passed on only if the relay lists its sender in the room it names. |
+
+An app that needs more than the pipe lists a guest file of its own behind it and sets
+`guest.peer` or `guest.view` again, handing the rest to `pipePeer` and `pipeView`. Jam's
+does: it hashes a block of audio on its way in, and answers one more ask.
 
 An answer to a peer's frame is **render bytes and nothing else**. The shell hands every
 one to the view (seedkernel's `onInbound`), so a guest that answered a peer's request with
 the reply itself would be drawing that reply on its own page. An app that asks a peer for
 something therefore has the peer send it back as a frame of its own, which is how jam moves
-audio.
+audio. Asking its own guest is another matter: what a guest answers the `ui` op goes back
+to the call the view made, which is how jam's view learns what a block is called.
 
 The **context** is ASCII JSON, with every key and room id in lowercase hex:
 
 ```json
 {
-  "api": 1,
+  "api": 2,
   "me": "<this node's key>",
   "nick": "<what this node calls itself, or empty>",
   "rooms": [{ "id": "<room id>", "name": "cats", "members": ["<key>"] }],
@@ -362,10 +416,11 @@ tab, and a nick is set there. A contact's secret is never in it.
 
 An HTML page, signed and loaded as one self-contained document. It can be written as
 several files: a `<link rel="stylesheet" href="ui.css">` or a `<script src="ui.js"></script>`
-naming a file beside the page is replaced by that file's text when the bundle is built
-(`readView` in `scripts/app-source.mjs`), so the page opens in a browser as it stands and
-travels as one. Nothing else can be named: there is no file beside a view once it is
-running. Chat's view is three files, and jam's has a second script beside its own.
+naming a file by its path from the page is replaced by that file's text when the bundle is
+built (`readView` in `scripts/app-source.mjs`), so the page opens in a browser as it stands
+and travels as one. Nothing else can be named: there is no file beside a view once it is
+running. Chat's view is three files and the view library, and jam's has a second script
+beside its own.
 
 The shell loads it into an iframe sandboxed `allow-scripts allow-forms
 allow-downloads` from a `blob:` URL, so it has no access to the page's keys. A view may
@@ -380,13 +435,32 @@ shell only via `postMessage`:
 | Direction | Message | Meaning |
 | --- | --- | --- |
 | view → shell | `{ type: "ready" }` | Sent once on load. The shell tells the guest the context, hands the view that answer, then flushes any renders queued while it loaded. |
-| view → shell | `{ type: "call", bytes: Uint8Array }` | Bytes for the app's own guest (its `ui` op). The shell does not read them. The guest's answer comes back as a `render`. |
-| shell → view | `{ type: "render", payload: Uint8Array }` | Render bytes the app's guest answered: to a peer's frame, to the context, or to the view's own `call`. The format is the app's. |
+| view → shell | `{ type: "call", id: integer, bytes: Uint8Array }` | Bytes for the app's own guest (its `ui` op). The shell does not read them. `id` is the view's to choose, and comes back on the answer. |
+| shell → view | `{ type: "answer", id, payload: Uint8Array }` | What the guest answered that call, which may be nothing. Every call is answered: one whose guest failed gets `{ type: "answer", id, error: string }` instead. |
+| shell → view | `{ type: "render", payload: Uint8Array }` | Render bytes the app's guest answered: to a peer's frame, or to the context. The format is the app's. |
 | view → shell | `{ type: "conv", room?: hex, to?: hex }` | The conversation now open, a room or one peer, or neither for none. A call started from the shell is with it; an app that never says calls every linked peer. |
 | view → shell | `{ type: "contact", peer: hex }` | Make a peer a contact, so the link to it outlives any shared room. |
 
 So a view learns of rooms, peers and nicks from its own guest, as a render, and the two
 never hold different pictures.
+
+A view need not write any of that. `assembly/view-lib/app.js`, named in a script tag ahead
+of the view's own (`<script src="../view-lib/app.js"></script>`), is the same door as one
+object, with `toHex`, `fromHex` and `concat` beside it:
+
+| | |
+| --- | --- |
+| `app.ready()` | The view is listening. |
+| `app.call(...parts)` | The parts, end to end, for the guest. A promise of its answer, rejected if the guest failed. |
+| `app.onRender(fn)` | `fn(bytes)` for each render. |
+| `app.onContext(fn)` | `fn(ctx)` for the context, which is taken out of what `onRender` hears. |
+| `app.conv({ room })`, `app.conv({ to })`, `app.conv()` | The conversation now open. |
+| `app.contact(peer)` | Make a peer a contact. |
+| `app.cast(room, ...parts)` | With the room pipe: a frame to every linked member of a room. |
+| `app.tell(room, to, ...parts)` | With the room pipe: a frame to one member of it. |
+| `app.onFrame(fn)` | With the room pipe: `fn(from, room, body)` for a peer's frame, taken out of what `onRender` hears. |
+
+Rooms and peers are named by id in hex, as the context names them.
 
 ### 4. Modules: pure compute, optional
 
@@ -431,9 +505,10 @@ the view, it sends to the linked members of the frame's room, or to the one peer
 frame names. A peer's it draws only if it is for this node: a room frame from someone the
 relay lists in that room, or a direct one addressed to this node. A frame of a type it
 does not speak is not drawn. And either way it has the module draw the frame, and answers
-the render.
+what was drawn: a peer's frame as a render, and the view's own as the answer to the call
+that sent it, which is the local echo.
 
-**A render** is what the view draws:
+**What the view draws** is one of:
 
 ```
 [0][context JSON]                       the node's context, passed on for the view
@@ -450,7 +525,7 @@ together. It follows [seedstore](https://github.com/arj03/seedstore)'s split int
 planes: small frames that say what the room agrees on, and blocks of audio that are named
 by their hash and so need no trust in whoever sent them.
 
-**A frame** is `[type u8][room 32][body]`, under the protocol id `jam`.
+**A frame** is the room pipe's, `[room 32][type u8][body]`, under the protocol id `jam`.
 
 | `type` | Body | For |
 | --- | --- | --- |
@@ -459,12 +534,14 @@ by their hash and so need no trust in whoever sent them.
 | `3` NACK | block ids | I do not have these |
 | `4` BLOCK | the bytes of one block | A block that was asked for |
 
-**The guest** (`jam-app/guest.js`) reads the room of every frame and the body of none. A
-frame its view *casts* goes to the linked members of the frame's room, and one it *tells*
-goes to a single member. A peer's frame is passed to the view only if the relay lists its
-sender in that room. A BLOCK is hashed on the way in, so its render carries the id this
+**The guest** is the room pipe (`guest-lib/room-pipe.js`), which reads the room of every
+frame: one its view *casts* goes to the linked members of the frame's room, one it *tells*
+goes to a single member, and a peer's frame is passed to the view only if the relay lists
+its sender in that room. `jam-app/guest.js` adds what a block is called. A BLOCK is hashed
+on the way in, so its render (`[2][from 32][room 32][id 32][bytes]`) carries the id this
 node's own guest gave those bytes, never the one the sender claimed. The view also asks it
-to name the blocks of a file being added, so the two never name a block two ways.
+to name the blocks of a file being added (`[3][bytes]`, answered with the id), so the two
+never name a block two ways.
 
 **The room's state** is the view's (`jam-app/ui.js`), and is one document:
 

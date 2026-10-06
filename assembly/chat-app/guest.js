@@ -3,9 +3,8 @@
 // this node, send its own to the peers it is for, and have the app's module draw it.
 //
 // app.json names two libraries in front of it: guest-lib/net.js, the way onto the network,
-// and guest-lib/context.js, the node's context and the rooms a guest reads out of it.
-
-const EMPTY = new Uint8Array(0);
+// and guest-lib/context.js, the node's context, the rooms a guest reads out of it, and the
+// entrypoint that tells its two callers apart (`guest.peer`, `guest.view`).
 
 /** The wire protocol every chat app speaks (§12.10), the one id in app.json `protocols`.
  *  It names the conversation, not the code: two peers running different versions, or
@@ -63,26 +62,16 @@ function render(sender, frame) {
   return host.call(MODULE, input);
 }
 
-/** It has two callers.
- *
- *  A PEER's frame is drawn when it is for this node, which a frame of a type chat does not
- *  speak never is. The render bytes ARE the answer: the page that installed the app reads
- *  them off its own load's onInbound (seedkernel §12.10) and hands them to the view.
- *
- *  The SHELL's two ops are the node's context, and a frame from this app's own view. That
- *  frame is sent to the peers it is for, fire-and-forget, and then drawn here as this
- *  node's own: the local echo, by the same module a peer's frame goes to. A peer that
- *  cannot be reached is not reached, and the rest still are.
- *
- *  Every `host.call` is awaited: the seedkernel seam is uniformly asynchronous, and the
- *  await is what makes the returned render bytes real bytes rather than a pending
- *  Promise. */
-async function handle(arg) {
-  const { fromHost, caller, body } = callerOf(arg);
-  if (!fromHost) return isForMe(toHex(caller), body) ? await render(caller, body) : EMPTY;
-  const { op, args: frame } = readOp(body);
-  if (op === OP_CONTEXT) return setContext(frame);
-  if (op !== OP_UI || frame.length < 33 || !(isRoom(frame[0]) || isDirect(frame[0]))) return EMPTY;
+/** A PEER's frame is drawn when it is for this node, which a frame of a type chat does not
+ *  speak never is. The render bytes ARE the answer. */
+guest.peer = (caller, frame) => (isForMe(toHex(caller), frame) ? render(caller, frame) : EMPTY);
+
+/** A frame from this app's own VIEW is sent to the peers it is for, fire-and-forget, and
+ *  then drawn here as this node's own: the local echo, by the same module a peer's frame
+ *  goes to, and the answer to the view's call. A peer that cannot be reached is not
+ *  reached, and the rest still are. */
+guest.view = async (frame) => {
+  if (frame.length < 33 || !(isRoom(frame[0]) || isDirect(frame[0]))) return EMPTY;
   await Promise.all((await audienceOf(frame)).map((p) => netSend(fromHex(p), CHAT, frame).catch(() => {})));
-  return await render(ME, frame);
-}
+  return render(ME, frame);
+};

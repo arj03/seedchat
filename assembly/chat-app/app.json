@@ -1,6 +1,6 @@
 {
   "app": "chat",
-  "api": 1,
+  "api": 2,
   "name": "Chat",
   "version": "v2",
   "description": "text + images, rooms and direct chats",

@@ -359,16 +359,17 @@ const jamPick = (tab, name, bytes) => jam(tab, `(() => {
 const jamAddFlac = (tab, name, seconds, rate = 44100) => jamPick(tab, name, `(${makeFlac})(${seconds}, ${rate})`);
 /** Hold a tab's jam to sending audio at `rate` bytes a second, as a thin uplink would, or
  *  with 0 let it go again. This is the one place the test reaches inside a view, because
- *  nothing outside one can make a peer slow: it puts in place of the view's `tell` one that
- *  sends each block only when those before it have had their time on the wire. */
+ *  nothing outside one can make a peer slow: it puts in place of the view's `app.tell`
+ *  (assembly/view-lib/app.js) one that sends each block only when those before it have had
+ *  their time on the wire. Jam tells a block as its type and then its bytes. */
 const jamUplink = (tab, rate) => jam(tab, `(() => {
   const script = document.createElement("script");
   script.textContent = ${JSON.stringify(`(() => {
-    if (typeof tell !== "function" || typeof BLOCK !== "number") throw new Error("jam's view has no tell to hold back");
-    const send = window.tellAtFullSpeed ??= tell;
+    if (typeof app?.tell !== "function" || typeof BLOCK !== "number") throw new Error("jam's view has no tell to hold back");
+    const send = window.tellAtFullSpeed ??= app.tell;
     let line = Promise.resolve();
-    tell = ${rate} === 0 ? send : (room, to, type, body) => {
-      if (type !== BLOCK) return send(room, to, type, body);
+    app.tell = ${rate} === 0 ? send : (room, to, type, body) => {
+      if (type[0] !== BLOCK) return send(room, to, type, body);
       line = line.then(() => new Promise((sent) => setTimeout(sent, (body.length / ${rate}) * 1000))).then(() => send(room, to, type, body));
     };
     document.documentElement.dataset.uplink = "${rate}";

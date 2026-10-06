@@ -1,23 +1,20 @@
 // Jam's UI. Loaded into a sandboxed iframe by the shell.
 //
-// With the shell (browser/app-api.js), by postMessage:
-//   us → shell: { type: "ready" }
-//   us → shell: { type: "call", bytes }        an ask of this app's guest
-//   us → shell: { type: "conv", room: hex }    the room open, which a call is then with
-//   shell → us: { type: "render", payload }    what this app's guest answered
+// With the shell (browser/app-api.js) and with this app's guest, through view-lib/app.js,
+// which the page names ahead of this file. The guest is guest-lib/room-pipe.js, and what
+// guest.js adds to it:
+//   app.ready()                    this view is listening
+//   app.conv({ room })             the room open, which a call is then with
+//   app.cast(room, ...)            a frame to every linked member of a room
+//   app.tell(room, to, ...)        a frame to one member of it
+//   app.call([3], bytes)           hash: what a block of these bytes is called, answered
+//   app.onContext                  the node's context
+//   app.onFrame                    a peer's frame, from someone in its room
+//   app.onRender                   [2][from 32][room 32][id 32][bytes]: a peer's block,
+//                                  under the id our guest gave it
 //
-// With this app's guest (guest.js), as bytes the shell does not read. An ask is [ask u8][..]:
-//   [1][frame]           cast: to every linked member of the frame's room
-//   [2][to 32][frame]    tell: to one member of it
-//   [3][tag 4][bytes]    hash: what a block of these bytes is called
-// and a render is one of:
-//   [0][JSON]                             the node's context
-//   [1][from 32][frame]                   a peer's frame, from someone in its room
-//   [2][from 32][room 32][id 32][bytes]   a peer's block, under the id our guest gave it
-//   [3][tag 4][id 32]                     the answer to a hash
-//
-// A FRAME is [type u8][room 32][body], and there are four. One carries what the room
-// agrees on; three move audio:
+// A FRAME names its room, which is the pipe's to read, and then is [type u8][body]. There
+// are four. One carries what the room agrees on; three move audio:
 //   1 DOC    JSON, a part of the room's state (below), or all of it
 //   2 WANT   block ids, 32 bytes each: send me these
 //   3 NACK   block ids: I do not have these
@@ -58,8 +55,8 @@
 // not wait for the whole track, only for enough of it ahead of the room that it will not
 // run dry: the room's clock does not stop for a node whose blocks are slow, so a node
 // starts once what it holds, and what is still arriving, will carry it through.
-const RENDER_CONTEXT = 0, RENDER_FRAME = 1, RENDER_BLOCK = 2, RENDER_HASH = 3;
-const ASK_CAST = 1, ASK_TELL = 2, ASK_HASH = 3;
+const RENDER_BLOCK = 2;
+const ASK_HASH = 3;
 const DOC = 1, WANT = 2, NACK = 3, BLOCK = 4;
 
 /** The largest file taken. */
@@ -121,14 +118,6 @@ const picker = $("picker"), toasts = $("toasts");
 // ── bytes ───────────────────────────────────────────────────────────────
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const toHex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
-const fromHex = (h) => Uint8Array.from(h.match(/../g) ?? [], (x) => parseInt(x, 16));
-function concat(...parts) {
-  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-  let o = 0;
-  for (const p of parts) { out.set(p, o); o += p.length; }
-  return out;
-}
 /** Block ids as they ride in a WANT or a NACK, back to hex. */
 function idsOf(body) {
   const out = [];
@@ -145,34 +134,13 @@ const listOf = (v, max) => (Array.isArray(v) ? v.slice(0, max) : []);
 /** Whether the change (v, by) is later than (v0, by0): the clock, then the key. */
 const later = (v, by, v0, by0) => v > v0 || (v === v0 && by > by0);
 
-// ── the shell, and our guest ────────────────────────────────────────────
-function ask(bytes) {
-  window.parent.postMessage({ type: "call", bytes }, "*", [bytes.buffer]);
-}
-function cast(room, type, body) {
-  ask(concat([ASK_CAST, type], room.idBytes, body));
-}
-function tell(room, to, type, body) {
-  ask(concat([ASK_TELL], fromHex(to), [type], room.idBytes, body));
-}
-const castDoc = (room, doc) => cast(room, DOC, enc.encode(JSON.stringify(doc)));
-const tellDoc = (room, to, doc) => tell(room, to, DOC, enc.encode(JSON.stringify(doc)));
+// ── our guest ───────────────────────────────────────────────────────────
+const castDoc = (room, doc) => app.cast(room.id, [DOC], enc.encode(JSON.stringify(doc)));
+const tellDoc = (room, to, doc) => app.tell(room.id, to, [DOC], enc.encode(JSON.stringify(doc)));
 
 /** What a block of `bytes` is called. Our guest's to say, so a view and a guest never name
  *  one block two ways. */
-const hashing = new Map(); // tag → { resolve, timer }
-let nextTag = 1;
-function hashOf(bytes) {
-  return new Promise((resolve, reject) => {
-    const tag = nextTag++;
-    const head = new Uint8Array(5);
-    head[0] = ASK_HASH;
-    new DataView(head.buffer).setUint32(1, tag);
-    const timer = setTimeout(() => { hashing.delete(tag); reject(new Error("the app did not answer")); }, 20000);
-    hashing.set(tag, { resolve, timer });
-    ask(concat(head, bytes));
-  });
-}
+const hashOf = (bytes) => app.call([ASK_HASH], bytes).then(toHex);
 
 // ── who, and where ──────────────────────────────────────────────────────
 // All of it the shell's, heard in the context: this node's key and nick, each peer's nick,
@@ -212,7 +180,7 @@ function newRoom(id) {
   log.hidden = true;
   logs.appendChild(log);
   return {
-    id, idBytes: fromHex(id), name: "", members: new Set(),
+    id, name: "", members: new Set(),
     clock: 0,
     msgs: new Map(),    // key → { key, by, id, n, at, text }
     reacts: new Map(),  // target → emoji → peer → { on, n }
@@ -772,7 +740,7 @@ function pump() {
     asks.set(peer, [...(asks.get(peer) ?? []), id]);
     free--;
   }
-  for (const [peer, ids] of asks) tell(room, peer, WANT, fromHex(ids.join("")));
+  for (const [peer, ids] of asks) app.tell(room.id, peer, [WANT], fromHex(ids.join("")));
 }
 
 /** A block a peer sent, named by our own guest. Kept if it is one this node asked for. */
@@ -827,10 +795,10 @@ async function serve(room, from, ids) {
     const blob = room.blocks.has(id) ? store.get(id) : undefined;
     try {
       if (!blob) throw new Error("not held");
-      tell(room, from, BLOCK, new Uint8Array(await blob.arrayBuffer()));
+      app.tell(room.id, from, [BLOCK], new Uint8Array(await blob.arrayBuffer()));
     } catch { lacking.push(id); }   // not held, or its file can no longer be read
   }
-  if (lacking.length > 0) tell(room, from, NACK, fromHex(lacking.join("")));
+  if (lacking.length > 0) app.tell(room.id, from, [NACK], fromHex(lacking.join("")));
 }
 
 // ── audio back out: a file ──────────────────────────────────────────────
@@ -1350,7 +1318,7 @@ function openRoom(room) {
     room.log.hidden = false;
     logs.scrollTop = logs.scrollHeight;
   }
-  window.parent.postMessage(room ? { type: "conv", room: room.id } : { type: "conv" }, "*");
+  app.conv(room ? { room: room.id } : undefined);
   drawHeader();
   drawSoon();
   syncAudio();
@@ -1419,11 +1387,11 @@ function onContext(ctx) {
   else { drawHeader(); drawSoon(); pump(); }
 }
 
-function onFrame(from, frame) {
-  if (frame.length < 33) return;
-  const room = rooms.get(toHex(frame.subarray(1, 33)));
-  if (!room) return;
-  const body = frame.subarray(33);
+/** A peer's frame, from a member of the room it names: [type u8][body]. */
+function onFrame(from, id, frame) {
+  const room = rooms.get(id);
+  if (!room || frame.length < 1) return;
+  const body = frame.subarray(1);
   if (frame[0] === DOC) {
     let doc;
     try { doc = JSON.parse(dec.decode(body)); } catch { return; }
@@ -1432,22 +1400,10 @@ function onFrame(from, frame) {
   else if (frame[0] === NACK) onNack(room, from, idsOf(body));
 }
 
-window.addEventListener("message", (ev) => {
-  if (ev.source !== window.parent) return;
-  const msg = ev.data;
-  if (!msg || msg.type !== "render") return;
-  const p = msg.payload instanceof Uint8Array ? msg.payload : new Uint8Array(msg.payload);
-  if (p[0] === RENDER_CONTEXT) onContext(JSON.parse(dec.decode(p.subarray(1))));
-  else if (p[0] === RENDER_FRAME && p.length >= 33) onFrame(toHex(p.subarray(1, 33)), p.subarray(33));
-  else if (p[0] === RENDER_BLOCK && p.length >= 97) onBlock(toHex(p.subarray(1, 33)), toHex(p.subarray(65, 97)), p.subarray(97));
-  else if (p[0] === RENDER_HASH && p.length === 37) {
-    const tag = new DataView(p.buffer, p.byteOffset + 1, 4).getUint32(0);
-    const waiting = hashing.get(tag);
-    if (!waiting) return;
-    hashing.delete(tag);
-    clearTimeout(waiting.timer);
-    waiting.resolve(toHex(p.subarray(5)));
-  }
+app.onContext(onContext);
+app.onFrame(onFrame);
+app.onRender((p) => {
+  if (p[0] === RENDER_BLOCK && p.length >= 97) onBlock(toHex(p.subarray(1, 33)), toHex(p.subarray(65, 97)), p.subarray(97));
 });
 
 // ── what the user does ──────────────────────────────────────────────────
@@ -1549,4 +1505,4 @@ setInterval(() => {
 drawHeader();
 drawList();
 drawPlayer();
-window.parent.postMessage({ type: "ready" }, "*");
+app.ready();
