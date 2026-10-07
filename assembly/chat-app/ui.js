@@ -32,10 +32,15 @@ const CHAT_TYPE_DIRECT_IMAGE = 0x04;
 const CHAT_TYPE_ROOM_TEXT    = 0x05;
 const CHAT_TYPE_ROOM_IMAGE   = 0x06;
 
-// Resize images to this width before sending so the JPEG-encoded bytes stay
-// under the 64 KB envelope cap.
-const IMAGE_MAX_WIDTH    = 600;
-const IMAGE_TARGET_BYTES = 50 * 1024;
+// A picture is sent as a JPEG that fits this many pixels on its longer side and this many
+// bytes. What bounds the bytes is the chat module, which stages a frame and its render in
+// 256 KB (index.ts `SCRATCH_SIZE`); the transport's own frame cap is far above that.
+const IMAGE_MAX_SIDE     = 1280;
+const IMAGE_MIN_SIDE     = 320;
+const IMAGE_TARGET_BYTES = 200 * 1024;
+// Tried best first at each size. Below the last of them a smaller picture looks better
+// than a rougher one, so the size steps down instead.
+const IMAGE_QUALITIES    = [0.9, 0.8, 0.7, 0.6];
 
 const logHost = document.getElementById("log");
 const form = document.getElementById("form");
@@ -376,6 +381,25 @@ app.onRender(onFrame);
 leaveBtn.addEventListener("click", () => { if (active) closeConv(active); });
 menuBtn.addEventListener("click", () => side.classList.toggle("open"));
 
+/** A picture as JPEG bytes within the target: at the largest size one of the qualities fits
+ *  at, and the best quality that fits there. Null when the browser encodes none. */
+async function encodeImage(bitmap) {
+  const longer = Math.max(bitmap.width, bitmap.height);
+  for (let side = Math.min(longer, IMAGE_MAX_SIDE); ; side = Math.round(side * 0.75)) {
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * side / longer));
+    canvas.height = Math.max(1, Math.round(bitmap.height * side / longer));
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    for (const q of IMAGE_QUALITIES) {
+      const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", q));
+      if (blob && blob.size <= IMAGE_TARGET_BYTES) return new Uint8Array(await blob.arrayBuffer());
+    }
+    if (side <= IMAGE_MIN_SIDE) return null;
+  }
+}
+
 imageBtn.addEventListener("click", () => imageFile.click());
 imageFile.addEventListener("change", async () => {
   const file = imageFile.files && imageFile.files[0];
@@ -384,25 +408,8 @@ imageFile.addEventListener("change", async () => {
   const target = active;
   if (!target) return;
   try {
-    const bitmap = await createImageBitmap(file);
-    const targetW = bitmap.width <= IMAGE_MAX_WIDTH ? bitmap.width : IMAGE_MAX_WIDTH;
-    const targetH = Math.round(bitmap.height * (targetW / bitmap.width));
-    const canvas = document.createElement("canvas");
-    canvas.width = targetW;
-    canvas.height = targetH;
-    canvas.getContext("2d").drawImage(bitmap, 0, 0, targetW, targetH);
-    let bytes = null;
-    for (const q of [0.7, 0.5, 0.35, 0.25]) {
-      const blob = await new Promise(res => canvas.toBlob(res, "image/jpeg", q));
-      if (!blob) continue;
-      const buf = new Uint8Array(await blob.arrayBuffer());
-      if (buf.length <= IMAGE_TARGET_BYTES) { bytes = buf; break; }
-      bytes = buf;
-    }
+    const bytes = await encodeImage(await createImageBitmap(file));
     if (!bytes) { print("Image encode failed.", "err", target); return; }
-    if (bytes.length > IMAGE_TARGET_BYTES) {
-      print(`Image is ${bytes.length} bytes — sending anyway, may exceed 64 KB envelope.`, "err", target);
-    }
     // Into the conversation the picture was picked in, even if the user has moved on.
     if (convs.has(target.key)) sendInto(target, true, bytes);
   } catch (err) {
