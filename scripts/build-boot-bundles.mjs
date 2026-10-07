@@ -1,5 +1,5 @@
-// Build the shell's own boot bundles: the offers app (browser/offers-app.js) and the calls
-// app (browser/calls-app.js). Unlike an app's `.skb` (scripts/build-app-bundle.mjs), these
+// Build the shell's own boot bundles: the offers app (browser/offers-app.js) and the shell
+// app (browser/shell-app.js). Unlike an app's `.skb` (scripts/build-app-bundle.mjs), these
 // are not something a user drops in — they are loaded at BOOT, alongside the transport
 // bundle, so their bytes have to reach the served page rather than sit in the gitignored
 // bundle/ directory. This script therefore also generates browser/<name>-bundle.js for
@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { loadCrypto } from "seedkernel-wasm";
 import { authorBundle, guestOpFraming, hybridAuthorKeysFromSeed } from "seedkernel-wasm/bundle-author";
 import { OFFER_PROTO, OFFERS_APP, OFFERS_REQUIRES, offersGuestSource } from "../browser/offers-app.js";
-import { CALL_PROTO, CALLS_APP, CALLS_REQUIRES, callsGuestSource } from "../browser/calls-app.js";
+import { SHELL_PROTO, CALL_PROTO, SHELL_APP, SHELL_REQUIRES, shellGuestSource } from "../browser/shell-app.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
@@ -36,13 +36,13 @@ const fromHex = (h) => Uint8Array.from(Buffer.from(h, "hex"));
 const prelude = guestOpFraming()
   + readFileSync(join(root, "assembly", "guest-lib", "net.js"), "utf8").replace(/\r\n/g, "\n");
 
-/** Each boot bundle: a guest-only bundle, a claim and a reach. `name` names the files;
+/** Each boot bundle: a guest-only bundle, its claims and a reach. `name` names the files;
  *  `constant` the generated module's exports. */
 const BUNDLES = [
   { name: "offers", constant: "OFFERS", app: OFFERS_APP, protocols: [OFFER_PROTO],
     guestSource: offersGuestSource(prelude), guestRequires: OFFERS_REQUIRES },
-  { name: "calls", constant: "CALLS", app: CALLS_APP, protocols: [CALL_PROTO],
-    guestSource: callsGuestSource(prelude), guestRequires: CALLS_REQUIRES },
+  { name: "shell", constant: "SHELL", app: SHELL_APP, protocols: [SHELL_PROTO, CALL_PROTO],
+    guestSource: shellGuestSource(prelude), guestRequires: SHELL_REQUIRES },
 ];
 
 const sodium = await loadCrypto();

@@ -50,9 +50,10 @@ const { OFFER_PROTO, OFFERS_KEY_PREFIX, OFFERS_OP_SEND } = await import("../brow
 // The identity the page pins its offers boot bundle by, off the generated artifact the
 // page itself reads — so `admit` below is the browser's gate, not a stand-in for it.
 const { OFFERS_AUTHOR_HEX, OFFERS_APP } = await import("../browser/offers-bundle.js");
-// The calls app: the signaling path for a call's media, pinned the same way.
-const { CALL_PROTO, CALLS_OP_SEND } = await import("../browser/calls-app.js");
-const { CALLS_AUTHOR_HEX, CALLS_APP } = await import("../browser/calls-bundle.js");
+// The shell app: how one page talks to another, and the signaling path for a call's media,
+// pinned the same way.
+const { SHELL_PROTO, CALL_PROTO, SHELL_OP_TELL, SHELL_OP_SIGNAL } = await import("../browser/shell-app.js");
+const { SHELL_AUTHOR_HEX, SHELL_APP } = await import("../browser/shell-bundle.js");
 // `writeOp` frames an app's own local op; `OpArgs` writes the transport bundle's op
 // arguments, which is what the host's own door into the network takes (`peersOf` below).
 const { writeOp, OpArgs } = await import("seedkernel-wasm/op-frame");
@@ -83,7 +84,7 @@ function admit(v) {
   // exactly as shell.js pins it: bytes the deployment shipped, loaded before any
   // dialog could run, so there is nothing for a consent click to decide.
   if (toHex(v.author) === OFFERS_AUTHOR_HEX && v.manifest.app === OFFERS_APP) return true;
-  if (toHex(v.author) === CALLS_AUTHOR_HEX && v.manifest.app === CALLS_APP) return true;
+  if (toHex(v.author) === SHELL_AUTHOR_HEX && v.manifest.app === SHELL_APP) return true;
   const hash = digestOf(v);
   if (!pendingApprovals.has(hash)) return false;
   pendingApprovals.delete(hash);
@@ -527,29 +528,40 @@ try {
   ok(`offer end-to-end: A's offers app → offer/v1 → B's offers app's guest → fs record ${OFFERS_KEY_PREFIX}${hex.slice(0, 12)}…`);
 } catch (err) { fail("offer end-to-end", err); }
 
-// 7. the calls app: a third boot bundle (browser/calls-app.js). A call's media rides a
-//    peer connection the page owns; its signaling rides the node's channel under
-//    call/v1. A's calls app sends a signal, and B's page sees it as its load's
-//    onInbound answer, attributed to A by the channel.
+// 7. the shell app: a third boot bundle (browser/shell-app.js), and how one page talks to
+//    another. It holds two claims: shell/v1, for what a page tells another about itself,
+//    and call/v1, for a call's signaling, whose media rides a peer connection the page
+//    owns. A's shell app sends one of each, and B's page sees each as its load's onInbound
+//    answer, attributed to A by the channel and under the claim it was sent under, which is
+//    all that tells the two apart.
 try {
-  const callsSkbBytes = new Uint8Array(readFileSync(resolve(here, "../bundle/calls.skb")));
-  const aCalls = await A.install(callsSkbBytes);
-  const signals = [];
-  const bCalls = await B.install(callsSkbBytes, {
-    onInbound: (claim, from, answer) => { if (answer.length > 0) signals.push({ claim, from: toHex(from), signal: new Uint8Array(answer) }); },
+  const shellSkbBytes = new Uint8Array(readFileSync(resolve(here, "../bundle/shell.skb")));
+  const aShell = await A.install(shellSkbBytes);
+  const heard = [];
+  const bShell = await B.install(shellSkbBytes, {
+    onInbound: (claim, from, answer) => { if (answer.length > 0) heard.push({ claim, from: toHex(from), bytes: new Uint8Array(answer) }); },
   });
-  assert(B.resolve(CALL_PROTO) === bCalls.manifest.app, `B routes "${CALL_PROTO}" to the calls app`);
-  const signal = new TextEncoder().encode(JSON.stringify({ sdp: { type: "offer", sdp: "v=0" } }));
-  const arg = new Uint8Array(32 + signal.length);
-  arg.set(identityB.publicKey, 0);
-  arg.set(signal, 32);
-  await aCalls.invoke(writeOp(CALLS_OP_SEND, arg));
-  await until(() => signals.length > 0, 4000, "call signal");
-  assert(signals[0].claim === CALL_PROTO, "the signal arrived under call/v1");
-  assert(signals[0].from === peerA, "the signal is attributed to A by the channel");
-  assert(toHex(signals[0].signal) === toHex(signal), "the signal arrives byte for byte");
-  ok("call signaling end-to-end: A's calls app → call/v1 → B's calls app → onInbound");
-} catch (err) { fail("call signaling end-to-end", err); }
+  for (const proto of [SHELL_PROTO, CALL_PROTO]) {
+    assert(B.resolve(proto) === bShell.manifest.app, `B routes "${proto}" to the shell app`);
+  }
+  const notice = utf8(JSON.stringify({ nick: "ada" }));
+  const signal = utf8(JSON.stringify({ sdp: { type: "offer", sdp: "v=0" } }));
+  await aShell.invoke(writeOp(SHELL_OP_TELL, concat(identityB.publicKey, notice)));
+  await aShell.invoke(writeOp(SHELL_OP_SIGNAL, concat(identityB.publicKey, signal)));
+  await until(() => heard.length >= 2, 4000, "a notice and a call signal");
+  for (const [proto, sent, what] of [[SHELL_PROTO, notice, "notice"], [CALL_PROTO, signal, "call signal"]]) {
+    const got = heard.filter((h) => h.claim === proto);
+    assert(got.length === 1, `one frame arrived under ${proto}`);
+    assert(got[0].from === peerA, `the ${what} is attributed to A by the channel`);
+    assert(toHex(got[0].bytes) === toHex(sent), `the ${what} arrives byte for byte`);
+  }
+  // An op the guest does not have sends nothing, under either claim.
+  await aShell.invoke(writeOp("send", concat(identityB.publicKey, notice)));
+  await aShell.invoke(writeOp(SHELL_OP_TELL, concat(identityB.publicKey, utf8("last"))));
+  await until(() => heard.length >= 3, 4000, "the frame behind an unknown op");
+  assert(heard.length === 3 && text(heard[2].bytes) === "last", "an op the shell app does not have sends nothing");
+  ok("page to page end-to-end: A's shell app → shell/v1 and call/v1 → B's shell app → onInbound, each under its own claim");
+} catch (err) { fail("page to page end-to-end", err); }
 
 // 8. the jam app: a second app beside chat, under its own label and its own protocol, with
 //    no module at all. Its guest is the room pipe (assembly/guest-lib/room-pipe.js) and one
@@ -715,9 +727,9 @@ async function handle(arg) {
   assert(arrived[0].claim === OWN_PROTO && arrived[0].from === peerA && arrived[0].body === "under my own",
     "an app's send under the protocol it claims goes through, as this node's");
 
-  // Under another app's protocol, and under the page's own two. Nothing of them leaves A.
+  // Under another app's protocol, and under the page's own three. Nothing of them leaves A.
   renders.length = 0;
-  for (const proto of [CHAT_PROTO, CALL_PROTO, OFFER_PROTO, "nobody/claims-this"]) {
+  for (const proto of [CHAT_PROTO, SHELL_PROTO, CALL_PROTO, OFFER_PROTO, "nobody/claims-this"]) {
     const why = await refusal(sendUnder(gatedA, proto, "as someone else"));
     assert(why.includes(`does not claim ${JSON.stringify(proto)}`), `a send under "${proto}" must be refused by name (got: ${why || "no refusal"})`);
   }

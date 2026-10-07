@@ -3,8 +3,8 @@
 // seedkernel's WebRTC seam holds the TRANSPORT's peer connections and passes their
 // negotiation through as bytes (seedkernel §12.7); media is not the runtime's business, so
 // a call opens its own `RTCPeerConnection` per peer, beside the transport's. Its signaling
-// rides the node's authenticated channel — the calls app's `call/v1` protocol
-// (calls-app.js) — so a call needs no relay once the peers are linked, and nobody on the
+// rides the node's authenticated channel — the shell app's `call/v1` protocol
+// (shell-app.js) — so a call needs no relay once the peers are linked, and nobody on the
 // relay can inject into one.
 //
 // A call is entered, not received. A node in a call says so to that call's peers (`{ call

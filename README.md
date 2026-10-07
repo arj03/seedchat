@@ -22,7 +22,8 @@ Two smaller apps ride alongside as **boot bundles**, pinned to the exact author 
 the page was built with: **offers** (`browser/offers-app.js`), which owns the `offer/v1`
 id a peer's signed bundle travels on — because the app an Offer would install is the thing
 the Offer is offering, so until someone accepts it there is no app to route it to — and
-**calls** (`browser/calls-app.js`), the signaling path for a call's media.
+**shell** (`browser/shell-app.js`), how one page talks to another: what each tells the
+other about itself under `shell/v1`, and a call's signaling under `call/v1`.
 
 This lives outside the seedkernel repo for the same reason
 [seedstore](https://github.com/arj03/seedstore) does: an app is a *consumer* of
@@ -62,13 +63,13 @@ the shell makes into the runtime goes through a published entry point of
 #    browser core libsodium and PQ wasm)
 cd ../seedkernel/WASM && npm install && npm run build:browser
 
-# 2. build the apps (chat and jam, + the offers and calls boot bundles)
+# 2. build the apps (chat and jam, + the offers and shell boot bundles)
 #    and vendor the runtime
 cd ../../seedshell && npm install && npm run build
 
 # 2b. (optional) headless check that the shell still works against this seedkernel:
 #     two shells, the real chat app, a message round-trip, an upgrade in place,
-#     an offer round-trip, a call signal round-trip
+#     an offer round-trip, a page notice and a call signal round-trip
 npm run smoke
 
 # 2c. (optional) the same in a real browser: two tabs of the shell and a relay,
@@ -90,10 +91,10 @@ Open the page in two tabs or two browsers and join the same room in both on the
 
 | Script | What it does |
 | --- | --- |
-| `npm run build` | Compiles chat's AssemblyScript module, signs `bundle/chat.skb` and `bundle/jam.skb` from their app directories, signs the offers and calls boot bundles, then vendors the runtime. |
+| `npm run build` | Compiles chat's AssemblyScript module, signs `bundle/chat.skb` and `bundle/jam.skb` from their app directories, signs the offers and shell boot bundles, then vendors the runtime. |
 | `npm run build:chat-app` | Chat's compile → sign pipeline. |
 | `npm run build:jam-app` | Signs `bundle/jam.skb`. Jam has no module, so there is nothing to compile. |
-| `npm run build:boot-bundles` | Signs the offers and calls apps into `bundle/offers.skb` and `bundle/calls.skb` and generates `browser/offers-bundle.js` and `browser/calls-bundle.js`. |
+| `npm run build:boot-bundles` | Signs the offers and shell apps into `bundle/offers.skb` and `bundle/shell.skb` and generates `browser/offers-bundle.js` and `browser/shell-bundle.js`. |
 | `npm run vendor` | Copies the built seedkernel host, libsodium and QuickJS into `browser/vendor/`. |
 | `npm run smoke` | Headless regression test (needs `npm run build` first). Run it after every seedkernel update. |
 | `npm run e2e` | The shell in a real headless browser, two tabs and a relay (needs `npm run build` first). Run it after a change to the shell or an app's view. |
@@ -252,8 +253,8 @@ each peer's nick.
   network through its view either. The doors a view has to the shell are held to what the
   row already says: it may make a contact only of a peer the node knows, and the call bar
   says who a call would ring, since the camera and microphone go there.
-- Each claim has one owner on a node, and the shell's own, `offer/v1` and `call/v1`, are
-  held by apps it pinned at boot. An app sends only under the protocol ids it claims, so it
+- Each claim has one owner on a node, and the shell's own, `offer/v1`, `shell/v1` and
+  `call/v1`, are held by apps it pinned at boot. An app sends only under the protocol ids it claims, so it
   cannot write another app's messages, or the shell's own, as you (seedkernel §12.10); an app
   that needs a second id claims it.
 
@@ -278,10 +279,10 @@ nick is a peer's own word.
 
 | Path | What it is |
 | --- | --- |
-| `browser/shell.*` | The browser shell: identity and nick, admission policy, the transport, offers and calls boot loads, the sockets the transport's WebRTC mesh runs over, the rooms, peers and contacts, and a sandboxed iframe for each installed app. The inline import map in `shell.html` names the seedkernel surface. |
+| `browser/shell.*` | The browser shell: identity and nick, admission policy, the transport, offers and shell boot loads, the sockets the transport's WebRTC mesh runs over, the rooms, peers and contacts, and a sandboxed iframe for each installed app. The inline import map in `shell.html` names the seedkernel surface. |
 | `browser/app-api.js` | The contract between the shell and any app, in one place: the contract version, what an app may reach, what the shell reads off a signed manifest (`appFacts`), the digest a consent names, and the two ops the shell calls on an app's guest. The shell gates and drives every bundle through it, and the builder refuses to sign what it would refuse. |
 | `browser/offers-app.js` | The offers app *shape*: the `offer/v1` id, the app id `offers`, its authority (`fs` for the offers that arrive, `_net` for the ones this node makes), and its guest source — a claim, a keyspace and a `send` op, no module. `scripts/build-boot-bundles.mjs` signs it into the boot bundle. |
-| `browser/calls-app.js` | The calls app *shape*: the `call/v1` id, the app id `calls`, its one reach (`_net`), and its guest source — a claim that hands a peer's call signal to the page, and a `send` op that puts the page's on the wire. What else two pages tell each other rides it too: `{ peer }`, that one added or removed the other as a peer, and `{ nick }`, what a peer calls itself. |
+| `browser/shell-app.js` | The shell app *shape*, how one page talks to another: the app id `shell`, its one reach (`_net`), its two claims, and its guest source — it hands what a peer sent under either claim to the page, and has an op for each that puts the page's on the wire. `shell/v1` is what a page tells another about itself: `{ peer }`, that it added or removed the other as a peer, and `{ nick }`, what it calls itself. `call/v1` is a call's signaling. The page tells the two apart by the claim a frame arrived under. |
 | `browser/view-guard.js` | What holds a view to its sandbox: `guardView` makes the page a view is loaded as, the author's own with a Content Security Policy in front that lets it make no request, and a prelude, the one script that policy lets the parser run, which takes WebRTC out of the realm and then runs the view's scripts. See [The view](#3-the-view-uihtml). |
 | `browser/media-rtc.js` | The call feature: `MediaCalls`, one `RTCPeerConnection` per peer that the page owns, beside the transport's, with perfect negotiation signaled over `call/v1`. A node in a call tells its peers so (`{ call }`), and a connection is opened only between two that have each said they are in the same one. Live media is the page's own — the host holds only the transport's connections. |
 | `assembly/chat-app/` | Chat — text and images, in several rooms and in direct chats. `app.json` says what the bundle is, `guest.js` is its guest, which holds the chat wire vocabulary and decides who each frame is for, `index.ts` is its module, the one transform that draws a frame, and `ui.html` its view, with the view's CSS and JS in files of their own (`ui.css`, `ui.js`) beside the page. |
@@ -293,9 +294,9 @@ nick is a peer's own word.
 | `asconfig.chat-app.json` | AssemblyScript compiler config for chat's module (`build/chat-app.wasm`). |
 | `scripts/app-source.mjs` | Reads an app directory (`app.json` and what it names) into what gets signed, putting a view's stylesheets and scripts into its page. The builder and the smoke test share it. |
 | `scripts/build-app-bundle.mjs` | The offline bundle author: signs an app directory into a `.skb` under `chat-author.key`, tracking a monotonic freshness mark per app label in `<app>-author.version`. |
-| `scripts/build-boot-bundles.mjs` | Signs the offers and calls apps' guest-only bundles under the same key, each with its own freshness mark in `<name>-author.version`. |
+| `scripts/build-boot-bundles.mjs` | Signs the offers and shell apps' guest-only bundles under the same key, each with its own freshness mark in `<name>-author.version`. |
 | `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/`, plus the browser libsodium and the QuickJS realm engine. Refuses a stale seedkernel build. |
-| `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat app and the shell's two ops, replaces it in place with a later build, round-trips an offer through the offers app and a call signal through the calls app, carries a frame and a block of audio through jam's guest, and a cast and a tell through the room pipe with no guest behind it. |
+| `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat app and the shell's two ops, replaces it in place with a later build, round-trips an offer through the offers app, and a page notice and a call signal through the shell app, each under its own claim, carries a frame and a block of audio through jam's guest, and a cast and a tell through the room pipe with no guest behind it. |
 | `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, an offer, messages, an app replaced in place by a bundle dropped over it, a direct message, a call that reaches its peer only once accepted, with a microphone muted and a camera turned off and on again, and one turned down, removing an app, and a reload. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. Then what a view may not do: each app's view tries a request, a socket, a peer connection and a script in a frame of its own, against a server that must hear nothing, then a script that names a file on the page's own server, and asks for a contact the node has never met. The FLAC file it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
 | `scripts/clean.mjs` | Deletes `build/` and `browser/vendor/` when a rebuild isn't taking. |
 
@@ -309,11 +310,11 @@ reads none of it. Nothing is read out of a module, so an app needs none.
 | Path | What it is |
 | --- | --- |
 | `build/` | Compiled `.wasm` (and `.wat`) handlers. |
-| `bundle/` | Signed bundles: `chat.skb`, `jam.skb`, `offers.skb`, `calls.skb`. |
+| `bundle/` | Signed bundles: `chat.skb`, `jam.skb`, `offers.skb`, `shell.skb`. |
 | `browser/vendor/` | The vendored runtime the page loads. |
-| `browser/offers-bundle.js`, `browser/calls-bundle.js` | The boot bundles embedded as JS modules, since the page is served from `browser/` and `bundle/` is not. |
+| `browser/offers-bundle.js`, `browser/shell-bundle.js` | The boot bundles embedded as JS modules, since the page is served from `browser/` and `bundle/` is not. |
 | `chat-author.key` | The author signing key, minted on the first build. |
-| `chat-author.version`, `jam-author.version`, `offers-author.version`, `calls-author.version` | Each app label's version high-water mark. |
+| `chat-author.version`, `jam-author.version`, `offers-author.version`, `shell-author.version` | Each app label's version high-water mark. |
 
 **Back up `chat-author.key` and the `.version` files together.** The key *is* the
 author identity: bundles signed under a new key are a different author, so peers
@@ -748,7 +749,7 @@ build/smoke scripts:
 | Import | Used for |
 | --- | --- |
 | `seedkernel-wasm` | Node `loadCrypto()` in the offline bundle builders and the headless smoke test. |
-| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.8): the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. The page's `admit` composes the offers and calls pins and the consent gate. Its `Shell.call` is the host's own door into a co-resident guest's `services` claim, which is how the peer pill and the peer list ask the transport who is linked, and whether directly or through the relay. |
+| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.8): the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. The page's `admit` composes the offers and shell pins and the consent gate. Its `Shell.call` is the host's own door into a co-resident guest's `services` claim, which is how the peer pill and the peer list ask the transport who is linked, and whether directly or through the relay. |
 | `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` and `TRANSPORT_SERVICE` — the seedkernel-shipped transport bundle as raw bytes, and the local service id it claims, used by the headless smoke assertions (§12.6); browser boot gets the same artifact through `bootShell`. |
 | `seedkernel-wasm/bundle` | `verifyBundle` — the one call that unpacks and checks an offered bundle (`peekBundle`) — and `genesisHash`, the hash the consent gate's digest of a whole bundle is built from. The browser only verifies; peer attribution uses its node public key. |
 | `seedkernel-wasm/bundle-author` | `authorBundle`, `guestOpFraming` and `hybridAuthorKeysFromSeed` in the offline `build-app-bundle.mjs` and `build-boot-bundles.mjs` scripts. This entry point is never imported by the browser shell. |
@@ -792,19 +793,20 @@ Three properties serve as the summary; the details live in the seedkernel docs:
   wants with `forget`; the transport links to them through the relay and moves each
   link to WebRTC itself
   (§12.6, §12.7, [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)).
-- **The offers and calls apps get a pin, the shell's own half of it.** `offer/v1` carries a
+- **The offers and shell apps get a pin, the shell's own half of it.** `offer/v1` carries a
   signed bundle for an app that does not exist yet, so something already
   installed at boot owns the name and `admit` allows exactly the author and app
-  the page was built with — a pin, not a consent prompt. The calls app, which carries
-  a call's signaling, is pinned the same way. The shell's own
-  consent gate is everything else.
+  the page was built with — a pin, not a consent prompt. The shell app, which carries
+  what two pages tell each other and a call's signaling, is pinned the same way. The
+  shell's own consent gate is everything else.
 - **Both directions cross an app's guest.** The host has no send and no receive:
   an inbound frame reaches the shell as the link occupant's own delivery return,
   and an outbound frame leaves by an app *calling* `_net`. The render bytes an
   app's guest returns for an inbound frame are that call's answer, read off
   the load's own `onInbound` (§12.10) — no second claim, no host-side tap. The
-  page sends nothing through an app's guest: its own frames, an Offer and a call's
-  signals, leave through the offers and calls apps it pinned. The page's own
+  page sends nothing through an app's guest: its own frames, an Offer, what it tells a
+  peer's page and a call's signals, leave through the offers and shell apps it pinned.
+  The page's own
   questions go the same way: "who is linked, and is it direct" is a
   call on `_net` through `Shell.call`, not a field on the adapter, because links
   are the transport guest's and the adapter knows only sockets.
@@ -862,7 +864,7 @@ living out here.
   runs (`appFacts` in `browser/app-api.js`): its manifest has no `shell` entry, it was
   built for another contract version, or it reaches something the shell grants no app.
 - **An install fails with `this node already holds its 8 app slots`.** A node holds eight
-  bundles, and the transport, offers and calls are three of them. Remove an app
+  bundles, and the transport, offers and shell are three of them. Remove an app
   to install another.
 - **An app's message never leaves, and Diagnostics says it `does not claim` a protocol.**
   An app sends only under the protocols in its own `protocols`. Add the one it sends under

@@ -24,7 +24,7 @@ import { combineChannels } from "seedkernel-wasm/socket-seam";
 // and the relays that reach them.
 import { roomClient, roomId } from "seedrelay/rooms";
 // The shell's own code. media-rtc.js is the call feature: audio and video ride peer
-// connections this page owns, signaled through the calls boot bundle below.
+// connections this page owns, signaled through the shell boot bundle below.
 import { MediaCalls } from "./media-rtc.js";
 // The contract with the apps this shell hosts: what it reads off a bundle, what it lets one
 // reach, and the two ops it calls on an app's guest. Nothing in it, or in this file, knows
@@ -36,9 +36,10 @@ import { guardView } from "./view-guard.js";
 // see "boot the offers app" further down for why a bundle rather than a page-held name.
 import { OFFERS_KEY_PREFIX, OFFERS_OP_SEND } from "./offers-app.js";
 import { offersBundleBytes, OFFERS_AUTHOR_HEX, OFFERS_APP } from "./offers-bundle.js";
-// The calls app: a third boot bundle, the signaling path for a call's media.
-import { CALLS_OP_SEND } from "./calls-app.js";
-import { callsBundleBytes, CALLS_AUTHOR_HEX, CALLS_APP } from "./calls-bundle.js";
+// The shell app: a third boot bundle, how this page talks to a peer's. What each tells the
+// other about itself rides one of its claims, and a call's signaling the other.
+import { CALL_PROTO, SHELL_OP_TELL, SHELL_OP_SIGNAL } from "./shell-app.js";
+import { shellBundleBytes, SHELL_AUTHOR_HEX, SHELL_APP } from "./shell-bundle.js";
 
 // The media calls' peer connections ask the relay for their address, as the transport's do
 // (seedkernel §12.7), so no third party learns who is calling: `connectRelay` points this at
@@ -309,7 +310,7 @@ const booted = await bootShell({
     // bytes this deployment shipped — there is nothing here for a click to actually
     // decide, the same reasoning that keeps the transport off the consent path.
     if (bytesToHex(v.author) === OFFERS_AUTHOR_HEX && v.manifest.app === OFFERS_APP) return true;
-    if (bytesToHex(v.author) === CALLS_AUTHOR_HEX && v.manifest.app === CALLS_APP) return true;
+    if (bytesToHex(v.author) === SHELL_AUTHOR_HEX && v.manifest.app === SHELL_APP) return true;
     // Every other bundle is an app the user consented to, named by the digest of all of it:
     // a consent to one guest admits no other beside the same module.
     const hash = bytesToHex(bundleDigest(v, digest));
@@ -348,34 +349,50 @@ const offersApp = await shell.install(offersBundleBytes(), {
   },
 });
 
-// ─── boot the calls app ─────────────────────────────────────────────────
+// ─── boot the shell app ─────────────────────────────────────────────────
 //
-// A call's audio and video ride peer connections this page owns (media-rtc.js), beside
-// the transport's; their signaling rides the node's own authenticated channel under
-// `call/v1`, the calls boot bundle's claim. A peer's signal reaches the page as that
-// load's `onInbound` answer, attributed by the channel it arrived on; ours leave through
-// the same app's `send` op, since only a guest can reach `_net`.
+// What this page says to a peer's rides the node's own authenticated channel, under the
+// two claims the shell boot bundle holds (shell-app.js). A peer's frame reaches the page as
+// that load's `onInbound` answer, attributed by the channel it arrived on and told apart by
+// the claim it arrived under; ours leave through the same app's two ops, since only a guest
+// can reach `_net`.
 //
-// It is the one channel two pages talk on directly, so it also carries what else they say
-// to each other (`onPageSignal`): `{ peer: true }` from a page that added this node as a
-// peer and `{ peer: false }` from one that removed it, and `{ nick }`, what a peer calls
-// itself.
-const callsApp = await shell.install(callsBundleBytes(), {
-  onInbound: (claim, from, answer) => { if (answer.length > 0) onPageSignal(bytesToHex(from), answer); },
+//   shell/v1   what a page tells another about itself (`onPageNotice`): `{ peer: true }`
+//              from a page that added this node as a peer and `{ peer: false }` from one
+//              that removed it, and `{ nick }`, what a peer calls itself.
+//   call/v1    a call's signaling. Its audio and video ride peer connections this page owns
+//              (media-rtc.js), beside the transport's.
+const shellApp = await shell.install(shellBundleBytes(), {
+  onInbound: (claim, from, answer) => {
+    if (answer.length === 0) return;
+    if (claim === CALL_PROTO) void media.onSignal(bytesToHex(from), answer);
+    else onPageNotice(bytesToHex(from), answer);
+  },
 });
 
-/** Send one signal to a peer's page. */
-function sendSignal(peerId, signal) {
-  const arg = new Uint8Array(32 + signal.length);
+/** Hand `bytes` to a peer's page through one of the shell app's two ops, each of which
+ *  sends under one of its protocols. */
+function sendPage(op, peerId, bytes) {
+  const arg = new Uint8Array(32 + bytes.length);
   arg.set(hexToBytes(peerId), 0);
-  arg.set(signal, 32);
-  return callsApp.invoke(writeOp(CALLS_OP_SEND, arg));
+  arg.set(bytes, 32);
+  return shellApp.invoke(writeOp(op, arg));
 }
 
-/** A signal from a peer's page, already attributed by the channel it arrived on. A peer
- *  that added this node is added here too, and one that removed it is removed, so the two
- *  ends agree on being peers; anything else is a call's (media-rtc.js). */
-function onPageSignal(from, bytes) {
+/** Tell a peer's page something about this one, under shell/v1. */
+function tellPage(peerId, notice) {
+  return sendPage(SHELL_OP_TELL, peerId, notice);
+}
+
+/** Send a peer's page one signal of a call, under call/v1. */
+function sendSignal(peerId, signal) {
+  return sendPage(SHELL_OP_SIGNAL, peerId, signal);
+}
+
+/** What a peer's page tells this one about itself, already attributed by the channel it
+ *  arrived on. A peer that added this node is added here too, and one that removed it is
+ *  removed, so the two ends agree on being peers. */
+function onPageNotice(from, bytes) {
   let msg;
   try { msg = JSON.parse(new TextDecoder().decode(bytes)); } catch { return; }
   // What the peer calls itself, an empty nick for nothing: shown in place of its key, by
@@ -386,7 +403,7 @@ function onPageSignal(from, bytes) {
     postContext();
     return;
   }
-  if (typeof msg?.peer !== "boolean") { void media.onSignal(from, bytes); return; }
+  if (typeof msg?.peer !== "boolean") return;
   if (msg.peer && !contacts.has(from)) {
     addContact(from, null, { tell: false });
     shellPrint(`${peerLabel(from)} added you as a peer.`, "sys");
@@ -1038,9 +1055,10 @@ function dismissOffer(recordKey) {
 // Every outbound frame leaves through a guest, because that is the only thing that can
 // send: the host's driver holds sockets and no request face at all, and the network is
 // the transport, reached by calling the id it claims (§12.10). An app's own frames leave
-// through its own guest, and the shell never sees them. The shell's own are two: a call's
-// signals, through the calls app (`sendSignal`), and an Offer, through the offers app,
-// which owns `offer/v1` in both directions. No app's guest is borrowed to carry either.
+// through its own guest, and the shell never sees them. The shell's own leave through its
+// two boot bundles: what it tells a peer's page and a call's signals through the shell app
+// (`tellPage`, `sendSignal`), and an Offer through the offers app, which owns `offer/v1`
+// in both directions. No app's guest is borrowed to carry any of them.
 
 // Send the stored bundle for `key` to every linked peer. Anyone who receives this can
 // forward it to others — that's transitivity for free.
@@ -1344,7 +1362,7 @@ window.addEventListener("message", (ev) => {
 
 // A nick is the shell's, not an app's: what this node calls itself, set on the Network
 // tab, and what each peer calls itself. The pages tell each other on their own channel
-// (`{ nick }` on call/v1, `onPageSignal`), so a name is the same in every app and needs
+// (`{ nick }` on shell/v1, `onPageNotice`), so a name is the same in every app and needs
 // none installed, and every app reads it out of its context (`contextNow`).
 
 /** The linked peers whose page has heard this node's nick. It holds no opinion about
@@ -1358,11 +1376,11 @@ const nickTold = new Set();
  *  answer, so a peer that links is told within a poll interval. */
 function tellNick(peers) {
   for (const id of [...nickTold]) if (!peers.includes(id)) nickTold.delete(id);
-  const signal = new TextEncoder().encode(JSON.stringify({ nick: myNick }));
+  const notice = new TextEncoder().encode(JSON.stringify({ nick: myNick }));
   for (const peerId of peers) {
     if (nickTold.has(peerId)) continue;
     nickTold.add(peerId);
-    void sendSignal(peerId, signal).catch(() => nickTold.delete(peerId));
+    void tellPage(peerId, notice).catch(() => nickTold.delete(peerId));
   }
 }
 
@@ -1519,7 +1537,7 @@ async function tellRemoved(key, before) {
   let told = false;
   try {
     if ((await linkedPeers()).includes(key)) {
-      await sendSignal(key, peerNotice(false));
+      await tellPage(key, peerNotice(false));
       told = true;
     }
   } catch { /* not told: owed, below */ }
@@ -1534,7 +1552,7 @@ function tellPeers(linked) {
   for (const [key, added] of [...untoldPeers]) {
     if (!linked.includes(key)) continue;
     untoldPeers.delete(key);
-    void sendSignal(key, peerNotice(added)).catch(() => {});
+    void tellPage(key, peerNotice(added)).catch(() => {});
     if (added) continue;
     // A removed peer that linked again, still listing this node: it hangs up once it has
     // heard, and this node does after the grace.
@@ -1648,7 +1666,7 @@ restoreOffers().catch((err) =>
 // ─── live audio/video calls ────────────────────────────────────────────
 //
 // Calls ride peer connections of their own, one per peer in the call, through MediaCalls
-// (./media-rtc.js), signaled over the calls boot bundle. A call is with the conversation
+// (./media-rtc.js), signaled over the shell boot bundle. A call is with the conversation
 // open in the app when it starts: its linked peers, a room's members or one peer, are told
 // of it, and pollPeerViews keeps that following them (`callPeers`). Being told is all a
 // peer gets: the bar says who is calling, and nothing of the call is received, or sent,
