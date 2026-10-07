@@ -185,8 +185,10 @@ const joinedRooms = new Map();
 // Everyone this page wants a link to, by key in hex: its room-mates and its contacts, each
 // with how the call to it stands (`calls`, further down).
 const wanted = new Map();
-// The linked peers, by key in hex, as the last poll heard them of the transport: what the
-// apps are told is linked (`postContext`). Presentation only, like the peer pill.
+// The linked peers as the transport last told them (`onPeers`): each with how it is reached,
+// `{ id, direct }`, and the same peers by key in hex, which is what the apps are told is
+// linked (`postContext`).
+let routesNow = [];
 let linkedNow = [];
 // What each peer calls itself, by key in hex: its nick, shown in the Network tab's lists in
 // place of the key, and told to every app (`contextNow`). A peer's own word for itself.
@@ -297,9 +299,10 @@ const booted = await bootShell({
   identity: myKeys,
   // The transport asks the relay a peer is linked through for STUN (§12.7). A room
   // keeps its members linked, so links do not idle out; the page redials a member whose
-  // link drops (`pollPeerViews`).
+  // link drops (`followPeers`).
   transport: {
     channels: net,
+    onPeers,
     config: { linkIdleTimeoutMs: 0, ...(myContactSecret ? { contactSecret: bytesToHex(myContactSecret) } : {}) },
   },
   admit(v) {
@@ -400,6 +403,7 @@ function onPageNotice(from, bytes) {
   if (typeof msg?.nick === "string") {
     if (msg.nick) peerNicks.set(from, msg.nick.slice(0, MAX_NICK)); else peerNicks.delete(from);
     renderRoomList();
+    renderPeerList(routesNow);
     postContext();
     return;
   }
@@ -488,21 +492,16 @@ async function linkedPeers() {
   catch { return []; }
 }
 
-// How each linked peer is reached is the transport's to say as well: its `routes` op answers
-// the same set as `[key 32][direct u8]` apiece, 1 once the peer's link has moved off the
-// relay to WebRTC and 0 while the relay still forwards it (seedkernel §12.7).
-async function peerRoutes() {
-  const answer = shell.call(NET_PROTO, new OpArgs("routes").build());
-  if (!answer) return [];
-  try {
-    const bytes = await answer;
-    const out = [];
-    for (let off = 0; off + 33 <= bytes.length; off += 33) {
-      out.push({ id: bytesToHex(bytes.subarray(off, off + 32)), direct: bytes[off + 32] === 1 });
-    }
-    return out;
+// Who is linked, and how each is reached, is the transport's to say as well, and it says so
+// each time that changes (bootShell's `onPeers`): `[key 32][direct u8]` apiece, 1 once the
+// peer's link has moved off the relay to WebRTC and 0 while the relay still forwards it
+// (seedkernel §12.7). So the page hears of a change as it happens, and polls nothing.
+function onPeers(bytes) {
+  routesNow = [];
+  for (let off = 0; off + 33 <= bytes.length; off += 33) {
+    routesNow.push({ id: bytesToHex(bytes.subarray(off, off + 32)), direct: bytes[off + 32] === 1 });
   }
-  catch { return []; }
+  followPeers();
 }
 
 /** Rotate the transport guest's inbound contact gate. Empty means open (§12.6.3). */
@@ -534,7 +533,7 @@ function updatePeerPill(routes) {
 // told one, and says how it is reached, or how the call to it stands. A contact with
 // no link takes its contact secret: the row's Connect calls it presenting what the field
 // holds. Rows are kept and changed in place, never redrawn, so a field being typed in
-// survives the poll.
+// survives the list being drawn again.
 const PEER_STATES = {
   direct: ["direct", "Linked peer to peer over WebRTC; the relay carries none of this traffic."],
   relayed: ["via relay", "The relay forwards this link's encrypted bytes; no direct link has been made."],
@@ -1372,8 +1371,8 @@ window.addEventListener("message", (ev) => {
 const nickTold = new Set();
 
 /** Give each linked peer that has not heard it this node's nick, an empty one for none. A
- *  peer counts as told before the send, so nothing tells it twice. Run on every poll's
- *  answer, so a peer that links is told within a poll interval. */
+ *  peer counts as told before the send, so nothing tells it twice. Run each time the links
+ *  change (`followPeers`), so a peer that links is told as it does. */
 function tellNick(peers) {
   for (const id of [...nickTold]) if (!peers.includes(id)) nickTold.delete(id);
   const notice = new TextEncoder().encode(JSON.stringify({ nick: myNick }));
@@ -1442,7 +1441,8 @@ function roomsChanged() {
  *  registered there, so this node's key can be called. Answers the relay's state as
  *  `pollRelay` reads it. */
 async function joinRelay(origin, relaySecret) {
-  if (relay?.origin !== origin || relay.relaySecret !== relaySecret) {
+  const fresh = relay?.origin !== origin || relay.relaySecret !== relaySecret;
+  if (fresh) {
     // The old relay's rooms are left, and their members heard leaving.
     relay?.client.close();
     const client = roomClient({
@@ -1459,15 +1459,21 @@ async function joinRelay(origin, relaySecret) {
     });
     relay = { origin, relaySecret, client };
     showRelayButton();
-    for (const name of joinedRooms.keys()) await client.join(name);
-    // Contacts are called through this relay now.
-    syncPeers();
   }
+  const { client } = relay;
   const op = new OpArgs("relay").text(origin);
   if (relaySecret) op.text(relaySecret);
   const answer = shell.call(NET_PROTO, op.build());
   if (!answer) throw new Error(`nothing claims ${NET_PROTO}`);
-  return (await answer)[0];
+  const state = (await answer)[0];
+  // The rooms are joined once the transport is registered: a room tells its members of this
+  // node, and one of them calls it as soon as it hears.
+  if (fresh && relay?.client === client) {
+    for (const name of joinedRooms.keys()) await client.join(name);
+    // Contacts are called through this relay now.
+    syncPeers();
+  }
+  return state;
 }
 
 /** Join the room `name`, beside any this page is already in. */
@@ -1520,6 +1526,7 @@ function removeContact(key, { tell = true } = {}) {
   syncPeers();
   if (!tell || !knows) { hangUpUnwanted(before); return; }
   leavingPeers.add(key);
+  renderPeerList(routesNow);
   void tellRemoved(key, before);
 }
 
@@ -1593,7 +1600,7 @@ function syncPeers() {
     if (!wanted.has(key)) wanted.set(key, { since: performance.now(), silent: false, late: false });
     teachPeer(key);
   }
-  postContext();
+  followPeers();
 }
 
 /** How long a wanted peer may stay unlinked before the wait for it is over: one this node
@@ -1601,6 +1608,11 @@ function syncPeers() {
  *  Just under the transport's handshake deadline, so a node that answers nothing, as one
  *  whose contact secret was not presented does, is called once. */
 const CALL_PATIENCE_MS = 9000;
+
+/** While a wanted peer has yet to link, `followPeers` runs again this often: a call that
+ *  failed is made again, and the wait for the peer runs out, by the clock. */
+const WAIT_TICK_MS = 750;
+let waitTimer = null;
 
 /** Whether this node calls `key`. It calls a contact, which may not know to call back. Of
  *  two room-mates the smaller key calls, so a pair dials once, and the larger one when the
@@ -1668,7 +1680,7 @@ restoreOffers().catch((err) =>
 // Calls ride peer connections of their own, one per peer in the call, through MediaCalls
 // (./media-rtc.js), signaled over the shell boot bundle. A call is with the conversation
 // open in the app when it starts: its linked peers, a room's members or one peer, are told
-// of it, and pollPeerViews keeps that following them (`callPeers`). Being told is all a
+// of it, and followPeers keeps that following them (`callPeers`). Being told is all a
 // peer gets: the bar says who is calling, and nothing of the call is received, or sent,
 // until it is accepted there (`incomingCall`). Whoever enters a call does so with the
 // microphone and the camera on, each then turned off and on by its own button (`capture`,
@@ -2381,17 +2393,20 @@ updateContactHint();
 roomsChanged();
 if (savedRelayUrl) connectRelay();
 
-// Presentation-only polling: authenticated peer truth stays in the transport guest. The
-// page asks for the current set to render counts and routes; it never mirrors transitions or
-// drives reconnection/fan-out from a client-side Set.
+// Authenticated peer truth stays in the transport guest, which tells the page who is linked
+// each time that changes (`onPeers`): the page draws and passes on what it was told, and
+// never mirrors transitions or drives reconnection/fan-out from a client-side Set.
 // What it hears is also what the apps are told is linked (`postContext`), with the rooms
 // and the contacts: each app's guest is told when any of them changes.
-async function pollPeerViews() {
-  // A failed tick is swallowed rather than logged: this runs every 750ms, and the next
-  // one either succeeds or the pill simply keeps its last value. What must NOT happen is
-  // the reschedule being skipped — that would freeze the pill for the tab's life.
+//
+// Run when the links change, when who this page wants linked does (`syncPeers`), and by the
+// clock only while a wanted peer has yet to link.
+function followPeers() {
+  clearTimeout(waitTimer);
+  let waiting = false;
+  // A failed run is swallowed rather than logged, and run again as a wait is.
   try {
-    const routes = await peerRoutes();
+    const routes = routesNow;
     const peers = routes.map((r) => r.id);
     // A wanted peer this node calls (`calls`) and has no link to is dialed: `ready` dials
     // every address the transport holds a destination for. One that has not linked within
@@ -2412,6 +2427,7 @@ async function pollPeerViews() {
         w.since = t;
         teachPeer(key);
       }
+      if (!w.silent) waiting = true;
     }
     if (dial && relay) void netOp(new OpArgs("ready").u32(0));
     tellPeers(peers);
@@ -2422,8 +2438,8 @@ async function pollPeerViews() {
     postContext();
     media.sync(peers);
     updateCallStatus();
-  } catch {}
-  setTimeout(pollPeerViews, 750);
+  } catch { waiting = true; }
+  waitTimer = waiting ? setTimeout(followPeers, WAIT_TICK_MS) : null;
 }
-pollPeerViews();
+followPeers();
 updateCallStatus();

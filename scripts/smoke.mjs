@@ -177,9 +177,9 @@ async function peersOf(shell) {
   return out;
 }
 
-/** How a node reaches each linked peer: the transport's `routes` op, which shell.js's
- *  `peerRoutes` reads for the Network tab's peer list. Peer hex to whether its link is
- *  direct. */
+/** How a node reaches each linked peer: the transport's `routes` op, whose answer is also
+ *  what the page is told when it changes (shell.js `onPeers`). Peer hex to whether its
+ *  link is direct. */
 async function routesOf(shell) {
   const answer = shell.call(NET_PROTO, new OpArgs("routes").build());
   if (!answer) return new Map();
@@ -254,9 +254,12 @@ const { shell: A, transport: netA } = await bootShell({
 // B keeps no handle on its adapter: the assertions below are about what a driver no
 // longer carries, one node says that once, and everything B is actually asked for — its
 // peer set — goes through its shell like A's does.
+// What B is told of its links as they change, which is how the page follows them
+// (shell.js `onPeers`).
+let toldB = null;
 const { shell: B } = await bootShell({
   sodium, identity: identityB,
-  transport: { channels: channelsB, config: { contactSecret: toHex(CONTACT) } }, admit,
+  transport: { channels: channelsB, config: { contactSecret: toHex(CONTACT) }, onPeers: (routes) => { toldB = routes; } }, admit,
 });
 
 // 1. transport bundle installed at boot; the socket driver standing
@@ -382,7 +385,8 @@ try {
   const [aRoutes, bRoutes] = await Promise.all([routesOf(A), routesOf(B)]);
   assert(aRoutes.get(peerB) === true && bRoutes.get(peerA) === true,
     "`routes` must answer each linked peer, and read a dialed link as direct");
-  ok("the transport answers how each peer is reached");
+  assert(toldB !== null && toHex(toldB) === peerA + "01", "B must be told the same without asking, when A linked (`onPeers`)");
+  ok("the transport answers how each peer is reached, and tells it when it changes");
 
   const rotated = new Uint8Array(32).fill(9);
   await Promise.all([setContactSecret(A, rotated), setContactSecret(B, rotated)]);

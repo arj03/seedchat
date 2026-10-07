@@ -33,7 +33,7 @@ export class MediaCalls {
   #among = null;
   /** The peers told we are in it. */
   #rung = new Set();
-  /** peerId → { call, gone }: every peer that says it is in a call, and which. */
+  /** peerId → { call }: every peer that says it is in a call, and which. */
   #callers = new Map();
 
   /**
@@ -89,11 +89,9 @@ export class MediaCalls {
    *  it that links is told of it, one in it too is connected, and one out of it dropped. */
   sync(linked) {
     let changed = false;
-    for (const [p, c] of this.#callers) {
-      // Gone at two looks running: a peer may have linked, and called, after one was taken.
-      if (linked.includes(p)) c.gone = false;
-      else if (c.gone) { this.#callers.delete(p); changed = true; }
-      else c.gone = true;
+    for (const p of [...this.#callers.keys()]) {
+      // The page is told of a link before anything arrives over it, so a caller is linked.
+      if (!linked.includes(p)) { this.#callers.delete(p); changed = true; }
     }
     if (this.#call !== null) {
       const peers = new Set(this.#among(linked));
@@ -138,7 +136,7 @@ export class MediaCalls {
       return;
     }
     if (typeof msg?.call === "string") {
-      this.#callers.set(peerId, { call: msg.call, gone: false });
+      this.#callers.set(peerId, { call: msg.call });
       if (this.#with(peerId)) this.#ensure(peerId);
       this.opts.onCallers?.();
       return;
