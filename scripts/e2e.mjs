@@ -796,6 +796,14 @@ try {
     /asked to make abababab a contact/.test(await page(A, text("shell-log"))));
   check(!(await contactsOf(A)).includes(stranger) && (await contactsOf(A)).includes(keyB), "A: and its contacts are as they were");
 
+  // 24. A removes B as its peer, and hangs up right behind telling it. B still hears, over
+  //     the link A is closing, and neither lists the other any more.
+  await page(A, `[...document.querySelectorAll("#peer-list .peer-row")].find((li) => li.querySelector(".peer-row-name").title === "${keyB}")
+    .querySelectorAll("button")[1].click()`);
+  await waitFor("B: is told A removed it, on the link A then closed", async () =>
+    /removed you as a peer/.test(await page(B, text("shell-log"))));
+  check(!(await contactsOf(A)).includes(keyB) && !(await contactsOf(B)).includes(keyA), "neither lists the other as its peer");
+
 } catch (err) {
   failure = err;
 }

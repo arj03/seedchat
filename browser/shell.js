@@ -200,8 +200,6 @@ let myNick = (sessionStorage.getItem("shell.nick") ?? "").slice(0, MAX_NICK);
 // The notices peers are owed, by key in hex: true for one this node added, false for one
 // it removed. Each is sent once its peer is linked (`tellPeers`).
 const untoldPeers = new Map();
-// Peers this node removed and is about to hang up on, by key in hex: no longer listed.
-const leavingPeers = new Set();
 
 // ─── per-tab Ed25519 identity ──────────────────────────────────────────
 let myKeys;
@@ -581,7 +579,7 @@ function buildPeerRow(id) {
 function renderPeerList(routes) {
   const linked = new Map(routes.map((r) => [r.id, r.direct]));
   const ids = [...new Set([...linked.keys(), ...wanted.keys()])]
-    .filter((id) => contacts.has(id) || (linked.has(id) && roomsOf(id).length === 0 && !leavingPeers.has(id)))
+    .filter((id) => contacts.has(id) || (linked.has(id) && roomsOf(id).length === 0))
     .sort();
   for (const [id, row] of peerRows) {
     if (!ids.includes(id)) { row.li.remove(); peerRows.delete(id); }
@@ -1507,7 +1505,6 @@ function addContact(key, secret, { tell = true } = {}) {
   if (!contacts.has(key)) {
     if (tell) untoldPeers.set(key, true); else untoldPeers.delete(key);
   }
-  leavingPeers.delete(key);
   contacts.set(key, secret);
   saveContacts();
   renderRoomList();
@@ -1525,21 +1522,16 @@ function removeContact(key, { tell = true } = {}) {
   renderRoomList();
   syncPeers();
   if (!tell || !knows) { hangUpUnwanted(before); return; }
-  leavingPeers.add(key);
-  renderPeerList(routesNow);
   void tellRemoved(key, before);
 }
 
 /** The notice one page sends another: it added it as a peer, or removed it. */
 const peerNotice = (added) => new TextEncoder().encode(JSON.stringify({ peer: added }));
 
-/** How long a peer told it was removed has to hang up, before this node does. The
- *  transport drops what is still queued on a link it closes, so a link closed right behind
- *  the notice would take the notice with it, and the peer would go on listing this node. */
-const HANG_UP_GRACE_MS = 1500;
-
-/** Tell `key` this node removed it, then hang up on those of `before` no longer wanted. One
- *  with no link is owed the notice until it has one (`tellPeers`): a send would dial it. */
+/** Tell `key` this node removed it, then hang up on those of `before` no longer wanted: a
+ *  link the transport closes still carries what was sent on it first (seedkernel §12.6).
+ *  One with no link is owed the notice until it has one (`tellPeers`): a send would dial
+ *  it. */
 async function tellRemoved(key, before) {
   let told = false;
   try {
@@ -1548,9 +1540,7 @@ async function tellRemoved(key, before) {
       told = true;
     }
   } catch { /* not told: owed, below */ }
-  if (told) await new Promise((r) => setTimeout(r, HANG_UP_GRACE_MS));
-  else if (!contacts.has(key)) untoldPeers.set(key, false);
-  leavingPeers.delete(key);
+  if (!told && !contacts.has(key)) untoldPeers.set(key, false);
   hangUpUnwanted(before);
 }
 
@@ -1559,12 +1549,9 @@ function tellPeers(linked) {
   for (const [key, added] of [...untoldPeers]) {
     if (!linked.includes(key)) continue;
     untoldPeers.delete(key);
-    void tellPage(key, peerNotice(added)).catch(() => {});
-    if (added) continue;
-    // A removed peer that linked again, still listing this node: it hangs up once it has
-    // heard, and this node does after the grace.
-    leavingPeers.add(key);
-    setTimeout(() => { leavingPeers.delete(key); hangUpUnwanted([key]); }, HANG_UP_GRACE_MS);
+    const told = tellPage(key, peerNotice(added)).catch(() => {});
+    // A removed peer that linked again, still listing this node: it is told, and hung up on.
+    if (!added) void told.then(() => hangUpUnwanted([key]));
   }
 }
 
