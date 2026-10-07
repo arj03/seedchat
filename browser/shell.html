@@ -8,14 +8,24 @@
 <title>seedshell</title>
 <!-- script-src includes 'unsafe-inline' on purpose: the app UIs run in a sandboxed
      blob: iframe, and a blob: document inherits this page's CSP. The UI is arbitrary
-     app content (any author's signed bundle) — the shell cannot pre-authorize its
-     inline script with a hash or nonce, so without 'unsafe-inline' every app UI is
-     dead on arrival. That is safe here because the iframe is sandboxed without
-     allow-same-origin: it has an opaque origin, no access to this document's DOM,
-     and can reach the shell only via postMessage. The shell's own document has no
-     inline scripts and no untrusted innerHTML, so 'unsafe-inline' opens nothing
-     here; 'wasm-unsafe-eval' covers WebAssembly.instantiate (bundle modules,
-     libsodium, QuickJS).
+     app content (any author's signed bundle), and its scripts are inline, so
+     without 'unsafe-inline' every app UI is dead on arrival. That is safe here
+     because the iframe is sandboxed without allow-same-origin: it has an opaque
+     origin, no access to this document's DOM, and can reach the shell only via
+     postMessage. The shell's own document has no inline scripts and no untrusted
+     innerHTML, so 'unsafe-inline' opens nothing here; 'wasm-unsafe-eval' covers
+     WebAssembly.instantiate (bundle modules, libsodium, QuickJS).
+
+     This policy is NOT what holds a view: connect-src has to let this page reach
+     whatever relay the user names, and a view inherits that. Each view is loaded
+     with a policy of its own in front of it (view-guard.js), which both apply
+     beside this one and which lets it reach nothing. Since both apply, what a
+     view's policy gives it back this one has to allow as well: that is why
+     font-src and media-src name data: here, which this page loads nothing from.
+
+     frame-src is blob: alone, which is where a view is loaded from. It is also what
+     a view may navigate its own frame to, so it names no server, this page's own
+     included.
 
      worker-src allows blob: because that is where an app's MODULES run since guest
      ABI 6: the host's module table stands each one up in its own worker so a call
@@ -29,9 +39,10 @@
   style-src 'self' 'unsafe-inline';
   connect-src 'self' ws: wss:;
   worker-src 'self' blob:;
-  frame-src 'self' blob:;
+  frame-src blob:;
   img-src 'self' data: blob:;
-  media-src 'self' blob:;
+  media-src 'self' data: blob:;
+  font-src 'self' data:;
   object-src 'none';
   base-uri 'self';
   form-action 'self';

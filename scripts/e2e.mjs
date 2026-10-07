@@ -9,7 +9,9 @@
 // a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the
 // list moved on, a peer held to a slow uplink, the list reordered and trimmed, a reload
 // that gets the room and its music back from the other tab, and a tab left alone in the
-// room. Run it after a change to the shell or a view:
+// room. Then what the shell holds a view to: each view tries every way out to a server,
+// and asks for a contact the node has never met. Run it after a change to the shell or a
+// view:
 //
 //   npm run e2e            (after `npm run build`)
 //
@@ -78,7 +80,12 @@ const freePort = () => new Promise((resolve) => {
 // The page, served from browser/ with caching off, as `npm run serve` does.
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript",
   ".css": "text/css", ".wasm": "application/wasm", ".json": "application/json" };
+// What a view asked this server for, which is to be nothing (step 23): a view's requests
+// carry this mark.
+const FROM_A_VIEW = "from-a-view";
+const strays = [];
 const server = http.createServer((req, res) => {
+  if (req.url.includes(FROM_A_VIEW)) strays.push(req.url);
   const path = join(root, "browser", decodeURIComponent(new URL(req.url, "http://x").pathname));
   if (!existsSync(path)) { res.writeHead(404).end(); return; }
   res.writeHead(200, { "content-type": MIME[extname(path)] ?? "application/octet-stream", "cache-control": "no-store" });
@@ -377,6 +384,67 @@ const jamUplink = (tab, rate) => jam(tab, `(() => {
   document.body.appendChild(script);
   return document.documentElement.dataset.uplink;
 })()`);
+/** Run script in one of the tab's views as the view's own script: a script element put into
+ *  its page, which runs in the page's world whichever one `viewTitled` reached it in. What
+ *  it finds it leaves on the page for `viewTitled` to read. */
+const runInView = (tab, title, source) => viewTitled(tab, title, `(() => {
+  const script = document.createElement("script");
+  script.textContent = ${JSON.stringify(source)};
+  document.body.appendChild(script);
+})()`);
+/** What a view would do to reach a server, each way tried and what came of it left in
+ *  `data-reach`. At `post`, a server of another origin: a request, a socket, a peer
+ *  connection, and a frame of its own with a script in it, which would be a realm the
+ *  shell's prelude never ran in. At the page's own server, which the page's policy has to
+ *  let the page load script from: a script that names a file there, made by one already
+ *  running, in the page and in a worker. And first what a view is given, which the policies
+ *  are not to refuse it: a font and a sound it carries as `data:`. */
+const reachFor = (post) => `(async () => {
+  const out = { rtc: typeof RTCPeerConnection };
+  const refused = [];
+  const note = (e) => refused.push(e.effectiveDirective);
+  document.addEventListener("securitypolicyviolation", note);
+  await new FontFace("carried", "url(data:font/woff2;base64,AAAA)").load().catch(() => {});
+  await new Promise((done) => {
+    const sound = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=");
+    sound.onloadedmetadata = sound.onerror = done;
+    setTimeout(done, 1500);
+  });
+  await new Promise((done) => setTimeout(done, 200));
+  document.removeEventListener("securitypolicyviolation", note);
+  out.carried = refused.join(" ") || "allowed";
+  const home = "${origin}/shell.js?${FROM_A_VIEW}";
+  out.script = await new Promise((done) => {
+    const script = document.createElement("script");
+    script.src = home + "=script";
+    script.onload = () => done("loaded");
+    script.onerror = () => done("refused");
+    document.head.appendChild(script);
+  });
+  await import(home + "=import").catch(() => {});
+  out.worker = await new Promise((done) => {
+    const worker = new Worker(URL.createObjectURL(new Blob(
+      ["try { importScripts(" + JSON.stringify(home + "=worker") + "); } catch {} postMessage('ran');"])));
+    worker.onmessage = () => done("ran");
+    worker.onerror = () => done("refused");
+  });
+  out.request = await fetch("http://127.0.0.1:${post}/", { mode: "no-cors" }).then(() => "sent", () => "refused");
+  out.socket = await new Promise((done) => {
+    let ws;
+    try { ws = new WebSocket("ws://127.0.0.1:${post}/"); } catch { done("refused"); return; }
+    ws.onopen = () => done("open");
+    ws.onerror = () => done("refused");
+  });
+  out.frame = await new Promise((done) => {
+    addEventListener("message", (e) => { if (e.data === "a frame's script ran") done("ran"); });
+    const frame = document.createElement("iframe");
+    frame.srcdoc = "<scr" + "ipt>parent.postMessage(\\"a frame's script ran\\", \\"*\\")</scr" + "ipt>";
+    document.body.appendChild(frame);
+    setTimeout(() => { frame.remove(); done("refused"); }, 1500);
+  });
+  document.documentElement.dataset.reach = JSON.stringify(out);
+})();`;
+
 /** Click jam's seek bar this far along it. */
 const jamSeek = (tab, part) => jam(tab, `(() => {
   const bar = document.getElementById("seek"), box = bar.getBoundingClientRect();
@@ -482,6 +550,10 @@ try {
     return !t ? "none" : t.classList.contains("no-video") ? "label" : t.querySelector("video").videoWidth > 0 ? "video" : "blank";
   })()`;
   const mic = "(([t]) => t.readyState + (t.enabled ? ' on' : ' off'))(document.querySelector('#tile-local video').srcObject.getAudioTracks())";
+  // What the bar says with no call on: who one started now would ring.
+  const idle = /^a call rings \S/;
+  const rings = await page(A, text("call-status"));
+  check(idle.test(rings), `A: the call bar says who a call would ring (${JSON.stringify(rings)})`);
   await page(A, click("call-start"));
   await waitFor("A: a call starts", async () => /in call/.test(await page(A, text("call-status"))));
   await waitFor("B: is told A is calling, and offered the call", async () =>
@@ -510,20 +582,20 @@ try {
   await page(A, click("call-end"));
   await waitFor("B: A is gone from the call when it hangs up", async () =>
     (await page(B, tileOf(":not(.local)"))) === "none" && (await page(B, text("call-status"))) === "in call (waiting for peers)");
-  check((await page(A, text("call-status"))) === "idle" && (await page(A, text("call-start"))) === "Start call",
+  check(idle.test(await page(A, text("call-status"))) && (await page(A, text("call-start"))) === "Start call",
     "A: the call it hung up on does not ring, with B still in it");
   await page(B, click("call-end"));
-  await waitFor("B: the call ends", async () => (await page(B, text("call-status"))) === "idle");
+  await waitFor("B: the call ends", async () => idle.test(await page(B, text("call-status"))));
   await page(B, click("call-start"));
   await waitFor("A: is told B is calling", async () =>
     /is calling/.test(await page(A, text("call-status"))) && (await page(A, text("call-start"))) === "Accept call");
   await page(A, click("call-decline"));
-  check((await page(A, text("call-status"))) === "idle" && (await page(A, text("call-start"))) === "Start call", "A: a call turned down rings no more");
+  check(idle.test(await page(A, text("call-status"))) && (await page(A, text("call-start"))) === "Start call", "A: a call turned down rings no more");
   await sleep(1500);
   check((await page(A, tileOf(""))) === "none" && (await page(B, text("call-status"))) === "in call (waiting for peers)",
     "A: and gets nothing of it");
   await page(B, click("call-end"));
-  await waitFor("B: the call ends", async () => (await page(B, text("call-status"))) === "idle");
+  await waitFor("B: the call ends", async () => idle.test(await page(B, text("call-status"))));
 
   // 12. removing an app takes its view with it, and it installs again
   await page(B, clickButton("app-list", "Remove"));
@@ -689,6 +761,41 @@ try {
   await waitFor("B: says it is in no room, in place of offering to add music", async () =>
     /^Not connected to a room/.test(await jamAlone(B)) && (await jam(B, "document.getElementById('add').hidden")));
   check(errors.every((e) => expected.test(e)), "jam logged no error in either tab");
+
+  // 23. a view reaches nothing but its own guest. The sandbox keeps it from the page, and the
+  //     policy the shell loads it under keeps it from the network: a server stands here that
+  //     nothing else talks to, and each view tries a request, a socket, a peer connection and
+  //     a frame of its own to run script in. Then the page's own server, by a script that
+  //     names a file there: the one server the page's policy lets a script come from. What a
+  //     view is given it still has: a font and a sound it carries, and a worker. What the
+  //     browser refuses it logs as an error, which is why this comes after the checks that
+  //     nothing was
+  let overheard = 0;
+  const post = http.createServer((req, res) => res.writeHead(200, { "content-type": "text/plain" }).end("heard"));
+  post.on("connection", () => { overheard++; });
+  await new Promise((r) => post.listen(0, "127.0.0.1", r));
+  for (const title of ["chat-app v2", "Jam"]) {
+    await runInView(A, title, reachFor(post.address().port));
+    await waitFor(`A: ${title}'s view has tried every way out`, async () => !!(await viewTitled(A, title, "document.documentElement.dataset.reach")));
+    const reach = JSON.parse(await viewTitled(A, title, "document.documentElement.dataset.reach"));
+    check(reach.request === "refused" && reach.socket === "refused" && reach.rtc === "undefined" && reach.frame === "refused",
+      `A: ${title}'s view is refused a request, a socket, a peer connection and a script in a frame of its own`);
+    check(reach.script === "refused", `A: ${title}'s view is refused a script that names a file (${reach.script})`);
+    check(reach.carried === "allowed" && reach.worker === "ran",
+      `A: ${title}'s view may show a font and a sound it carries, and run a worker (${reach.carried}, worker ${reach.worker})`);
+  }
+  check(overheard === 0, "and the server it tried to reach heard nothing");
+  check(strays.length === 0, `nor did the page's own, from a script, an import or a worker (${strays.join(" ") || "nothing"})`);
+  post.close();
+
+  //     nor does a view have this node link to whoever it names: a contact is made of a
+  //     peer the node already knows, and a key from nowhere is refused, saying so
+  const stranger = "ab".repeat(32);
+  await viewTitled(A, "chat-app v2", `window.parent.postMessage({ type: "contact", peer: "${stranger}" }, "*")`);
+  await waitFor("A: a view that asks for a contact the node has never met is refused, saying so", async () =>
+    /asked to make abababab a contact/.test(await page(A, text("shell-log"))));
+  check(!(await contactsOf(A)).includes(stranger) && (await contactsOf(A)).includes(keyB), "A: and its contacts are as they were");
+
 } catch (err) {
   failure = err;
 }

@@ -118,19 +118,23 @@ authenticated.
 bundle's signature and admits it under the shell's consent policy; it never signs anything
 itself. Dropping a newer `.skb` of
 an app you already have is how you upgrade it. Each installed app has a view of its own;
-**Open** on its row puts it in front.
+**Open** on its row puts it in front. A node holds eight bundles at once, and the shell's
+own take three of them (the transport and the two boot bundles), so five apps can be
+installed side by side.
 
 **Offers.** Peers hand each other bundles in an `OFFER` frame; the recipient
 re-verifies the original author's manifest signature. An Offer is installed on one
 click, so the recipient checks what the bundle asks for before showing that click, and
-the row says it: the protocols it **serves**, and what it **reaches**. A signature says
+the row says it: the protocols it **serves**, and what it **reaches** (see the [trust model](#trust-model)). A signature says
 who wrote a bundle, not what it may reach — the signed `guest.requires` list is where
 that is written down, host services and co-resident guests alike — and this shell grants
 an app at most the network (`_net`), a keyspace of its own (`fs`) and a wake (`timer`).
 A bundle reaching for anything else, such as the node's signing key or the sockets, is
 not installed (`appFacts` in `browser/app-api.js`). Consent names the whole bundle,
 guest and view included, so an update that changes only an app's behaviour is a new
-offer, and a consent to one bundle admits no other.
+offer, and a consent to one bundle admits no other. A peer has at most eight offers
+waiting here at once, and one that is not a bundle this shell runs is dropped as it
+arrives.
 
 **Rooms, contacts and the contact secret.** On the **Network** tab, **Connect** puts
 this node on the relay in the URL field, where its key can be called. That needs no room.
@@ -165,7 +169,9 @@ addressee.
 **Calls.** The call bar above the app on the **App** tab is the shell's, not the app's.
 **Start call** starts a call with the conversation open in the app: a room's linked
 members, or the one peer of a direct chat. With no app shown, or one that never says which
-conversation is open, a call is with every linked peer.
+conversation is open, a call is with every linked peer. Which conversation is open is the
+app's word, and it is your camera and microphone that go there, so the shell says who that
+is itself: with no call on, the call bar names who one started now would ring.
 
 Those peers are only told of the call. Each one's bar says who is calling, and offers
 **Accept call** and **Decline**; until it accepts, a peer receives nothing of the call
@@ -215,6 +221,59 @@ green once every link is direct.
 when both tabs are on this machine. Reaching the shell from another device needs HTTPS
 (and a relay URL that device can reach; `wss://` if the page is served over HTTPS).
 
+## Trust model
+
+**An app is trusted code, as a browser extension is.** Installing one is the decision, and
+the row on the Apps tab is the permission prompt: who wrote it, the protocols it **serves**
+and what it **reaches**, all read off its signed manifest. Dropping a file, or clicking
+install on an Offer, says you trust that author with what the row lists. The shell does not
+try to contain an app that misuses what it was granted; it keeps the row true, and it
+treats peers, who are not asked, as strangers.
+
+**What installing an app grants.** Its guest runs with the grants in `requires`:
+
+- `_net`, the network: it sends to any peer this node is linked to, as this node, under the
+  protocols it claims and no other, and receives the frames of those protocols.
+- `fs`, a keyspace of its own in the one storage backend the shell runs.
+- `timer`, one wake.
+
+Its view is part of the app and is granted nothing of its own. Every app is also told the
+context: this node's rooms (with the ids that join them), the linked peers, the contacts and
+each peer's nick.
+
+**What the shell enforces, so that the row is true:**
+
+- An app cannot reach the node's signing key or the sockets, and a bundle that asks is not
+  installed (`appFacts`, `browser/app-api.js`).
+- A consent names the whole bundle, guest and view, so an update that changes behaviour is a
+  new consent, and a bundle from a different author under an installed label asks first.
+- A view reaches nothing but its own guest: no request of any kind, no WebRTC, no frame it
+  can run script in (`browser/view-guard.js`). So an app that did not ask for `_net` has no
+  network through its view either. The doors a view has to the shell are held to what the
+  row already says: it may make a contact only of a peer the node knows, and the call bar
+  says who a call would ring, since the camera and microphone go there.
+- Each claim has one owner on a node, and the shell's own, `offer/v1` and `call/v1`, are
+  held by apps it pinned at boot. An app sends only under the protocol ids it claims, so it
+  cannot write another app's messages, or the shell's own, as you (seedkernel §12.10); an app
+  that needs a second id claims it.
+
+**What it does not defend against.** An app with `_net` can:
+
+- claim a protocol id before the app that would use it is installed, and receive what peers
+  send under it;
+- fill the shared storage or the send queue, and so starve every other app, or spend what
+  its CPU and memory budgets allow;
+- read every room, peer and nick in the context, and hand them to any peer it is linked to;
+- carry a display name that looks like another app's. The row also shows its id and the
+  start of its author's key.
+
+So install apps from authors you trust, as you would an extension, and remove one you no
+longer do. Removing an app drops its claims and stops it, and its stored keys stay under
+its label for whatever is installed there next. **Peers are strangers.** What a peer sends
+is attributed to the key the channel authenticated and is nothing more: the receiving guest
+decides what to draw, an offer is verified, bounded and installed only by a click, and a
+nick is a peer's own word.
+
 ## What's here
 
 | Path | What it is |
@@ -223,6 +282,7 @@ when both tabs are on this machine. Reaching the shell from another device needs
 | `browser/app-api.js` | The contract between the shell and any app, in one place: the contract version, what an app may reach, what the shell reads off a signed manifest (`appFacts`), the digest a consent names, and the two ops the shell calls on an app's guest. The shell gates and drives every bundle through it, and the builder refuses to sign what it would refuse. |
 | `browser/offers-app.js` | The offers app *shape*: the `offer/v1` id, the app id `offers`, its authority (`fs` for the offers that arrive, `_net` for the ones this node makes), and its guest source — a claim, a keyspace and a `send` op, no module. `scripts/build-boot-bundles.mjs` signs it into the boot bundle. |
 | `browser/calls-app.js` | The calls app *shape*: the `call/v1` id, the app id `calls`, its one reach (`_net`), and its guest source — a claim that hands a peer's call signal to the page, and a `send` op that puts the page's on the wire. What else two pages tell each other rides it too: `{ peer }`, that one added or removed the other as a peer, and `{ nick }`, what a peer calls itself. |
+| `browser/view-guard.js` | What holds a view to its sandbox: `guardView` makes the page a view is loaded as, the author's own with a Content Security Policy in front that lets it make no request, and a prelude, the one script that policy lets the parser run, which takes WebRTC out of the realm and then runs the view's scripts. See [The view](#3-the-view-uihtml). |
 | `browser/media-rtc.js` | The call feature: `MediaCalls`, one `RTCPeerConnection` per peer that the page owns, beside the transport's, with perfect negotiation signaled over `call/v1`. A node in a call tells its peers so (`{ call }`), and a connection is opened only between two that have each said they are in the same one. Live media is the page's own — the host holds only the transport's connections. |
 | `assembly/chat-app/` | Chat — text and images, in several rooms and in direct chats. `app.json` says what the bundle is, `guest.js` is its guest, which holds the chat wire vocabulary and decides who each frame is for, `index.ts` is its module, the one transform that draws a frame, and `ui.html` its view, with the view's CSS and JS in files of their own (`ui.css`, `ui.js`) beside the page. |
 | `assembly/jam-app/` | Jam: a room's chat, emoji reactions, and a playlist kept and played together. Its guest is the room pipe, to which `guest.js` adds a name for each block of audio, its hash. Its view (`ui.html`, `ui.css`, `ui.js`) holds the room's state and plays it, `formats.js` finds where a FLAC or Ogg Vorbis file may be cut, and there is no module. See [The jam app](#the-jam-app). |
@@ -236,7 +296,7 @@ when both tabs are on this machine. Reaching the shell from another device needs
 | `scripts/build-boot-bundles.mjs` | Signs the offers and calls apps' guest-only bundles under the same key, each with its own freshness mark in `<name>-author.version`. |
 | `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/`, plus the browser libsodium and the QuickJS realm engine. Refuses a stale seedkernel build. |
 | `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat app and the shell's two ops, replaces it in place with a later build, round-trips an offer through the offers app and a call signal through the calls app, carries a frame and a block of audio through jam's guest, and a cast and a tell through the room pipe with no guest behind it. |
-| `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, an offer, messages, an app replaced in place by a bundle dropped over it, a direct message, a call that reaches its peer only once accepted, with a microphone muted and a camera turned off and on again, and one turned down, removing an app, and a reload. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. The FLAC file it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
+| `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, an offer, messages, an app replaced in place by a bundle dropped over it, a direct message, a call that reaches its peer only once accepted, with a microphone muted and a camera turned off and on again, and one turned down, removing an app, and a reload. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. Then what a view may not do: each app's view tries a request, a socket, a peer connection and a script in a frame of its own, against a server that must hear nothing, then a script that names a file on the page's own server, and asks for a contact the node has never met. The FLAC file it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
 | `scripts/clean.mjs` | Deletes `build/` and `browser/vendor/` when a rebuild isn't taking. |
 
 What the shell reads of an app — its name, version, description and view — rides in the
@@ -333,7 +393,7 @@ One file beside the app's sources. Every path in it is relative to it.
 | `app` | The label the app installs under, `[A-Za-z0-9_-]{1,64}`. A node holds one app per label, and the label is also its storage and signing scope. A bundle under a label already installed upgrades or replaces that app (see [Protocol interop](#protocol-interop)). |
 | `api` | The version of the shell contract the app was built for. The shell refuses any other by name, so a bundle from before a contract change is never installed and left silent. |
 | `name`, `version`, `description` | What the app's row in the shell says. |
-| `protocols` | The protocol ids the app claims. A peer's frame under one of them reaches its guest. The builder tells the guest them too, as `APP.protocols`, since a guest is handed its config and not its manifest's claims. |
+| `protocols` | The protocol ids the app claims. A peer's frame under one of them reaches its guest, and they are the only ids its guest may send under. The builder tells the guest them too, as `APP.protocols`, since a guest is handed its config and not its manifest's claims. |
 | `requires` | Everything its guest reaches: `_net` (the network), `fs` (a keyspace of its own), `timer` (one wake). The shell grants nothing else, and the consent row shows the list. |
 | `guest` | The guest's source files, joined in order behind seedkernel's op-frame. A library two apps share is one more path, and the three in `assembly/guest-lib/` are a guest by themselves. |
 | `ui` | The view, an HTML page, with any stylesheets and scripts it names. Left out for an app with nothing to show. |
@@ -425,7 +485,40 @@ beside its own.
 The shell loads it into an iframe sandboxed `allow-scripts allow-forms
 allow-downloads` from a `blob:` URL, so it has no access to the page's keys. A view may
 hand the user a file it has put together, as a link to a blob of its own, which is how
-jam saves a track; it reads and writes nothing on disk. The same opaque
+jam saves a track; it reads and writes nothing on disk.
+
+A view reaches nothing but its guest. What an app reaches is what its guest reaches, which
+is on its consent row; a view is granted nothing, and the shell holds it to that
+(`browser/view-guard.js`). The page loaded is the author's with two things put in front:
+
+- **A Content Security Policy of its own**, `default-src 'none'` and little given back.
+  No request leaves a view: no `fetch`, no WebSocket, no image, stylesheet or font from
+  anywhere, no form sent, no script that names a file. What it shows is its own inline
+  styles, images and media it holds as `data:` or `blob:`, and fonts as `data:`. It may
+  run WASM, and a worker made from a blob.
+- **A prelude**, the one script the policy lets the parser run. It takes
+  `RTCPeerConnection` out of the page, since a peer connection asks whatever server its
+  script names and no policy governs that, and then runs the view's own scripts, where
+  they stood and in order.
+
+So a view is written with these in mind:
+
+- Its scripts run as the page is parsed, as written, but they are run by the prelude and
+  not the parser. An **inline handler** (`onclick="…"`) and a `javascript:` URL are the
+  parser's and do not run: listen with `addEventListener`. A script the view makes itself
+  (`document.createElement("script")`) runs if it carries its code; one that names a file
+  loads nothing, and nor does `import()` or a worker's `importScripts`.
+- There is **no WebRTC** in a view, and no frame it makes gets one: a frame inherits the
+  policy, so nothing runs in it but the same prelude.
+- Nothing outside the bundle can be loaded, a font or a script from a CDN included. What
+  a view needs travels in it.
+
+One thing is left that no policy stops: a `<link rel="preconnect">` or `dns-prefetch` opens
+a connection to, or looks up, a name of the view's choosing. Nothing is sent on it but the
+name, and the name is the view's to choose: so a view can tell a server it names a little
+at a time, and hears nothing back.
+
+The same opaque
 origin is refused the camera and microphone, which is why a call is the shell's. Nor will a
 media element there load a `blob:` URL: in Chromium an `<audio>` given one stalls without
 an error, so a view that plays audio decodes it with Web Audio, as jam's does. Each
@@ -439,7 +532,7 @@ shell only via `postMessage`:
 | shell → view | `{ type: "answer", id, payload: Uint8Array }` | What the guest answered that call, which may be nothing. Every call is answered: one whose guest failed gets `{ type: "answer", id, error: string }` instead. |
 | shell → view | `{ type: "render", payload: Uint8Array }` | Render bytes the app's guest answered: to a peer's frame, or to the context. The format is the app's. |
 | view → shell | `{ type: "conv", room?: hex, to?: hex }` | The conversation now open, a room or one peer, or neither for none. A call started from the shell is with it; an app that never says calls every linked peer. |
-| view → shell | `{ type: "contact", peer: hex }` | Make a peer a contact, so the link to it outlives any shared room. |
+| view → shell | `{ type: "contact", peer: hex }` | Make a peer a contact, so the link to it outlives any shared room. Only of a peer the node shares a room with or is linked to, which are the ones a view is told of: a key from anywhere else is refused, and is the user's to add on the Network tab. |
 
 So a view learns of rooms, peers and nicks from its own guest, as a render, and the two
 never hold different pictures.
@@ -678,8 +771,9 @@ Plus two on the guest side. The chat module defines its two memory-layout
 literals — `PK_LEN = 32` and `PRIV_USER_OFF = 0` — alongside its layout
 comments (§4, `assembly/chat-app/index.ts`). And guest source spells the
 transport's `send` and `peers` ops and its service name `_net` by hand
-(`assembly/guest-lib/net.js`), since a guest imports nothing; the smoke test runs
-them against the shipped transport.
+(`assembly/guest-lib/net.js`), since a guest imports nothing; seedkernel's host reads the
+protocol a `send` names as the transport reads it (§12.10), and the smoke test runs the
+guest's ops against the shipped transport.
 
 Three properties serve as the summary; the details live in the seedkernel docs:
 
@@ -702,8 +796,8 @@ Three properties serve as the summary; the details live in the seedkernel docs:
   signed bundle for an app that does not exist yet, so something already
   installed at boot owns the name and `admit` allows exactly the author and app
   the page was built with — a pin, not a consent prompt. The calls app, which carries
-  a call's signaling, is pinned the same way. The shell's own consent gate
-  is everything else.
+  a call's signaling, is pinned the same way. The shell's own
+  consent gate is everything else.
 - **Both directions cross an app's guest.** The host has no send and no receive:
   an inbound frame reaches the shell as the link occupant's own delivery return,
   and an outbound frame leaves by an app *calling* `_net`. The render bytes an
@@ -716,10 +810,12 @@ Three properties serve as the summary; the details live in the seedkernel docs:
   are the transport guest's and the adapter knows only sockets.
 
 The browser JS entry points are declared in exactly two places: the imports at the top of
-`shell.js`, and the inline import map in `shell.html`. The CSP allows
+`shell.js`, and the inline import map in `shell.html`. The page's CSP allows
 inline scripts (`'unsafe-inline'`) because app UIs run in a sandboxed `blob:`
-iframe that inherits this page's policy — the iframe sandbox is the actual
-boundary. Nothing else in this repo reaches into `node_modules`. If a seedkernel
+iframe that inherits this page's policy. The iframe sandbox is what keeps a view from the
+page, and the policy each view is loaded under (`browser/view-guard.js`) what keeps it
+from the network: the page's own has to let the page reach any relay, so it holds a view
+to nothing. Nothing else in this repo reaches into `node_modules`. If a seedkernel
 change breaks the shell, it broke a public export — which is the point of the shell
 living out here.
 
@@ -747,6 +843,10 @@ living out here.
 - **The relay reads as unreachable, but it is running.** It may be private: a relay
   started with `--secret` drops a client without its secret, or with another one.
   Enter the relay's secret in the **Relay secret** field.
+- **A button in an app's view does nothing, or a font or image is missing.** A view runs
+  under a policy that lets it reach nothing (see [The view](#3-the-view-uihtml)). An inline
+  handler (`onclick="…"`) does not run, so listen with `addEventListener`; and nothing
+  loads from outside the bundle, so a view carries what it shows.
 - **Jam shows what is playing, with no sound.** Press **Tune in**: listening is each
   node's own choice, and a browser lets a page make sound only after a click in it.
 - **Jam says `Not connected to a room`, or `Nobody else is connected here yet`.** Music is
@@ -761,3 +861,9 @@ living out here.
   bundle failed verification ("not a valid app bundle"), or it is not an app this shell
   runs (`appFacts` in `browser/app-api.js`): its manifest has no `shell` entry, it was
   built for another contract version, or it reaches something the shell grants no app.
+- **An install fails with `this node already holds its 8 app slots`.** A node holds eight
+  bundles, and the transport, offers and calls are three of them. Remove an app
+  to install another.
+- **An app's message never leaves, and Diagnostics says it `does not claim` a protocol.**
+  An app sends only under the protocols in its own `protocols`. Add the one it sends under
+  there, which also makes it the app that receives it on this node.

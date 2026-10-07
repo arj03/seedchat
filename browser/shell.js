@@ -30,6 +30,8 @@ import { MediaCalls } from "./media-rtc.js";
 // reach, and the two ops it calls on an app's guest. Nothing in it, or in this file, knows
 // what any one app does.
 import { APP_GRANTS, APP_OP_CONTEXT, APP_OP_UI, NET_PROTO, appFacts, bundleDigest, contextJson } from "./app-api.js";
+// What keeps a view off the network: the page an app's view is loaded as.
+import { guardView } from "./view-guard.js";
 // The offers app: a second boot bundle, loaded right below alongside the transport —
 // see "boot the offers app" further down for why a bundle rather than a page-held name.
 import { OFFERS_KEY_PREFIX, OFFERS_OP_SEND } from "./offers-app.js";
@@ -124,11 +126,16 @@ aboutBtn.addEventListener("click", () => {
   aboutPanel.hidden = !aboutPanel.classList.contains("open");
 });
 
+/** The most lines Diagnostics keeps. A view whose calls fail and a peer whose frames are
+ *  refused each print one, and neither should be able to make this page grow without end. */
+const MAX_LOG_LINES = 500;
+
 function shellPrint(text, cls) {
   const line = document.createElement("div");
   if (cls) line.className = cls;
   line.textContent = text;
   shellLog.appendChild(line);
+  while (shellLog.childElementCount > MAX_LOG_LINES) shellLog.firstElementChild.remove();
   shellLog.scrollTop = shellLog.scrollHeight;
 }
 
@@ -694,6 +701,11 @@ function postContext() {
 // until it is removed or replaced. The app shown is the one whose frame is in front; one
 // that is not still hears from its guest, so its view is current when it is opened.
 //
+// The sandbox keeps a view from this page, and `guardView` (view-guard.js) keeps it from
+// the network: the page loaded is the author's with a policy of its own in front, under
+// which it makes no request and has no WebRTC. So what a view is shown goes nowhere but
+// back through its guest, which reaches what the app's consent row said.
+//
 // allow-forms lets a view use a normal <form> element for its input. A view still
 // preventDefault()s in its submit handler so no actual navigation happens; the null
 // sandbox origin contains anything the form could attempt regardless.
@@ -711,7 +723,7 @@ function mountView(rec) {
   frame.className = "app-frame hidden";
   frame.setAttribute("sandbox", "allow-scripts allow-forms allow-downloads");
   frame.title = `${rec.name} UI`;
-  rec.blobUrl = URL.createObjectURL(new Blob([rec.ui], { type: "text/html" }));
+  rec.blobUrl = URL.createObjectURL(new Blob([guardView(rec.ui)], { type: "text/html;charset=utf-8" }));
   frame.src = rec.blobUrl;
   appPanel.insertBefore(frame, diagnostics);
   rec.frame = frame;
@@ -945,11 +957,22 @@ function showNoApp() {
 // dismissing an offer can delete it with no second derivation.
 const pendingOffers = new Map();   // recordKey → { bundleBytes, peeked, fromPkHex }
 
+/** The most offers one peer has waiting here. The offers app keeps whatever arrives under
+ *  `offer/v1` before anything has read it, in a store every app on this node shares, and an
+ *  offer costs a peer one frame: so what is waiting is bounded here, where it is read. */
+const MAX_OFFERS_PER_PEER = 8;
+
 async function handleOffer(bundleBytes, fromPkHex, recordKey) {
+  // An offer that will never be shown is never accepted or dismissed either, which is what
+  // deletes a record: so its record goes now.
+  const drop = (why) => {
+    shellPrint(`Offer from ${fromPkHex.slice(0, 8)} dropped: ${why}`, "err");
+    offersApp.fs.delete(recordKey).catch(() => {});
+  };
   let peeked;
   try { peeked = peekBundle(bundleBytes); }
   catch (err) {
-    shellPrint(`Offer from ${fromPkHex.slice(0, 8)} dropped: ${err.message}`, "err");
+    drop(err.message);
     return;
   }
 
@@ -964,6 +987,10 @@ async function handleOffer(bundleBytes, fromPkHex, recordKey) {
     if (rec.hash === peeked.hash) return;
   }
   if (pendingOffers.has(recordKey)) return;
+  if ([...pendingOffers.values()].filter((o) => o.fromPkHex === fromPkHex).length >= MAX_OFFERS_PER_PEER) {
+    drop(`it has ${MAX_OFFERS_PER_PEER} waiting here already`);
+    return;
+  }
   pendingOffers.set(recordKey, { bundleBytes: bundleBytes.slice(), peeked, fromPkHex });
   renderOfferList();
   if (!tabs.apps.btn.classList.contains("active")) tabs.apps.btn.classList.add("unread");
@@ -1272,13 +1299,29 @@ window.addEventListener("message", (ev) => {
   // with it (`callPeers`).
   if (msg.type === "conv") {
     rec.conv = isHex32(msg.room) ? { room: msg.room } : isHex32(msg.to) ? { to: msg.to } : null;
+    // The call bar names who a call would ring, which just changed.
+    updateCallStatus();
     return;
   }
 
   // Make a peer a contact, so the link to it outlives any shared room: what a view asks
-  // before it writes to one peer directly.
+  // before it writes to one peer directly. Only of a peer this node already knows, one it
+  // shares a room with or is linked to, which are the peers a view is told of. A contact is
+  // a key this node calls, wherever it is, and is told so; so a view that could name any
+  // key could have this node link to one its user never met, and its guest then write to
+  // it. A key from anywhere else is added by the user, on the Network tab.
   if (msg.type === "contact") {
-    if (isHex32(msg.peer) && !contacts.has(msg.peer)) addContact(msg.peer, null);
+    if (!isHex32(msg.peer) || contacts.has(msg.peer) || msg.peer === myPkHex) return;
+    if (!linkedNow.includes(msg.peer) && roomsOf(msg.peer).length === 0) {
+      // Said once for a key asked again and again, as chat asks ahead of every direct message.
+      if (rec.refusedContact !== msg.peer) {
+        shellPrint(`${rec.name} asked to make ${msg.peer.slice(0, 8)} a contact, which is not a peer this node ` +
+          "shares a room with or is linked to. Add it on the Network tab to link to it.", "err");
+      }
+      rec.refusedContact = msg.peer;
+      return;
+    }
+    addContact(msg.peer, null);
   }
 });
 
@@ -1637,14 +1680,32 @@ const remoteTiles = new Map(); // pkHex -> { wrap, video, stream }
 // and undefined for an app that never says, or with no app shown.
 let callScope;
 
-/** Who of the linked peers the call in progress is with: a room's members, or one peer.
- *  A call from an app that never says which conversation is open is with everyone linked. */
-function callPeers(linked) {
-  if (callScope === undefined) return linked;
-  if (callScope === null) return [];
-  if (callScope.to) return linked.filter((p) => p === callScope.to);
-  const members = membersOfRoom(callScope.room);
+/** Who of the linked peers a call with `scope` is with: a room's members, or one peer. A
+ *  call from an app that never says which conversation is open is with everyone linked. */
+function peersIn(scope, linked) {
+  if (scope === undefined) return linked;
+  if (scope === null) return [];
+  if (scope.to) return linked.filter((p) => p === scope.to);
+  const members = membersOfRoom(scope.room);
   return linked.filter((p) => members.has(p));
+}
+
+/** Who of the linked peers the call in progress is with. */
+const callPeers = (linked) => peersIn(callScope, linked);
+
+/** Who a call with `scope` rings, in the shell's own words. Which conversation is open is
+ *  the view's word (`conv`), and it is the user's camera and microphone that go there: so
+ *  the call bar says who that is, and the user need not take it from the view as well. */
+function callTarget(scope) {
+  const n = peersIn(scope, linkedNow).length;
+  if (scope === undefined) {
+    return n === 0 ? "nobody, since no peer is linked" : n === 1 ? "the 1 linked peer" : `all ${n} linked peers`;
+  }
+  if (scope === null) return "nobody, since no conversation is open in the app";
+  if (scope.to) return n > 0 ? peerLabel(scope.to) : `${peerLabel(scope.to)}, who is not linked`;
+  const room = [...joinedRooms].find(([, r]) => r.id === scope.room)?.[0];
+  if (!room) return "nobody, since this node is not in that room";
+  return n === 0 ? `nobody, since no one in ${friendlyRoom(room)} is linked` : `the ${n} linked in ${friendlyRoom(room)}`;
 }
 
 /** What both ends of a call with `scope` name it by: a room's id, "direct" for a call with
@@ -1696,7 +1757,8 @@ function updateCallStatus() {
     callStatus.textContent = `${peerLabel(first)}${more.length > 0 ? ` and ${more.length} more are` : " is"} calling` +
       (room ? ` in ${friendlyRoom(room)}` : "");
   } else if (!localStream) {
-    callStatus.textContent = "idle";
+    // Who a call started now would ring, beside the button that starts it.
+    callStatus.textContent = `a call rings ${callTarget(installedApps.get(activeAppKey)?.conv)}`;
   } else {
     const n = media.size;
     callStatus.textContent = n === 0
@@ -1796,7 +1858,7 @@ function startCall() {
   ensureLocalTile();
   showCapture();
   updateCallStatus();
-  shellPrint(ring ? "Call accepted." : "Call started.", "sys");
+  shellPrint(ring ? "Call accepted." : `Call started with ${callTarget(callScope)}.`, "sys");
   void capture({ audio: true, video: true });
 }
 

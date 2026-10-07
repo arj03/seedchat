@@ -240,8 +240,6 @@ const CONTACT = new Uint8Array(32).fill(7); // each node's contact secret, which
 // a frame the guest did not draw.
 const renders = [];
 const onChatInbound = (claim, from, answer) => { if (answer.length > 0) renders.push(new Uint8Array(answer)); };
-// A's handle into a second app beside chat (3b), which plays a misbehaving peer in 5c.
-let rogueApp = null;
 
 // The adapter is bootShell's, exactly as shell.js gets it: the factory exists first
 // and is passed as `transport.channels`; boot installs the selected transport and registers
@@ -351,25 +349,19 @@ try {
 //     their guest are two bundles: a consent to one admits no other, which is what lets a
 //     guest carry an app's behaviour.
 try {
-  const prelude = guestOpFraming() + readFileSync(resolve(here, "../assembly/guest-lib/net.js"), "utf8");
-  // A guest-only app beside chat, serving nothing: its `send` op puts any frame on the
-  // wire under the chat protocol, which the checks below use to play a peer that does not
-  // keep to the chat guest's rules.
+  // A guest-only app that reaches and serves nothing, which the consent below is for.
   const rogue = (extra) => authorBundle(sodium, authorA, {
-    app: "rogue", version: 1, modules: [], guestRequires: [NET_PROTO],
+    app: "rogue", version: 1, modules: [], guestRequires: [],
     guestConfig: { shell: { api: APP_API, name: "Rogue" } },
-    guestSource: `${prelude}
-async function handle(arg) {
-  const { args: p } = readOp(callerOf(arg).body);
-  return await netSend(p.subarray(0, 32), ${JSON.stringify(CHAT_PROTO)}, p.subarray(32));
-}${extra}`,
+    guestSource: `${guestOpFraming()}
+async function handle() { return new Uint8Array(0); }${extra}`,
   }).blob;
   const [one, other] = [rogue(""), rogue("\n// the same app, with one more line of guest")];
   consent(one);
   let admitted = true;
   try { await A.install(other); } catch { admitted = false; }
   assert(!admitted, "a consent to one guest must not admit another");
-  rogueApp = await A.install(one);
+  await A.install(one);
   ok("a consent names the whole bundle: a different guest is a different bundle");
 } catch (err) { fail("consent names the whole bundle", err); }
 
@@ -484,9 +476,10 @@ try {
     "a direct message reaches its addressee");
   ok("chat draws room images and direct messages");
 
-  // What B's guest draws is its own decision, not the sender's. The rogue app on A plays a
-  // peer that sends what an honest chat guest never would.
-  const asPeer = (frame) => rogueApp.invoke(writeOp("send", concat(fromHex(peerB), frame)));
+  // What B's guest draws is its own decision, not the sender's. A node that is not this
+  // shell sends what an honest chat guest never would: the host's own door to the transport,
+  // which no app's claims hold, plays that peer.
+  const asPeer = (frame) => A.call(NET_PROTO, new OpArgs("send").u8(1).blob(fromHex(peerB)).blob(utf8(CHAT_PROTO)).blob(frame).build());
   await chatAppB.invoke(writeOp(APP_OP_CONTEXT, contextOf(peerB, [roomWith(ROOM)], [peerA]))); // A no longer in the room
   await asPeer(roomFrame(0x05, ROOM, "from outside the room"));
   await asPeer(concat([0x03], fromHex(peerA), utf8("addressed to someone else")));
@@ -682,6 +675,77 @@ try {
   assert(refused(manifest({ config: { shell: { api: APP_API + 1 } } })), "an app built for another contract version is refused by name");
   ok("the install gate admits any app within the shell's grants and its contract version");
 } catch (err) { fail("install gate", err); }
+
+// 9b. what an app may send under. The transport sends under whatever protocol it is handed,
+//     and the protocol is what decides which app at the far end a frame is for, so an app
+//     that could name any protocol could write as any other app on its node, and as the
+//     page. The kernel holds each app's `send` to the protocol ids its own manifest claims
+//     (seedkernel §12.10). This app sends under whichever protocol it is told to.
+try {
+  const lib = (name) => readFileSync(resolve(here, "../assembly/guest-lib", name), "utf8").replace(/\r\n/g, "\n");
+  const OWN_PROTO = "gated/smoke", NEXT_PROTO = "gated/next";
+  // Its `send` op is `[to 32][n u8][protocol][payload]`; `raw` hands the transport the bytes
+  // as they are, for asking it something no app should; a peer's frame is answered as it came.
+  const gatedSource = (protocols, version) => authorBundle(sodium, authorA, {
+    app: "gated", version, protocols, modules: [], guestRequires: [NET_PROTO],
+    guestConfig: { shell: { api: APP_API, name: "Gated" } },
+    guestSource: `${guestOpFraming()}\n${lib("net.js")}
+async function handle(arg) {
+  const { fromHost, body } = callerOf(arg);
+  if (!fromHost) return body;
+  const { op, args: p } = readOp(body);
+  if (op === "raw") return await host.call(NET, p);
+  let proto = "";
+  for (let i = 0; i < p[32]; i++) proto += String.fromCharCode(p[33 + i]);
+  return await netSend(p.subarray(0, 32), proto, p.subarray(33 + p[32]));
+}`,
+  });
+  const gated = gatedSource([OWN_PROTO], 1);
+  const arrived = [];
+  consent(gated.blob);
+  const gatedA = await A.install(gated.blob);
+  consent(gated.blob);
+  await B.install(gated.blob, { onInbound: (claim, from, answer) => arrived.push({ claim, from: toHex(from), body: text(answer) }) });
+  const sendUnder = (app, proto, payload) =>
+    app.invoke(writeOp("send", concat(identityB.publicKey, [proto.length], utf8(proto), utf8(payload))));
+  const refusal = async (attempt) => { try { await attempt; return ""; } catch (err) { return err.message; } };
+
+  await sendUnder(gatedA, OWN_PROTO, "under my own");
+  await until(() => arrived.length > 0, 4000, "the gated app's own frame");
+  assert(arrived[0].claim === OWN_PROTO && arrived[0].from === peerA && arrived[0].body === "under my own",
+    "an app's send under the protocol it claims goes through, as this node's");
+
+  // Under another app's protocol, and under the page's own two. Nothing of them leaves A.
+  renders.length = 0;
+  for (const proto of [CHAT_PROTO, CALL_PROTO, OFFER_PROTO, "nobody/claims-this"]) {
+    const why = await refusal(sendUnder(gatedA, proto, "as someone else"));
+    assert(why.includes(`does not claim ${JSON.stringify(proto)}`), `a send under "${proto}" must be refused by name (got: ${why || "no refusal"})`);
+  }
+  // What the transport answers the HOST is not an app's to ask, which it refuses by itself.
+  for (const body of [new OpArgs("contact").blob(new Uint8Array(0)).build(), new OpArgs("addr").blob(identityB.publicKey).blob(new Uint8Array(32)).text("").build()]) {
+    assert(/is the host's, not an app's/.test(await refusal(gatedA.invoke(writeOp("raw", body)))), "an app asks the transport for a send or the peers, and nothing else");
+  }
+  // The peers, which every cast asks for, are passed on as they are.
+  const peersSeen = await gatedA.invoke(writeOp("raw", writeOp("peers", new Uint8Array(0))));
+  assert(toHex(peersSeen).includes(peerB), "the linked peers are an app's to ask");
+  // A send that does not lie within its bytes is refused before the transport sees it.
+  assert(/malformed send/.test(await refusal(gatedA.invoke(writeOp("raw", writeOp("send", Uint8Array.of(1, 0, 0, 0, 32)))))),
+    "a send cut short is refused");
+  await sendUnder(gatedA, OWN_PROTO, "still mine");
+  await until(() => arrived.length > 1, 4000, "the gated app's second frame");
+  assert(arrived.length === 2 && arrived[1].body === "still mine" && renders.length === 0,
+    "only what it sent under its own protocol reached B, and B's chat drew nothing");
+
+  // A later build that claims another protocol is held to that one at once: the claims are
+  // the slot's own, so nothing is left to be told, and nothing of the old build's remains.
+  const next = gatedSource([NEXT_PROTO], 2);
+  consent(next.blob);
+  const nextA = await A.install(next.blob, { replaces: "gated" });
+  assert(/does not claim "gated\/smoke"/.test(await refusal(sendUnder(nextA, OWN_PROTO, "the old claim"))),
+    "a replacement is refused the protocol its predecessor claimed");
+  assert(await refusal(sendUnder(nextA, NEXT_PROTO, "the new claim")) === "", "and sends under the one it claims");
+  ok("an app is held to the protocols it claims: nothing leaves under another app's, or the page's");
+} catch (err) { fail("sends held to claims", err); }
 
 // 10. the two transport ops the page's rooms and contacts rest on: `welcome` names the
 //    room-mates, whose calls need no contact secret, and `forget` drops one peer and its
