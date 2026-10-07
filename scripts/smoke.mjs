@@ -164,8 +164,8 @@ const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 
 /** The peers a node holds an authenticated link to. Asked of the transport GUEST, through
  *  the host's own door into a co-resident `services` claim (`Shell.call`, seedkernel
- *  §12.10) — the same call seedkernel's CLI makes for a cohort, and the same one
- *  shell.js's `linkedPeers` makes for its peer pill. The driver answers nothing
+ *  §12.10) — the same call seedkernel's CLI makes for a cohort, and the door shell.js's
+ *  own ops go through (`netOp`). The driver answers nothing
  *  peer-shaped: links are the guest's, so this is a round trip through its realm.
  *  `null` is "nothing claims that id" — a node with no transport standing. */
 async function peersOf(shell) {

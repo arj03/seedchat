@@ -804,6 +804,20 @@ try {
     /removed you as a peer/.test(await page(B, text("shell-log"))));
   check(!(await contactsOf(A)).includes(keyB) && !(await contactsOf(B)).includes(keyA), "neither lists the other as its peer");
 
+  // 25. a peer that has left a room is not called again. B joins A's room and the two link,
+  //     the smaller key calling. The other one leaves. Then the one that stayed looks for
+  //     a peer that is not there, which has it call whoever it still wants a link to: the
+  //     peer that left is not one of those.
+  await page(B, `document.getElementById('relay-room').value = 'e2e'; ${click("join-room")}`);
+  await waitFor("the two link again as room-mates", async () =>
+    (await peerPill(A)).startsWith("1 peer") && (await peerPill(B)).startsWith("1 peer"));
+  const [stays, leaves] = keyA < keyB ? [A, B] : [B, A];
+  await page(leaves, clickButton("room-list", "Leave"));
+  await waitFor(`${stays.name}: the peer that left the room is gone`, async () => (await peerPill(stays)).startsWith("0 peers"));
+  await page(stays, `document.getElementById('add-contact').value = '${"cd".repeat(32)}'; ${click("add-contact-btn")}`);
+  await sleep(2000);
+  check((await peerPill(stays)).startsWith("0 peers"), `${stays.name}: looking for a peer that is not there does not call the one that left`);
+
 } catch (err) {
   failure = err;
 }

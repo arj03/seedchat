@@ -806,8 +806,8 @@ Three properties serve as the summary; the details live in the seedkernel docs:
   the load's own `onInbound` (§12.10) — no second claim, no host-side tap. The
   page sends nothing through an app's guest: its own frames, an Offer, what it tells a
   peer's page and a call's signals, leave through the offers and shell apps it pinned.
-  The page's own
-  questions go the same way: "who is linked" is a
+  What the page tells the transport goes the same way: the relay to register on, or a
+  peer's address, is a
   call on `_net` through `Shell.call`, not a field on the adapter, because links
   are the transport guest's and the adapter knows only sockets. And the transport tells
   the page its relay's state, who is linked, and whether directly, each time any of it

@@ -10,7 +10,7 @@ import sodium from "seedkernel-wasm/libsodium";
 // who may be the network is the assembly's, so nobody can lose it by forgetting it.
 import { bootShell } from "seedkernel-wasm/shell-core";
 // `writeOp` frames an app's own local op; `OpArgs` writes the transport bundle's op
-// arguments, which is what the host's own door into the network takes (see linkedPeers).
+// arguments, which is what the host's own door into the network takes (see `netOp`).
 import { writeOp, OpArgs } from "seedkernel-wasm/op-frame";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { verifyBundle, genesisHash } from "seedkernel-wasm/bundle";
@@ -471,30 +471,18 @@ function setRelayPill(state, label) {
   relayPillText.textContent = label;
 }
 
-// The linked set is the TRANSPORT GUEST's answer: links are its own, so asking costs a
-// round trip through its realm and this is async. The page asks through `shell.call` — the
-// host's door into a co-resident guest's `services` claim (seedkernel §12.10), the same one
-// seedkernel's CLI uses for a cohort — and composes the op with seedkernel's own `OpArgs`,
-// so the argument writer and the transport's reader move in one artifact. `null` is "nothing
-// claims that id": a node with no transport standing, which is no peers rather than an
-// error, exactly like a rejection from a realm that is going down.
-async function linkedPeers() {
-  const answer = shell.call(NET_PROTO, new OpArgs("peers").build());
-  if (!answer) return [];
-  try {
-    const bytes = await answer;
-    const out = [];
-    for (let off = 0; off + 32 <= bytes.length; off += 32) out.push(bytesToHex(bytes.subarray(off, off + 32)));
-    return out;
-  }
-  catch { return []; }
-}
-
-// The relay's state, who is linked and how each is reached are the transport's to say as
-// well, and it says so each time any of it changes (bootShell's `onStatus`): one byte for the
-// relay (`showRelay`), then `[key 32][direct u8]` for each linked peer, 1 once the peer's
-// link has moved off the relay to WebRTC and 0 while the relay still forwards it (seedkernel
-// §12.7). So the page hears of a change as it happens, and polls nothing.
+// Links are the TRANSPORT GUEST's own. What the page tells it, a relay to register on or a
+// peer's address, goes through `shell.call` — the host's door into a co-resident guest's
+// `services` claim (seedkernel §12.10), the same one seedkernel's CLI uses for a cohort —
+// composed with seedkernel's own `OpArgs`, so the argument writer and the transport's reader
+// move in one artifact. `null` there is "nothing claims that id": a node with no transport
+// standing.
+//
+// What the transport tells the page comes the other way (bootShell's `onStatus`): the
+// relay's state, who is linked and how each is reached, each time any of it changes. One
+// byte for the relay (`showRelay`), then `[key 32][direct u8]` for each linked peer, 1 once
+// the peer's link has moved off the relay to WebRTC and 0 while the relay still forwards it
+// (seedkernel §12.7). So the page hears of a change as it happens, and asks nothing.
 function onStatus(status) {
   relayNow = status[0];
   showRelay();
@@ -1065,7 +1053,7 @@ function dismissOffer(recordKey) {
 async function offerApp(key) {
   const rec = installedApps.get(key);
   if (!rec) return;
-  const linked = await linkedPeers();
+  const linked = linkedNow;
   for (const peerId of linked) {
     const arg = new Uint8Array(32 + rec.bundleBytes.length);
     arg.set(hexToBytes(peerId), 0);
@@ -1537,7 +1525,7 @@ const peerNotice = (added) => new TextEncoder().encode(JSON.stringify({ peer: ad
 async function tellRemoved(key, before) {
   let told = false;
   try {
-    if ((await linkedPeers()).includes(key)) {
+    if (linkedNow.includes(key)) {
       await tellPage(key, peerNotice(false));
       told = true;
     }
@@ -1584,7 +1572,12 @@ function syncPeers() {
   for (const r of joinedRooms.values()) for (const key of r.members) mates.add(key);
   void netOp(new OpArgs("welcome").blob(hexToBytes([...mates].join(""))));
   const want = new Set([...mates, ...contacts.keys()]);
-  for (const key of [...wanted.keys()]) if (!want.has(key)) wanted.delete(key);
+  for (const key of [...wanted.keys()]) {
+    if (want.has(key)) continue;
+    wanted.delete(key);
+    // No longer wanted, so no longer called: the transport is taught it has no destination.
+    teachPeer(key);
+  }
   for (const key of want) {
     if (!wanted.has(key)) wanted.set(key, { since: performance.now(), silent: false, late: false });
     teachPeer(key);
