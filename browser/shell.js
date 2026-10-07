@@ -185,7 +185,7 @@ const joinedRooms = new Map();
 // Everyone this page wants a link to, by key in hex: its room-mates and its contacts, each
 // with how the call to it stands (`calls`, further down).
 const wanted = new Map();
-// The linked peers as the transport last told them (`onPeers`): each with how it is reached,
+// The linked peers as the transport last told them (`onStatus`): each with how it is reached,
 // `{ id, direct }`, and the same peers by key in hex, which is what the apps are told is
 // linked (`postContext`).
 let routesNow = [];
@@ -300,7 +300,7 @@ const booted = await bootShell({
   // link drops (`followPeers`).
   transport: {
     channels: net,
-    onPeers,
+    onStatus,
     config: { linkIdleTimeoutMs: 0, ...(myContactSecret ? { contactSecret: bytesToHex(myContactSecret) } : {}) },
   },
   admit(v) {
@@ -490,14 +490,17 @@ async function linkedPeers() {
   catch { return []; }
 }
 
-// Who is linked, and how each is reached, is the transport's to say as well, and it says so
-// each time that changes (bootShell's `onPeers`): `[key 32][direct u8]` apiece, 1 once the
-// peer's link has moved off the relay to WebRTC and 0 while the relay still forwards it
-// (seedkernel §12.7). So the page hears of a change as it happens, and polls nothing.
-function onPeers(bytes) {
+// The relay's state, who is linked and how each is reached are the transport's to say as
+// well, and it says so each time any of it changes (bootShell's `onStatus`): one byte for the
+// relay (`showRelay`), then `[key 32][direct u8]` for each linked peer, 1 once the peer's
+// link has moved off the relay to WebRTC and 0 while the relay still forwards it (seedkernel
+// §12.7). So the page hears of a change as it happens, and polls nothing.
+function onStatus(status) {
+  relayNow = status[0];
+  showRelay();
   routesNow = [];
-  for (let off = 0; off + 33 <= bytes.length; off += 33) {
-    routesNow.push({ id: bytesToHex(bytes.subarray(off, off + 32)), direct: bytes[off + 32] === 1 });
+  for (let off = 1; off + 33 <= status.length; off += 33) {
+    routesNow.push({ id: bytesToHex(status.subarray(off, off + 32)), direct: status[off + 32] === 1 });
   }
   followPeers();
 }
@@ -1436,8 +1439,8 @@ function roomsChanged() {
 }
 
 /** Be on the relay at `origin`: the room client in every joined room, and the transport
- *  registered there, so this node's key can be called. Answers the relay's state as
- *  `pollRelay` reads it. */
+ *  registered there, so this node's key can be called. Over once the transport is
+ *  registered, or once that attempt has failed. */
 async function joinRelay(origin, relaySecret) {
   const fresh = relay?.origin !== origin || relay.relaySecret !== relaySecret;
   if (fresh) {
@@ -1463,7 +1466,7 @@ async function joinRelay(origin, relaySecret) {
   if (relaySecret) op.text(relaySecret);
   const answer = shell.call(NET_PROTO, op.build());
   if (!answer) throw new Error(`nothing claims ${NET_PROTO}`);
-  const state = (await answer)[0];
+  await answer;
   // The rooms are joined once the transport is registered: a room tells its members of this
   // node, and one of them calls it as soon as it hears.
   if (fresh && relay?.client === client) {
@@ -1471,7 +1474,6 @@ async function joinRelay(origin, relaySecret) {
     // Contacts are called through this relay now.
     syncPeers();
   }
-  return state;
 }
 
 /** Join the room `name`, beside any this page is already in. */
@@ -2035,11 +2037,10 @@ async function connectRelay() {
     setRelayPill("connecting", "connecting");
     shellPrint(`Connecting to ${target.origin}...`, "sys");
     if (target.room) await joinRoom(target.room);
-    const state = await joinRelay(target.origin, relaySecret);
+    await joinRelay(target.origin, relaySecret);
     if (relayJoin !== join) return; // disconnected meanwhile, or connecting elsewhere
     join.joining = false;
-    relayShown = state;
-    showRelayState(state);
+    showRelay();
   }
   catch (err) {
     if (relayJoin !== join) return;
@@ -2080,18 +2081,16 @@ function showRelayButton() {
   relayConnectBtn.classList.toggle("primary", !relay);
 }
 
-// The relay link is the transport's, so its state is asked of the transport: 0 none
-// joined, 1 registered, 2 dropped and redialing (seedkernel §12.6). Polled, and shown
-// only when it changes; a join shows as connecting until the transport answers it with
-// that state, once registered or once that attempt has failed.
+// The relay link is the transport's, which tells its state each time it changes
+// (`onStatus`): 0 none joined, 1 registered, 2 dropped and redialing (seedkernel §12.6). It
+// is shown only when it is not what is shown already, and not while a join is under way:
+// that shows as connecting until it is over, registered or failed.
+let relayNow = 0;
 let relayShown = -1;
-async function pollRelay() {
-  try {
-    const answer = shell.call(NET_PROTO, new OpArgs("relayState").build());
-    const state = answer ? (await answer)[0] : 0;
-    if (state !== relayShown && !relayJoin?.joining) { relayShown = state; showRelayState(state); }
-  } catch {}
-  setTimeout(pollRelay, 1000);
+function showRelay() {
+  if (relayNow === relayShown || relayJoin?.joining) return;
+  relayShown = relayNow;
+  showRelayState(relayNow);
 }
 
 /** The joined rooms in a few words, for the pill and the status line. */
@@ -2148,7 +2147,7 @@ async function joinTypedRoom() {
   if (!relay) await connectRelay();
 }
 
-pollRelay();
+showRelay();
 relayConnectBtn.addEventListener("click", () => (relay ? disconnectRelay() : connectRelay()));
 roomJoinBtn.addEventListener("click", joinTypedRoom);
 for (const [field, act] of [[relayUrlInput, connectRelay], [relaySecretInput, connectRelay], [relayRoomInput, joinTypedRoom]]) {
@@ -2381,7 +2380,7 @@ roomsChanged();
 if (savedRelayUrl) connectRelay();
 
 // Authenticated peer truth stays in the transport guest, which tells the page who is linked
-// each time that changes (`onPeers`): the page draws and passes on what it was told, and
+// each time that changes (`onStatus`): the page draws and passes on what it was told, and
 // never mirrors transitions or drives reconnection/fan-out from a client-side Set.
 // What it hears is also what the apps are told is linked (`postContext`), with the rooms
 // and the contacts: each app's guest is told when any of them changes.

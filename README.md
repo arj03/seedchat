@@ -749,7 +749,7 @@ build/smoke scripts:
 | Import | Used for |
 | --- | --- |
 | `seedkernel-wasm` | Node `loadCrypto()` in the offline bundle builders and the headless smoke test. |
-| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.8): the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. The page's `admit` composes the offers and shell pins and the consent gate. Its `Shell.call` is the host's own door into a co-resident guest's `services` claim, which is how the page asks the transport anything. Its `onPeers` option is how the page is told who is linked, and whether directly or through the relay, each time that changes: the peer pill, the peer list and what the apps are told follow it. |
+| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.8): the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. The page's `admit` composes the offers and shell pins and the consent gate. Its `Shell.call` is the host's own door into a co-resident guest's `services` claim, which is how the page asks the transport anything. Its `onStatus` option is how the page is told the relay's state, who is linked, and whether directly or through the relay, each time any of it changes: the relay pill, the peer pill, the peer list and what the apps are told follow it. |
 | `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` and `TRANSPORT_SERVICE` — the seedkernel-shipped transport bundle as raw bytes, and the local service id it claims, used by the headless smoke assertions (§12.6); browser boot gets the same artifact through `bootShell`. |
 | `seedkernel-wasm/bundle` | `verifyBundle` — the one call that unpacks and checks an offered bundle (`peekBundle`) — and `genesisHash`, the hash the consent gate's digest of a whole bundle is built from. The browser only verifies; peer attribution uses its node public key. |
 | `seedkernel-wasm/bundle-author` | `authorBundle`, `guestOpFraming` and `hybridAuthorKeysFromSeed` in the offline `build-app-bundle.mjs` and `build-boot-bundles.mjs` scripts. This entry point is never imported by the browser shell. |
@@ -810,8 +810,9 @@ Three properties serve as the summary; the details live in the seedkernel docs:
   questions go the same way: "who is linked" is a
   call on `_net` through `Shell.call`, not a field on the adapter, because links
   are the transport guest's and the adapter knows only sockets. And the transport tells
-  the page who is linked, and whether directly, each time that changes (`bootShell`'s
-  `onPeers`), so the page follows its links without polling them.
+  the page its relay's state, who is linked, and whether directly, each time any of it
+  changes (`bootShell`'s `onStatus`), so the page follows its relay and its links without
+  polling them.
 
 The browser JS entry points are declared in exactly two places: the imports at the top of
 `shell.js`, and the inline import map in `shell.html`. The page's CSP allows
