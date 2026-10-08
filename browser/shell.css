@@ -561,8 +561,7 @@
   }
   .peer-route.direct  { color: var(--ok);   border-color: #2d4d3a; background: #14241a; }
   .peer-route.relayed { color: var(--warn); border-color: #4d4023; background: #2a2410; }
-  .peer-route.calling,
-  .peer-route.waiting { color: var(--muted); }
+  .peer-route.calling { color: var(--muted); }
   .peer-route.silent  { color: var(--err);  border-color: #4d2828; background: #2a1414; }
   /* Where a peer is known from: its rooms, or that it is a contact. */
   .peer-row-where {

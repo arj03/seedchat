@@ -130,6 +130,18 @@ export function bundleDigest(v, hash) {
     return hash(all);
 }
 
+/** The shell's admission gate, the one predicate `bootShell` takes as `admit` (seedkernel
+ *  §12.5). `pins` are the shell's own boot bundles, each `{ author, app }` with the author in
+ *  hex: bytes the deployment shipped, loaded before any dialog could run, so there is
+ *  nothing there for a click to decide. Every other bundle is one the user consented to:
+ *  `consents` holds the digest of each (`bundleDigest`, in hex), and admitting a bundle
+ *  takes its consent, so one consent is one install. */
+export function admitGate(pins, consents, hash) {
+    const hex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    return (v) => pins.some((p) => p.author === hex(v.author) && p.app === v.manifest.app)
+        || consents.delete(hex(bundleDigest(v, hash)));
+}
+
 /** The context as the `ctx` op carries it: JSON with every key and id in lowercase hex.
  *
  *    { api, me, nick, rooms: [{ id, name, members: [key] }], linked: [key],
@@ -143,5 +155,5 @@ export function bundleDigest(v, hash) {
  *  one character per byte and parses. A contact's secret is never in it. */
 export function contextJson(context) {
     return JSON.stringify({ api: APP_API, ...context })
-        .replace(/[\u0080-￿]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+        .replace(/[\u0080-\uffff]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
 }

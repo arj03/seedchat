@@ -805,18 +805,18 @@ try {
   check(!(await contactsOf(A)).includes(keyB) && !(await contactsOf(B)).includes(keyA), "neither lists the other as its peer");
 
   // 25. a peer that has left a room is not called again. B joins A's room and the two link,
-  //     the smaller key calling. The other one leaves. Then the one that stayed looks for
-  //     a peer that is not there, which has it call whoever it still wants a link to: the
-  //     peer that left is not one of those.
+  //     each calling the other. B leaves. Then A looks for a peer that is not there, and is
+  //     told so by the call it makes: the peer that left is not called with it.
   await page(B, `document.getElementById('relay-room').value = 'e2e'; ${click("join-room")}`);
   await waitFor("the two link again as room-mates", async () =>
     (await peerPill(A)).startsWith("1 peer") && (await peerPill(B)).startsWith("1 peer"));
-  const [stays, leaves] = keyA < keyB ? [A, B] : [B, A];
-  await page(leaves, clickButton("room-list", "Leave"));
-  await waitFor(`${stays.name}: the peer that left the room is gone`, async () => (await peerPill(stays)).startsWith("0 peers"));
-  await page(stays, `document.getElementById('add-contact').value = '${"cd".repeat(32)}'; ${click("add-contact-btn")}`);
+  await page(B, clickButton("room-list", "Leave"));
+  await waitFor("A: the peer that left the room is gone", async () => (await peerPill(A)).startsWith("0 peers"));
+  await page(A, `document.getElementById('add-contact').value = '${"cd".repeat(32)}'; ${click("add-contact-btn")}`);
+  await waitFor("A: a peer that is not there reads as giving no answer", async () =>
+    (await page(A, "document.querySelector('#peer-list .peer-route.silent')?.textContent")) === "no answer");
   await sleep(2000);
-  check((await peerPill(stays)).startsWith("0 peers"), `${stays.name}: looking for a peer that is not there does not call the one that left`);
+  check((await peerPill(A)).startsWith("0 peers"), "A: looking for a peer that is not there does not call the one that left");
 
 } catch (err) {
   failure = err;

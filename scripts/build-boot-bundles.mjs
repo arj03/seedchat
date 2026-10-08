@@ -10,25 +10,24 @@
 //   node scripts/build-boot-bundles.mjs
 //
 // Signed under chat-author.key — the SAME author every app build signs under
-// (scripts/build-app-bundle.mjs mints it on first run): an author is a key set, not a
-// program, and this demo has exactly one. Each app's freshness lineage is its own,
-// though: <name>-author.version tracks that app's high-water mark, because the runtime's
-// freshness store keys on (author, app).
+// (scripts/author.mjs): an author is a key set, not a program, and this demo has exactly
+// one. Each app's freshness lineage is its own, though: <name>-author.version tracks that
+// app's high-water mark, because the runtime's freshness store keys on (author, app).
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadCrypto } from "seedkernel-wasm";
-import { authorBundle, guestOpFraming, hybridAuthorKeysFromSeed } from "seedkernel-wasm/bundle-author";
+import { authorBundle, guestOpFraming } from "seedkernel-wasm/bundle-author";
 import { OFFER_PROTO, OFFERS_APP, OFFERS_REQUIRES, offersGuestSource } from "../browser/offers-app.js";
 import { SHELL_PROTO, CALL_PROTO, SHELL_APP, SHELL_REQUIRES, shellGuestSource } from "../browser/shell-app.js";
+import { authorKeys, nextVersion, saveVersion } from "./author.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
 
 const toHex = (b) => Buffer.from(b).toString("hex");
-const fromHex = (h) => Uint8Array.from(Buffer.from(h, "hex"));
 
 /** What stands in front of each guest: seedkernel's op-frame, then the network library
  *  every guest that reaches `_net` shares (assembly/guest-lib/net.js). LF, because these
@@ -47,33 +46,20 @@ const BUNDLES = [
 
 const sodium = await loadCrypto();
 
-// The author key: read, never minted, here — build-app-bundle.mjs owns minting it, since
-// a clean clone builds a chat app first (`npm run build` orders them that way).
-const keyPath = join(root, "chat-author.key");
-if (!existsSync(keyPath)) {
-  throw new Error(`${keyPath} not found — run a chat-app build first `
-    + "(npm run build:chat-app mints it via scripts/build-app-bundle.mjs)");
-}
-const keys = hybridAuthorKeysFromSeed(sodium, fromHex(readFileSync(keyPath, "utf8").trim()).slice(0, 32));
+const keys = authorKeys(sodium);
 
 for (const b of BUNDLES) {
-  // Freshness: this app's OWN high-water mark, beside the key under its own file.
-  const versionPath = join(root, `${b.name}-author.version`);
-  let prevVersion = 0;
-  if (existsSync(versionPath)) {
-    const v = Number(readFileSync(versionPath, "utf8").trim());
-    if (Number.isInteger(v) && v > 0) prevVersion = v;
-  }
   const { blob, manifest, author } = authorBundle(sodium, keys, {
     app: b.app,
-    version: prevVersion + 1,
+    // Freshness: this app's OWN high-water mark, beside the key under its own file.
+    version: nextVersion(b.app),
     protocols: b.protocols,
     // Guest-only: neither app does a transform of its own.
     modules: [],
     guestSource: b.guestSource,
     guestRequires: b.guestRequires,
   });
-  writeFileSync(versionPath, `${manifest.version}\n`);
+  saveVersion(b.app, manifest.version);
 
   const skbOutPath = join(root, "bundle", `${b.name}.skb`);
   mkdirSync(dirname(skbOutPath), { recursive: true });

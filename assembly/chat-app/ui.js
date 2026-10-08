@@ -57,37 +57,32 @@ const convName = document.getElementById("conv-name");
 const leaveBtn = document.getElementById("leave-btn");
 const menuBtn = document.getElementById("menu-btn");
 const emptyNote = document.getElementById("empty");
-let myPk = null;
+// This node's key, in hex as every key here is: "" until the context has said.
+let me = "";
 // What this node calls itself, as the context says: "" for nothing.
 let myNick = "";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-function shortPk(pk) { return toHex(pk.slice(0, 4)); }
-function arraysEqual(a, b) {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}
+function short(id) { return id.slice(0, 8); }
 
 // ── who we know ─────────────────────────────────────────────────────────
-// pk hex → { id, pk, nick, linked, contact }. Fed by the node's context, and by a render
+// pk hex → { id, nick, linked, contact }. Fed by the node's context, and by a render
 // from someone it does not list.
 const people = new Map();
-function person(pk) {
-  const id = toHex(pk);
+function person(id) {
   let p = people.get(id);
-  if (!p) { p = { id, pk, nick: "", linked: false, contact: false }; people.set(id, p); }
+  if (!p) { p = { id, nick: "", linked: false, contact: false }; people.set(id, p); }
   return p;
 }
 // The rooms this node is in, as the context says: room id hex → { id, name, members },
 // `members` the key hex of everyone the relay lists there.
 const rooms = new Map();
-function personName(p) { return p.nick ? `${p.nick} (${shortPk(p.pk)})` : shortPk(p.pk); }
+function personName(p) { return p.nick ? `${p.nick} (${short(p.id)})` : short(p.id); }
 function nameOfId(id) {
   const p = people.get(id);
-  return p ? personName(p) : id.slice(0, 8);
+  return p ? personName(p) : short(id);
 }
 
 // ── conversations ───────────────────────────────────────────────────────
@@ -176,8 +171,8 @@ function renderSide() {
   directList.replaceChildren();
   const joined = [...rooms.values()].sort((a, b) => a.name.localeCompare(b.name));
   for (const room of joined) {
-    const id = toHex(room.id), c = convs.get(roomKey(id));
-    roomList.appendChild(convButton(roomKey(id), room.name, c ? c.unread : 0));
+    const c = convs.get(roomKey(room.id));
+    roomList.appendChild(convButton(roomKey(room.id), room.name, c ? c.unread : 0));
   }
   if (joined.length === 0) sideNote(roomList, "no room joined");
   // Every contact and everyone linked is one click from a direct chat, as well as everyone
@@ -221,10 +216,10 @@ function authorSpan(pk, tag) {
   const author = document.createElement("span");
   author.className = "line-author";
   author.textContent = tag + ":";
-  if (!(myPk && arraysEqual(pk, myPk))) {
+  if (pk !== me) {
     author.classList.add("clickable");
     author.title = "Direct message";
-    author.addEventListener("click", () => openConv(directKey(toHex(pk))));
+    author.addEventListener("click", () => openConv(directKey(pk)));
   }
   return author;
 }
@@ -300,12 +295,12 @@ function route(type, pk, body, isMe) {
     case CHAT_TYPE_DIRECT_TEXT:
     case CHAT_TYPE_DIRECT_IMAGE: {
       if (body.length < 32) return null;
-      const to = body.slice(0, 32);
+      const to = toHex(body.slice(0, 32));
       let other;
       if (isMe) other = to;
-      else if (myPk && arraysEqual(to, myPk)) other = pk;
+      else if (to === me) other = pk;
       else return null;                           // addressed to someone else
-      return { c: getConv(directKey(toHex(other))), image: type === CHAT_TYPE_DIRECT_IMAGE, content: body.slice(32) };
+      return { c: getConv(directKey(other)), image: type === CHAT_TYPE_DIRECT_IMAGE, content: body.slice(32) };
     }
   }
   return null;
@@ -314,7 +309,7 @@ function route(type, pk, body, isMe) {
 /** Say that `id` has a new nick, in every conversation it is part of: the rooms it is in,
  *  and a direct chat with it. */
 function sayNick(id, nick, isMe) {
-  const said = nick ? `${id.slice(0, 8)} is now known as ${nick}` : `${id.slice(0, 8)} no longer has a nick`;
+  const said = nick ? `${short(id)} is now known as ${nick}` : `${short(id)} no longer has a nick`;
   for (const [roomId, room] of rooms) {
     if (isMe || room.members.has(id)) print(said, "sys", getConv(roomKey(roomId)));
   }
@@ -326,18 +321,18 @@ function sayNick(id, nick, isMe) {
  *  who is in each, the linked peers, the contacts, and what each peer calls itself. */
 function onContext(ctx) {
   // The first context is where things stand, not news: nobody's nick is announced for it.
-  const first = !myPk;
+  const first = !me;
   if (first) {
-    myPk = fromHex(ctx.me);
-    emptyNote.textContent = `You are ${shortPk(myPk)}. Join a room on the Network tab, or add a contact, to start chatting.`;
+    me = ctx.me;
+    emptyNote.textContent = `You are ${short(me)}. Join a room on the Network tab, or add a contact, to start chatting.`;
   }
   rooms.clear();
-  for (const r of ctx.rooms) rooms.set(r.id, { id: fromHex(r.id), name: r.name, members: new Set(r.members) });
+  for (const r of ctx.rooms) rooms.set(r.id, { id: r.id, name: r.name, members: new Set(r.members) });
   for (const p of people.values()) p.linked = p.contact = false;
-  for (const id of ctx.linked) person(fromHex(id)).linked = true;
-  for (const id of ctx.contacts) person(fromHex(id)).contact = true;
+  for (const id of ctx.linked) person(id).linked = true;
+  for (const id of ctx.contacts) person(id).contact = true;
   // Nicks are the shell's, a peer's and this node's own alike.
-  for (const id of Object.keys(ctx.nicks)) person(fromHex(id));
+  for (const id of Object.keys(ctx.nicks)) person(id);
   for (const p of people.values()) {
     const nick = ctx.nicks[p.id] ?? "";
     if (nick === p.nick) continue;
@@ -348,7 +343,7 @@ function onContext(ctx) {
     myNick = ctx.nick;
     if (!first) sayNick(ctx.me, myNick, true);
   }
-  meLabel.textContent = myNick ? `${myNick} (${shortPk(myPk)})` : `${shortPk(myPk)} — set a nick on the Network tab`;
+  meLabel.textContent = myNick ? `${myNick} (${short(me)})` : `${short(me)} — set a nick on the Network tab`;
   // A room this node left takes its conversation with it.
   for (const c of [...convs.values()]) if (c.kind === "room" && !rooms.has(c.name)) closeConv(c);
   if (!active && rooms.size > 0) openConv(roomKey([...rooms.keys()][0]));
@@ -362,12 +357,12 @@ function onFrame(payload) {
   const type  = payload[p++];
   const pkLen = payload[p++];
   if (p + pkLen > payload.length) return;
-  const pk = payload.slice(p, p + pkLen); p += pkLen;
+  const pk = toHex(payload.slice(p, p + pkLen)); p += pkLen;
   const body = payload.slice(p);
-  const isMe = !!myPk && arraysEqual(pk, myPk);
+  const isMe = pk === me;
   // The sender's nick is the context's, whoever drew the frame.
   const nick = isMe ? myNick : person(pk).nick;
-  const tag = nick ? `${nick} (${shortPk(pk)})` : shortPk(pk);
+  const tag = nick ? `${nick} (${short(pk)})` : short(pk);
   const cls = isMe ? "me" : "peer";
   const r = route(type, pk, body, isMe);
   if (!r) return;

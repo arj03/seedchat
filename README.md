@@ -282,7 +282,7 @@ nick is a peer's own word.
 | `browser/shell.*` | The browser shell: identity and nick, admission policy, the transport, offers and shell boot loads, the sockets the transport's WebRTC mesh runs over, the rooms, peers and contacts, and a sandboxed iframe for each installed app. The inline import map in `shell.html` names the seedkernel surface. |
 | `browser/app-api.js` | The contract between the shell and any app, in one place: the contract version, what an app may reach, what the shell reads off a signed manifest (`appFacts`), the digest a consent names, and the two ops the shell calls on an app's guest. The shell gates and drives every bundle through it, and the builder refuses to sign what it would refuse. |
 | `browser/offers-app.js` | The offers app *shape*: the `offer/v1` id, the app id `offers`, its authority (`fs` for the offers that arrive, `_net` for the ones this node makes), and its guest source — a claim, a keyspace and a `send` op, no module. `scripts/build-boot-bundles.mjs` signs it into the boot bundle. |
-| `browser/shell-app.js` | The shell app *shape*, how one page talks to another: the app id `shell`, its one reach (`_net`), its two claims, and its guest source — it hands what a peer sent under either claim to the page, and has an op for each that puts the page's on the wire. `shell/v1` is what a page tells another about itself: `{ peer }`, that it added or removed the other as a peer, and `{ nick }`, what it calls itself. `call/v1` is a call's signaling. The page tells the two apart by the claim a frame arrived under. |
+| `browser/shell-app.js` | The shell app *shape*, how one page talks to another: the app id `shell`, its one reach (`_net`), its two claims, and its guest source — it hands what a peer sent under either claim to the page, and has an op for each that puts the page's on the wire. A `tell` answers whether the peer's page got it, which is also how the page calls a peer it has no link to. `shell/v1` is what a page tells another about itself: `{ peer }`, that it added or removed the other as a peer, and `{ nick }`, what it calls itself. `call/v1` is a call's signaling. The page tells the two apart by the claim a frame arrived under. |
 | `browser/view-guard.js` | What holds a view to its sandbox: `guardView` makes the page a view is loaded as, the author's own with a Content Security Policy in front that lets it make no request, and a prelude, the one script that policy lets the parser run, which takes WebRTC out of the realm and then runs the view's scripts. See [The view](#3-the-view-uihtml). |
 | `browser/media-rtc.js` | The call feature: `MediaCalls`, one `RTCPeerConnection` per peer that the page owns, beside the transport's, with perfect negotiation signaled over `call/v1`. A node in a call tells its peers so (`{ call }`), and a connection is opened only between two that have each said they are in the same one. Live media is the page's own — the host holds only the transport's connections. |
 | `assembly/chat-app/` | Chat — text and images, in several rooms and in direct chats. `app.json` says what the bundle is, `guest.js` is its guest, which holds the chat wire vocabulary and decides who each frame is for, `index.ts` is its module, the one transform that draws a frame, and `ui.html` its view, with the view's CSS and JS in files of their own (`ui.css`, `ui.js`) beside the page. |
@@ -295,6 +295,7 @@ nick is a peer's own word.
 | `scripts/app-source.mjs` | Reads an app directory (`app.json` and what it names) into what gets signed, putting a view's stylesheets and scripts into its page. The builder and the smoke test share it. |
 | `scripts/build-app-bundle.mjs` | The offline bundle author: signs an app directory into a `.skb` under `chat-author.key`, tracking a monotonic freshness mark per app label in `<app>-author.version`. |
 | `scripts/build-boot-bundles.mjs` | Signs the offers and shell apps' guest-only bundles under the same key, each with its own freshness mark in `<name>-author.version`. |
+| `scripts/author.mjs` | The author key and each app's version count, which both builders sign through: whichever runs first mints the key. |
 | `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/`, plus the browser libsodium and the QuickJS realm engine. Refuses a stale seedkernel build. |
 | `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat app and the shell's two ops, replaces it in place with a later build, round-trips an offer through the offers app, and a page notice and a call signal through the shell app, each under its own claim, carries a frame and a block of audio through jam's guest, and a cast and a tell through the room pipe with no guest behind it. |
 | `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, an offer, messages, an app replaced in place by a bundle dropped over it, a direct message, a call that reaches its peer only once accepted, with a microphone muted and a camera turned off and on again, and one turned down, removing an app, and a reload. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. Then what a view may not do: each app's view tries a request, a socket, a peer connection and a script in a frame of its own, against a server that must hear nothing, then a script that names a file on the page's own server, and asks for a contact the node has never met. Last, one tab removes the other as its peer and hangs up, and the other still hears of it. The FLAC file it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
@@ -768,9 +769,9 @@ the transport bundle speaks its control wire, registering through its `relay` op
 and redialing a relay that drops, and the shell meets the room with seedrelay's room
 client. The shell owns only the selected URL, room, credentials, and UI.
 
-Plus two on the guest side. The chat module defines its two memory-layout
-literals — `PK_LEN = 32` and `PRIV_USER_OFF = 0` — alongside its layout
-comments (§4, `assembly/chat-app/index.ts`). And guest source spells the
+Plus two on the guest side. The chat module defines its one memory-layout
+literal — `PK_LEN = 32` — alongside its layout comments (§4,
+`assembly/chat-app/index.ts`). And guest source spells the
 transport's `send` and `peers` ops and its service name `_net` by hand
 (`assembly/guest-lib/net.js`), since a guest imports nothing; seedkernel's host reads the
 protocol a `send` names as the transport reads it (§12.10), and the smoke test runs the
@@ -790,8 +791,9 @@ Three properties serve as the summary; the details live in the seedkernel docs:
   operation, and names its room-mates with `welcome`, so their calls pass it. It
   registers on the relay with the `relay` operation, hands the transport each room-mate
   and contact it calls as a `relay+` address with `addr`, and drops a peer it no longer
-  wants with `forget`; the transport links to them through the relay and moves each
-  link to WebRTC itself
+  wants with `forget`. It calls one by telling its page something through the shell app:
+  the transport dials a peer it is sent to, and the answer says whether anyone was there.
+  The transport links to them through the relay and moves each link to WebRTC itself
   (§12.6, §12.7, [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)).
 - **The offers and shell apps get a pin, the shell's own half of it.** `offer/v1` carries a
   signed bundle for an app that does not exist yet, so something already

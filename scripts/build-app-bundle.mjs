@@ -15,13 +15,14 @@
 // Output: <skb-out> — the signed manifest + guest + modules packed into one blob
 // (seedkernel §12.4).
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadCrypto } from "seedkernel-wasm";
-import { authorBundle, guestOpFraming, hybridAuthorKeysFromSeed } from "seedkernel-wasm/bundle-author";
+import { authorBundle, guestOpFraming } from "seedkernel-wasm/bundle-author";
 import { readAppSource } from "./app-source.mjs";
+import { authorKeys, nextVersion, saveVersion } from "./author.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
@@ -34,60 +35,21 @@ if (!appDirArg || !skbOutArg) {
 const skbOutPath = join(root, skbOutArg);
 
 const toHex = (b) => Buffer.from(b).toString("hex");
-const fromHex = (h) => Uint8Array.from(Buffer.from(h, "hex"));
 
 const sodium = await loadCrypto();
 
 const source = readAppSource(join(root, appDirArg), guestOpFraming);
 
-// Author identity: the key every build here is signed with. An author is a key set, not a
-// program, so one signs every app and every version of each. A deployment's policy would
-// list this public key as an allowed author.
-const keyPath = join(root, "chat-author.key");
-let sk, pk, mintedKey = false;
-if (existsSync(keyPath)) {
-  sk = fromHex(readFileSync(keyPath, "utf8").trim());
-  pk = sk.slice(32);
-} else {
-  const kp = sodium.crypto_sign_keypair();
-  sk = kp.privateKey; pk = kp.publicKey;
-  writeFileSync(keyPath, toHex(sk), { mode: 0o600 });
-  mintedKey = true;
-  console.log(`  minted author key → ${keyPath}`);
-}
-
-// Freshness: a monotonic high-water mark per app LABEL, because the runtime's freshness
-// store keys on (author, app). Every build of an app is one lineage under its label, and
-// the later build is the newer version. It is persisted NEXT TO
-// THE AUTHOR KEY (not derived from bundle/, which is gitignored and gets wiped) so it
-// survives a `git clean` or a build on a second machine — mirrors seedstore's
-// build-bundle.mjs. shell.js does not itself gate installs on this (installs are
-// consent-gated, not freshness-gated, §12.4) but the offline author still keeps one true
-// count rather than resetting to 1 on every run.
-const versionPath = join(root, `${source.app}-author.version`);
-let prevVersion = 0;
-if (existsSync(versionPath)) {
-  const v = Number(readFileSync(versionPath, "utf8").trim());
-  if (Number.isInteger(v) && v > 0) prevVersion = v;
-} else if (!mintedKey) {
-  // The dangerous case: a persisted key (an established namespace) but no record of
-  // how far its version has been published. Warn loudly rather than quietly restart
-  // at 1.
-  console.warn(
-    `  ⚠ author key exists but no version high-water mark (${versionPath}) — ` +
-    `restarting version at 1.\n` +
-    `    If you have already shipped bundles under this author, put the real ` +
-    `last-shipped version number in ${versionPath} and re-run.`);
-}
-const version = prevVersion + 1;
-
-const keys = hybridAuthorKeysFromSeed(sodium, sk.slice(0, 32));
+// The author key and the app's version are scripts/author.mjs's. Every build of an app is
+// one lineage under its label, and the later build is the newer version. shell.js does not
+// itself gate installs on it (installs are consent-gated, not freshness-gated, §12.4), but
+// the offline author still keeps one true count rather than resetting to 1 on every run.
+const keys = authorKeys(sodium);
+const version = nextVersion(source.app);
 
 const { blob, manifest, author } = authorBundle(sodium, keys, { ...source, version });
 
-// Record the new high-water mark beside the key, so the next build counts on from
-// here even if bundle/ is wiped.
-writeFileSync(versionPath, `${version}\n`);
+saveVersion(source.app, version);
 
 mkdirSync(dirname(skbOutPath), { recursive: true });
 writeFileSync(skbOutPath, blob);

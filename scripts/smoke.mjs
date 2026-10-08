@@ -39,7 +39,7 @@ const { signBundle, authorBundle, guestOpFraming, hybridAuthorKeysFromSeed }
   = await import("seedkernel-wasm/bundle-author");
 // The shell's contract with its apps: the gate, the consent digest, the context and the two
 // ops. The same module the browser shell runs, so what is exercised here is its contract.
-const { APP_API, APP_OP_CONTEXT, APP_OP_UI, NET_PROTO, appFacts, bundleDigest, contextJson }
+const { APP_API, APP_OP_CONTEXT, APP_OP_UI, NET_PROTO, admitGate, appFacts, bundleDigest, contextJson }
   = await import("../browser/app-api.js");
 // An app's source directory, read the way scripts/build-app-bundle.mjs reads it: the same
 // guest sources, view and module, so this test signs the bytes the builder would.
@@ -69,7 +69,7 @@ const utf8 = (s) => new TextEncoder().encode(s);
 const text = (b) => new TextDecoder().decode(b);
 const concat = (...parts) => Uint8Array.from(Buffer.concat(parts.map((p) => Buffer.from(p))));
 
-// ── the shell admit gate, in shape ────────────────────────────────────────
+// ── the shell's admit gate ────────────────────────────────────────────────
 // ONE admission predicate (§12.5), and the one branch that is actually the page's: the
 // consent gate. The transport never reaches it — bootShell installs the selected blob
 // at boot, and ordinary loading cannot acquire `link` — so the FORGED-transport check
@@ -79,17 +79,11 @@ const pendingApprovals = new Set();
 const digestOf = (v) => toHex(bundleDigest(v, (bytes) => genesisHash(sodium, bytes)));
 /** Consent to one bundle, as dropping it or accepting its offer does in the browser. */
 const consent = (blob) => pendingApprovals.add(digestOf(verifyBundle(sodium, blob)));
-function admit(v) {
-  // The offers boot bundle is pinned to the exact author and app this build produced,
-  // exactly as shell.js pins it: bytes the deployment shipped, loaded before any
-  // dialog could run, so there is nothing for a consent click to decide.
-  if (toHex(v.author) === OFFERS_AUTHOR_HEX && v.manifest.app === OFFERS_APP) return true;
-  if (toHex(v.author) === SHELL_AUTHOR_HEX && v.manifest.app === SHELL_APP) return true;
-  const hash = digestOf(v);
-  if (!pendingApprovals.has(hash)) return false;
-  pendingApprovals.delete(hash);
-  return true;
-}
+// The gate itself is the browser's (`admitGate`, app-api.js), given the same pins shell.js
+// gives it: the offers and shell boot bundles, by the exact author and app this build
+// produced.
+const admit = admitGate([{ author: OFFERS_AUTHOR_HEX, app: OFFERS_APP }, { author: SHELL_AUTHOR_HEX, app: SHELL_APP }],
+  pendingApprovals, (bytes) => genesisHash(sodium, bytes));
 
 // ── an instrumented channel pair (mirrors seedkernel's wirePair) ──────────────
 function wirePair() {
@@ -551,7 +545,12 @@ try {
   }
   const notice = utf8(JSON.stringify({ nick: "ada" }));
   const signal = utf8(JSON.stringify({ sdp: { type: "offer", sdp: "v=0" } }));
-  await aShell.invoke(writeOp(SHELL_OP_TELL, concat(identityB.publicKey, notice)));
+  // A tell answers whether the peer's page got it, which is also how a page calls a peer
+  // (shell.js `callPeer`): one nobody answers for is told so, here a key A has no address for.
+  const told = await aShell.invoke(writeOp(SHELL_OP_TELL, concat(identityB.publicKey, notice)));
+  assert(told[0] === 1, "a tell answers that the peer's page got it");
+  const unheard = await aShell.invoke(writeOp(SHELL_OP_TELL, concat(new Uint8Array(32).fill(3), notice)));
+  assert(unheard.length === 1 && unheard[0] === 0, "a tell to a peer that cannot be reached answers that it was not");
   await aShell.invoke(writeOp(SHELL_OP_SIGNAL, concat(identityB.publicKey, signal)));
   await until(() => heard.length >= 2, 4000, "a notice and a call signal");
   for (const [proto, sent, what] of [[SHELL_PROTO, notice, "notice"], [CALL_PROTO, signal, "call signal"]]) {

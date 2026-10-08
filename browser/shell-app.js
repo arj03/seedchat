@@ -33,7 +33,12 @@ export const SHELL_REQUIRES = ["_net"];
 
 /** The page's two local ops, each `[to 32][bytes …]`, sent to that peer: `tell` under
  *  `SHELL_PROTO` and `signal` under `CALL_PROTO`. The op is what names the protocol, so
- *  the page spells no id into what it sends. */
+ *  the page spells no id into what it sends.
+ *
+ *  `tell` answers whether the peer's page got it: `[1]…` once that page has answered, and
+ *  `[0]` for a peer that could not be reached or gave no answer. The transport dials a
+ *  peer it is sent to and has an address for, so a `tell` is also how the page calls one
+ *  (shell.js `callPeer`). `signal` waits for nothing. */
 export const SHELL_OP_TELL = "tell";
 export const SHELL_OP_SIGNAL = "signal";
 
@@ -45,9 +50,11 @@ export const SHELL_OP_SIGNAL = "signal";
  *    bytes themselves, which is exactly what the page's `onInbound` receives (seedkernel
  *    §12.10), with `from` and the claim beside them: the answer doubling as the
  *    notification, as offers-app.js does;
- *  - the page's `tell` and `signal` ops, `[to 32][bytes …]` — handed to `_net`
- *    fire-and-forget: neither is a round trip, and what a peer says back comes as a frame
- *    of its own. */
+ *  - the page's `tell` and `signal` ops, `[to 32][bytes …]` — handed to `_net`. A `signal`
+ *    is fire-and-forget. A `tell` waits for the peer's guest to answer it, and its answer
+ *    is the transport's: the invocation is deferred (seedkernel §12.3), so this realm is
+ *    free for the next frame while it waits. What a peer's page says back still comes as a
+ *    frame of its own. */
 export function shellGuestSource(prelude) {
   return `
 ${prelude}
@@ -59,9 +66,9 @@ async function handle(arg) {
   const { fromHost, body } = callerOf(arg);
   if (!fromHost) return arg.subarray(32);
   const { op, args: p } = readOp(body);
-  const proto = op === ${JSON.stringify(SHELL_OP_TELL)} ? SHELL_PROTO
-    : op === ${JSON.stringify(SHELL_OP_SIGNAL)} ? CALL_PROTO : null;
-  if (proto === null) return new Uint8Array(0);
-  return await netSend(p.subarray(0, 32), proto, p.subarray(32));
+  if (op === ${JSON.stringify(SHELL_OP_SIGNAL)}) return await netSend(p.subarray(0, 32), CALL_PROTO, p.subarray(32));
+  if (op !== ${JSON.stringify(SHELL_OP_TELL)}) return new Uint8Array(0);
+  globalThis.__deferred = true;
+  return await netSend(p.subarray(0, 32), SHELL_PROTO, p.subarray(32), true);
 }`;
 }

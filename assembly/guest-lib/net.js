@@ -27,16 +27,18 @@ function fromHex(h) {
  *  arguments and never the framing. The host prepends this app's own id as the caller, so
  *  the transport can tell an app's request from the platform's own events.
  *
- *  `noReply` is 1: the frame is handed to the wire and the call answers `[1]` without
- *  waiting for the far end. There is no deadline field, because the host carries the
- *  invocation's own remaining segment across every handoff (seedkernel §12.3). The
+ *  `noReply` is 1 unless `reply` is asked for: the frame is handed to the wire and the call
+ *  answers `[1]` without waiting for the far end. With `reply` it waits for what the far
+ *  end's guest answers the frame, and answers `[1][that]`, or `[0]` for a peer that could
+ *  not be reached or gave no answer. There is no deadline field, because the host carries
+ *  the invocation's own remaining segment across every handoff (seedkernel §12.3). The
  *  transport dials a peer it has an address for, and a peer it cannot reach is not
  *  reached. */
-function netSend(to, proto, payload) {
+function netSend(to, proto, payload, reply = false) {
   const args = new Uint8Array(1 + 4 + 32 + 4 + proto.length + 4 + payload.length);
   let o = 0;
   const u32 = (v) => { args[o] = v >>> 24; args[o + 1] = (v >>> 16) & 255; args[o + 2] = (v >>> 8) & 255; args[o + 3] = v & 255; o += 4; };
-  args[o++] = 1;
+  args[o++] = reply ? 0 : 1;
   u32(32); args.set(to, o); o += 32;
   u32(proto.length); for (let i = 0; i < proto.length; i++) args[o++] = proto.charCodeAt(i);
   u32(payload.length); args.set(payload, o);
